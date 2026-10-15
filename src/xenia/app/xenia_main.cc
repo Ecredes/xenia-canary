@@ -26,6 +26,8 @@
 #include "xenia/config.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/graphics_system.h"
+#include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
@@ -60,6 +62,7 @@
 #include "xenia/hid/keyboard/keyboard_hid.h"
 #endif  // XE_PLATFORM_LINUX
 #include "xenia/hid/nop/nop_hid.h"
+#include "xenia/hid/remote/remote_hid.h"
 #if !XE_PLATFORM_ANDROID
 #include "xenia/hid/sdl/sdl_hid.h"
 #endif  // !XE_PLATFORM_ANDROID
@@ -446,6 +449,23 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
+  // First, so it takes priority over real controllers while a tool has one
+  // connected. Null unless remote_input_port is set.
+  auto remote_driver =
+      xe::hid::remote::Create(window, EmulatorWindow::kZOrderHidInput, []() {
+        hid::remote::FrameCounters counters;
+        auto state = kernel::KernelState::shared();
+        auto graphics_system =
+            state ? state->emulator()->graphics_system() : nullptr;
+        if (graphics_system) {
+          counters.vblank = graphics_system->vblank_count();
+          counters.swap = graphics_system->swap_count();
+        }
+        return counters;
+      });
+  if (remote_driver && XSUCCEEDED(remote_driver->Setup())) {
+    drivers.emplace_back(std::move(remote_driver));
+  }
   if (cvars::hid.compare("nop") == 0) {
     drivers.emplace_back(
         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));

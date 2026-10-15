@@ -84,6 +84,16 @@ class GraphicsSystem {
   void Pause();
   void Resume();
 
+  // Vblanks and swaps since start, for tools that sync to guest frames (the
+  // remote input driver). Readable from any thread.
+  uint64_t vblank_count() const {
+    return vblank_count_.load(std::memory_order_relaxed);
+  }
+  uint64_t swap_count() const {
+    return swap_count_.load(std::memory_order_relaxed);
+  }
+  void MarkSwap() { swap_count_.fetch_add(1, std::memory_order_relaxed); }
+
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
 
@@ -129,6 +139,9 @@ class GraphicsSystem {
   bool paused_ = false;
   // Set on resume; the vblank thread starts its deadline from now.
   std::atomic<bool> vblank_deadline_reset_{false};
+
+  std::atomic<uint64_t> vblank_count_{0};
+  std::atomic<uint64_t> swap_count_{0};
 
   uint32_t scaled_aspect_x_ = 0;
   uint32_t scaled_aspect_y_ = 0;

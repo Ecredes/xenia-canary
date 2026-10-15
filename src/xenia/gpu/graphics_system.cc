@@ -393,6 +393,7 @@ void GraphicsSystem::MarkVblank() {
 
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
+  vblank_count_.fetch_add(1, std::memory_order_relaxed);
 
   // TODO(benvanik): we shouldn't need to do the dispatch here, but there's
   //     something wrong and the CP will block waiting for code that
