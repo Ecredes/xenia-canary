@@ -1013,6 +1013,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       std::lock_guard lock(mutex_);
 
       exit_code_ = exit_code;
+      // Set before signaled_, under mutex_, so post_execution sees it.
+      cancelled_ = !is_current_thread;
       signaled_ = true;
       cond_.notify_all();
       NotifyMultiObjectWaiters();
@@ -1074,6 +1076,19 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     // semaphore each time rather than once after the join.
     bool expected = false;
     if (thread_ && joined_.compare_exchange_strong(expected, true)) {
+      if (cancelled_) {
+        // Terminate() from another thread marks the handle signaled before
+        // the cancelled thread has exited, and this runs with mutex_ held, so
+        // joining here would stall a timed Wait (and every other waiter)
+        // until the thread finishes unwinding, forever if it never does.
+        // Detach instead so it is reaped when it exits. The suspend semaphore
+        // stays: the thread may still be blocked on it.
+        pthread_detach(thread_);
+        return;
+      }
+      // A thread that returned on its own signals just before returning, so
+      // this join is short. It must stay blocking: once Wait returns, the
+      // owner may destroy this object, which the exiting thread still uses.
       pthread_join(thread_, nullptr);
       sem_destroy(&suspend_sem_);
     }
@@ -1087,6 +1102,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   // Written under state_mutex_, but read from the suspend signal handler.
   std::atomic<uint32_t> suspend_count_;
   std::atomic<bool> joined_{false};  // Prevents a second pthread_join
+  bool cancelled_ = false;  // Terminated by another thread; under mutex_
   sem_t suspend_sem_;  // Async-signal-safe suspend/resume semaphore
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;

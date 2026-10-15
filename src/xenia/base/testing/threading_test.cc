@@ -9,7 +9,12 @@
 
 #include <array>
 
+#include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
+
+#if !XE_PLATFORM_WIN32
+#include <pthread.h>
+#endif
 
 #define CATCH_CONFIG_ENABLE_CHRONO_STRINGMAKER
 #include "third_party/catch/include/catch.hpp"
@@ -1003,6 +1008,43 @@ TEST_CASE("Create and Run Thread", "[thread]") {
   // TODO(bwrsandman): Test with different priorities
   // TODO(bwrsandman): Test setting and getting thread affinity
 }
+
+#if !XE_PLATFORM_WIN32
+TEST_CASE("Wait times out on a terminated thread that is still exiting",
+          "[thread]") {
+  // Terminate() marks the thread signaled before it has actually exited.
+  // Holding off cancellation keeps the thread alive past that point, so a
+  // timed Wait on it must not block until the thread finally exits.
+  std::atomic<bool> holding(false);
+  std::atomic<bool> exited(false);
+  auto thread = Thread::Create({}, [&holding, &exited] {
+    // Runs during the cancellation unwind, once the thread really exits.
+    struct SetOnExit {
+      std::atomic<bool>& flag;
+      ~SetOnExit() { flag = true; }
+    } set_on_exit{exited};
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
+    holding = true;
+    Sleep(500ms);
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, nullptr);
+    while (true) {
+      Sleep(1ms);
+    }
+  });
+  REQUIRE(spin_wait_for(1s, [&] { return holding.load(); }));
+  thread->Terminate(-1);
+
+  auto start = std::chrono::steady_clock::now();
+  Wait(thread.get(), false, 50ms);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  REQUIRE(elapsed < 250ms);
+
+  // Let the thread finish exiting before it is destroyed, then make sure a
+  // later wait still succeeds (and reaps it).
+  REQUIRE(spin_wait_for(2s, [&] { return exited.load(); }));
+  REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+}
+#endif
 
 TEST_CASE("Test Suspending Thread", "[thread]") {
   std::unique_ptr<Thread> thread;
