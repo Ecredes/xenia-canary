@@ -170,6 +170,12 @@ class UserData {
         case X_USER_DATA_TYPE::DOUBLE:
         case X_USER_DATA_TYPE::INT64:
           return sizeof(uint64_t);
+
+        // WSTRING and BINARY require additional data and are handled below.
+        case X_USER_DATA_TYPE::WSTRING:
+        case X_USER_DATA_TYPE::BINARY:
+        case X_USER_DATA_TYPE::UNSET:
+          break;
       }
 
       return sizeof(uint64_t);

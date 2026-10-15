@@ -19,6 +19,12 @@ target_link_libraries(xenia-kernel PUBLIC
   aes_128 fmt zlib-ng pugixml xenia-apu xenia-base xenia-cpu xenia-hid xenia-vfs
 )
 xe_target_defaults(xenia-kernel)
+# -Wswitch is disabled globally; enforce it here so a switch over a kernel
+# enum can't silently miss a value (an error under -Werror).
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  target_compile_options(xenia-kernel PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wswitch>)
+endif()
 
 if(XENIA_BUILD_TESTS)
   set(CMAKE_FOLDER "tests")

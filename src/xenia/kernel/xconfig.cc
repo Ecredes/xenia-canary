@@ -167,6 +167,9 @@ uint8_t* XConfig::CategoryBase(X_CONFIG_CATEGORY category) {
       return reinterpret_cast<uint8_t*>(&xconfig_data_.iptv);
     case X_CONFIG_CATEGORY::XCONFIG_SYSTEM_CATEGORY:
       return reinterpret_cast<uint8_t*>(&xconfig_data_.system);
+    case X_CONFIG_CATEGORY::XCONFIG_DEVKIT_CATEGORY:
+      // Not emulated: XConfigData has no devkit block.
+      break;
   }
   return nullptr;
 }
