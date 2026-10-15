@@ -1102,7 +1102,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   // Written under state_mutex_, but read from the suspend signal handler.
   std::atomic<uint32_t> suspend_count_;
   std::atomic<bool> joined_{false};  // Prevents a second pthread_join
-  bool cancelled_ = false;  // Terminated by another thread; under mutex_
+  // Terminated by another thread. Written and read under mutex_.
+  bool cancelled_ = false;
   sem_t suspend_sem_;  // Async-signal-safe suspend/resume semaphore
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
