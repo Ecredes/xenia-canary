@@ -85,7 +85,7 @@ class GraphicsSystem {
   void Resume();
 
   // Vblanks and swaps since start, for tools that sync to guest frames
-  // (telemetry). Readable from any thread.
+  // (telemetry, the remote input driver). Readable from any thread.
   uint64_t vblank_count() const {
     return vblank_count_.load(std::memory_order_relaxed);
   }
