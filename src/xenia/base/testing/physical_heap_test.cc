@@ -161,16 +161,18 @@ TEST_CASE("PhysicalHeap vE0000000 alignment", "[memory]") {
     REQUIRE(translation_offset % heap.page_size() == 0);
   }
 
-  SECTION("alloc with alignment larger than page_size is rejected") {
-    // vE0000000 has a 0x1000 physical translation offset, so the host
-    // alignment check in PhysicalHeap::Alloc, which tests
-    // (address + host_address_offset_) % alignment, cannot be satisfied for
-    // an alignment above the page size where that offset is 0.
+  SECTION("alloc with alignment larger than page_size is physically aligned") {
+    // The alignment is a physical one and the guest reads it back through
+    // MmGetPhysicalAddress. The 0x1000 translation offset means the guest
+    // address itself cannot carry it.
     uint32_t alignment = 0x10000;  // 64KB
+    uint32_t size = 0x10000;
     uint32_t addr = 0;
-    bool ok = heap.Alloc(0x10000, alignment, kMemoryAllocationReserve,
+    bool ok = heap.Alloc(size, alignment, kMemoryAllocationReserve,
                          kMemoryProtectRead, false, &addr);
-    REQUIRE_FALSE(ok);
+    REQUIRE(ok);
+    REQUIRE(heap.GetPhysicalAddress(addr) % alignment == 0);
+    REQUIRE(addr + size - 1 <= heap.heap_base() + heap.heap_size() - 1);
   }
 }
 
@@ -194,10 +196,10 @@ TEST_CASE("PhysicalHeap vE0000000 AllocRange alignment", "[memory]") {
 
   SECTION("AllocRange with large alignment succeeds via bottom-up") {
     // Bottom-up search picks a low parent address that translates to a
-    // guest address inside the child heap, so BaseHeap::AllocFixed accepts
-    // it. The PhysicalHeap alignment check is host-based
-    // ((addr + host_address_offset_) % alignment), so the misalignment of
-    // the guest address itself is not rejected here.
+    // guest address inside the child heap. The PhysicalHeap alignment
+    // check is physical-based (GetPhysicalAddress(addr) % alignment), so
+    // the guest misalignment introduced by the 0x1000 physical offset is
+    // not rejected — the physical address itself is correctly aligned.
     uint32_t alignment = 0x10000;
     uint32_t addr = 0;
     bool ok = heap.AllocRange(0xE0000000, 0xFFFCFFFF, 0x10000, alignment,
