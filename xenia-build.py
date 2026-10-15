@@ -1581,77 +1581,101 @@ class GpuTestCommand(BaseBuildCommand):
         super(GpuTestCommand, self).__init__(
             subparsers,
             name="gputest",
-            help_short="Runs automated GPU diff tests against reference imagery.",
+            help_short="Replays GPU traces and compares the frames with a baseline.",
             help_long="""
-            To pass arguments to the test executables separate them with `--`.
+            Replays every .xtr trace under --trace_path with a trace dump tool
+            and saves the frames to --output_path. With --baseline, the frames
+            are compared with the output of an earlier run, for example one
+            made with an unmodified build, and the command fails if any frame
+            changed. See tools/gpu_trace_run.py and tools/gpu_trace_check.py.
+
+            To pass arguments to the trace dump tool separate them with `--`.
             """,
             *args, **kwargs)
+        self.parser.set_defaults(config="release")
         self.parser.add_argument(
             "--no_build", action="store_true",
             help="Don't build before running tests.")
         self.parser.add_argument(
-            "--update_reference_files", action="store_true",
-            help="Update all reference imagery.")
+            "--trace_path", required=True,
+            help="Trace file, or directory searched for .xtr files.")
         self.parser.add_argument(
-            "--generate_missing_reference_files", action="store_true",
-            help="Create reference files for new traces.")
+            "--backend", choices=["vulkan", "d3d12"], default="vulkan",
+            help="Trace dump tool to replay the traces with.")
+        self.parser.add_argument(
+            "--output_path", default=None,
+            help="Directory for the frames (default: build/gputest/<backend>).")
+        self.parser.add_argument(
+            "--baseline", default=None,
+            help="Output directory of an earlier run to compare the frames with.")
+        self.parser.add_argument(
+            "-j", "--jobs", type=int, default=None,
+            help="Number of traces to replay at once.")
 
     def execute(self, args, pass_args, cwd):
         print("Testing...\n")
 
-        # The test executables that will be built and run.
-        test_targets = args["target"] or [
-            "xenia-gpu-vulkan-trace-dump",
-            ]
-        args["target"] = test_targets
+        test_target = f"xenia-gpu-{args['backend']}-trace-dump"
+        args["target"] = [test_target]
 
-        # Build all targets (if desired).
+        # Build the trace dump tool (if desired). It's only generated with
+        # XENIA_BUILD_MISC, so turn that back off afterwards if it was off, to
+        # keep later builds of all targets unaffected.
         if not args["no_build"]:
+            cache_path = os.path.join(get_build_dir(args["target_arch"]),
+                                      "CMakeCache.txt")
+            misc_enabled = False
+            if os.path.exists(cache_path):
+                with open(cache_path, encoding="utf-8") as cache:
+                    misc_enabled = any(
+                        line.strip() in ("XENIA_BUILD_MISC:BOOL=ON",
+                                         "XENIA_BUILD_MISC:BOOL=TRUE")
+                        for line in cache)
+            args["cmake_defines"] = args["cmake_defines"] + [
+                "XENIA_BUILD_MISC=ON"]
             result = super(GpuTestCommand, self).execute(args, [], cwd)
+            if not misc_enabled:
+                run_cmake_configure(build_type=args["config"].title(),
+                                    cc=args["cc"],
+                                    target_arch=args["target_arch"],
+                                    extra_args=["-DXENIA_BUILD_MISC=OFF"])
             if result:
                 print("Failed to build, aborting test run.")
                 return result
 
-        # Ensure all targets exist before we run.
-        test_executables = [
-            get_bin(os.path.join(get_build_bin_path(args), test_target))
-            for test_target in test_targets]
-        for i in range(0, len(test_targets)):
-            if test_executables[i] is None:
-                print_error(f"Unable to find {test_targets[i]} - build it.")
-                return 1
+        test_executable = get_bin(
+            os.path.join(get_build_bin_path(args), test_target))
+        if test_executable is None:
+            print_error(f"Unable to find {test_target} - build it.")
+            return 1
 
-        output_path = os.path.join(self_path, "build", "gputest")
-        if os.path.isdir(output_path):
-            rmtree(output_path)
-        os.makedirs(output_path)
-        print(f"Running tests and outputting to {output_path}...")
-
-        reference_trace_root = os.path.join(self_path, "testdata",
-                                            "reference-gpu-traces")
-
-        # Run tests.
-        any_failed = False
-        result = shell_call([
+        output_path = args["output_path"] or os.path.join(
+            self_path, "build", "gputest", args["backend"])
+        run_args = [
             sys.executable,
-            os.path.join(self_path, "tools", "gpu-trace-diff.py"),
-            f"--executable={test_executables[0]}",
-            f"--trace_path={os.path.join(reference_trace_root, 'traces')}",
+            os.path.join(self_path, "tools", "gpu_trace_run.py"),
+            f"--executable={test_executable}",
+            f"--trace_path={args['trace_path']}",
             f"--output_path={output_path}",
-            f"--reference_path={os.path.join(reference_trace_root, 'references')}",
-            ] + (["--generate_missing_reference_files"] if args["generate_missing_reference_files"] else []) +
-                (["--update_reference_files"] if args["update_reference_files"] else []) +
-                            pass_args,
-                            throw_on_error=False)
+        ]
+        if args["jobs"]:
+            run_args.append(f"--jobs={args['jobs']}")
+        if pass_args:
+            run_args += ["--"] + pass_args
+        result = shell_call(run_args, throw_on_error=False)
+
+        if args["baseline"]:
+            check_result = shell_call([
+                sys.executable,
+                os.path.join(self_path, "tools", "gpu_trace_check.py"),
+                args["baseline"],
+                output_path,
+            ], throw_on_error=False)
+            result = result or check_result
+
         if result:
-            any_failed = True
-
-        if any_failed:
             print_error("one or more tests failed.")
-            result = 1
-        print(f"Check {output_path}/results.html for more details.")
         return result
-
 
 class CleanCommand(Command):
     """'clean' command.
