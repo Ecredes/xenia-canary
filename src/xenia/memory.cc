@@ -1089,7 +1089,6 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
                           uint32_t protect) {
   alignment = xe::round_up(alignment, page_size_);
   size = xe::align(size, alignment);
-  assert_true((base_address + host_address_offset_) % alignment == 0);
   uint32_t page_count = get_page_count(size, page_size_);
   uint32_t start_page_number = (base_address - heap_base_) / page_size_;
   uint32_t end_page_number = start_page_number + page_count - 1;
@@ -1836,14 +1835,8 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
   // Given the address we've reserved in the parent heap, pin that here.
   // Shouldn't be possible for it to be allocated already.
   const uint32_t address = heap_base_ + parent_address - parent_heap_start;
-  if ((address + host_address_offset_) % alignment != 0) {
-    XELOGE(
-        "PhysicalHeap::Alloc translated address {:08X} misaligned "
-        "(alignment {:08X}, physical base offset {:08X})",
-        address, alignment, parent_heap_start);
-    parent_heap_->Release(parent_address);
-    return false;
-  }
+  // The parent search already returned an alignment-aligned physical address.
+  assert_true(GetPhysicalAddress(address) % alignment == 0);
   if (!BaseHeap::AllocFixed(address, size, alignment, allocation_type,
                             protect)) {
     XELOGE(
@@ -1881,11 +1874,11 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
   // Shouldn't be possible for it to be allocated already.
   const uint32_t address =
       heap_base_ + parent_base_address - GetPhysicalAddress(heap_base_);
-  if ((address + host_address_offset_) % alignment != 0) {
+  if (GetPhysicalAddress(address) % alignment != 0) {
     XELOGE(
-        "PhysicalHeap::AllocFixed translated address {:08X} misaligned "
-        "(alignment {:08X}, physical base offset {:08X})",
-        address, alignment, GetPhysicalAddress(heap_base_));
+        "PhysicalHeap::AllocFixed physical address {:08X} misaligned "
+        "(alignment {:08X})",
+        GetPhysicalAddress(address), alignment);
     parent_heap_->Release(parent_base_address);
     return false;
   }
@@ -1933,14 +1926,8 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
   // Shouldn't be possible for it to be allocated already.
   const uint32_t address =
       heap_base_ + parent_address - GetPhysicalAddress(heap_base_);
-  if ((address + host_address_offset_) % alignment != 0) {
-    XELOGE(
-        "PhysicalHeap::AllocRange translated address {:08X} misaligned "
-        "(alignment {:08X}, physical base offset {:08X})",
-        address, alignment, GetPhysicalAddress(heap_base_));
-    parent_heap_->Release(parent_address);
-    return false;
-  }
+  // The parent search already returned an alignment-aligned physical address.
+  assert_true(GetPhysicalAddress(address) % alignment == 0);
   if (!BaseHeap::AllocFixed(address, size, alignment, allocation_type,
                             protect)) {
     XELOGE(
