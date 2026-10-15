@@ -1,0 +1,10 @@
+# ThreadSanitizer suppressions for the TSan CI job.
+#
+# Keep this list short: each entry hides a known, tracked problem and should
+# be removed when that problem is fixed.
+
+# Thread::Terminate() cancels threads asynchronously (pthread_cancel with
+# PTHREAD_CANCEL_ASYNCHRONOUS), so the cancellation unwind runs destructors
+# inside the cancellation signal. Tracked as the async-cancellation issue;
+# remove once termination is cooperative.
+signal:xe::threading::PosixCondition<xe::threading::Thread>::ThreadStartRoutine

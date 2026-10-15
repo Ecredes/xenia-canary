@@ -54,6 +54,16 @@ jobs:
       llvm_version: ${{ needs.lint.outputs.llvm_version }}
       ubuntu_base: ${{ needs.lint.outputs.ubuntu_base }}
 
+  tsan-linux:
+    name: Linux (TSan)
+    needs: [lint, commit-message]
+    if: ${{ !failure() && !cancelled() }}
+    uses: ./.github/workflows/Linux_x86_TSan.yml
+    with:
+      runs-on: ${{ needs.lint.outputs.runs-on }}
+      llvm_version: ${{ needs.lint.outputs.llvm_version }}
+      ubuntu_base: ${{ needs.lint.outputs.ubuntu_base }}
+
   # Uncomment when platform support is ready:
   # build-windows-arm64:
   #   name: Windows-ARM64
