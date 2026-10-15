@@ -491,6 +491,8 @@ TEST_CASE("RESERVED_STORE_I32_NO_RESERVATION", "[atomic]") {
       reinterpret_cast<uint32_t*>(test.memory->TranslateVirtual(guest_addr));
 
   std::atomic<bool> completed{false};
+  std::atomic<int> store_succeeded{0};
+  std::atomic<int> memory_changed{0};
   std::thread worker([&]() {
     test.Run(
         [&](PPCContext* ctx) {
@@ -499,8 +501,13 @@ TEST_CASE("RESERVED_STORE_I32_NO_RESERVATION", "[atomic]") {
           ctx->r[5] = 99;
         },
         [&](PPCContext* ctx) {
-          CHECK(ctx->r[3] == 0);   // store must fail
-          CHECK(*host_ptr == 42);  // memory unchanged
+          // Checked on the main thread: Catch2 assertions aren't safe here.
+          if (ctx->r[3] != 0) {
+            ++store_succeeded;  // store must fail
+          }
+          if (*host_ptr != 42) {
+            ++memory_changed;  // memory unchanged
+          }
         });
     completed.store(true);
   });
@@ -515,6 +522,8 @@ TEST_CASE("RESERVED_STORE_I32_NO_RESERVATION", "[atomic]") {
     FAIL("Timed out: no-reservation path likely has an infinite loop");
     std::_Exit(1);
   }
+  CHECK(store_succeeded == 0);
+  CHECK(memory_changed == 0);
 
   test.memory->SystemHeapFree(guest_addr);
 }
@@ -535,6 +544,8 @@ TEST_CASE("RESERVED_STORE_I64_NO_RESERVATION", "[atomic]") {
       reinterpret_cast<uint64_t*>(test.memory->TranslateVirtual(guest_addr));
 
   std::atomic<bool> completed{false};
+  std::atomic<int> store_succeeded{0};
+  std::atomic<int> memory_changed{0};
   std::thread worker([&]() {
     test.Run(
         [&](PPCContext* ctx) {
@@ -543,8 +554,13 @@ TEST_CASE("RESERVED_STORE_I64_NO_RESERVATION", "[atomic]") {
           ctx->r[5] = 99;
         },
         [&](PPCContext* ctx) {
-          CHECK(ctx->r[3] == 0);   // store must fail
-          CHECK(*host_ptr == 42);  // memory unchanged
+          // Checked on the main thread: Catch2 assertions aren't safe here.
+          if (ctx->r[3] != 0) {
+            ++store_succeeded;  // store must fail
+          }
+          if (*host_ptr != 42) {
+            ++memory_changed;  // memory unchanged
+          }
         });
     completed.store(true);
   });
@@ -559,6 +575,8 @@ TEST_CASE("RESERVED_STORE_I64_NO_RESERVATION", "[atomic]") {
     FAIL("Timed out: no-reservation path likely has an infinite loop");
     std::_Exit(1);
   }
+  CHECK(store_succeeded == 0);
+  CHECK(memory_changed == 0);
 
   test.memory->SystemHeapFree(guest_addr);
 }
