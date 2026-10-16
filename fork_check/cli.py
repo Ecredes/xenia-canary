@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 
 from fork_check import runners, snapshot
 from fork_check.diffparse import parse_changed_lines
@@ -80,4 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     except CheckerBroken as e:
         print(f"checker broken: {e}", file=sys.stderr)
+        return EXIT_BROKEN
+    except Exception:  # A crash must never read as exit 1, "findings".
+        traceback.print_exc()
+        print("checker broken: unexpected error (traceback above)", file=sys.stderr)
         return EXIT_BROKEN

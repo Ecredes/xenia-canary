@@ -47,6 +47,12 @@ def _includes(source: str, text: str, header: str) -> bool:
     return False
 
 
+def sources_not_in_db(touched: list[str], db_files: list[str]) -> list[str]:
+    """Touched non-header files the Linux build doesn't compile (d3d12, win32)."""
+    db_set = set(db_files)
+    return [p for p in touched if not p.endswith(HEADER_EXTS) and p not in db_set]
+
+
 def choose_tidy_sources(touched: list[str], db_files: list[str],
                         read_text: Callable[[str], str]
                         ) -> tuple[list[str], list[str]]:

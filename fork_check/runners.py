@@ -11,7 +11,8 @@ from typing import Iterable
 
 from fork_check import parsers
 from fork_check.findings import CheckerBroken, Finding
-from fork_check.tidy_sources import choose_tidy_sources, load_compile_db_files
+from fork_check.tidy_sources import (choose_tidy_sources, load_compile_db_files,
+                                     sources_not_in_db)
 
 CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -94,12 +95,17 @@ def run_flawfinder(root: pathlib.Path, files: list[str]) -> list[Finding]:
     return drop_flawfinder_ignored(findings)
 
 
+def cpplint_command(batch: list[str]) -> list[str]:
+    # cpplint 2.0 skips .inl ("not a valid file name") unless it is listed.
+    return ["cpplint", "--quiet", "--output=emacs", "--extensions=c,cc,cpp,cxx,h,hpp,inl",
+            f"--filter={CPPLINT_FILTER}", *batch]
+
+
 def run_cpplint(root: pathlib.Path, files: list[str]) -> list[Finding]:
     findings: list[Finding] = []
     for batch in _batches(files):
         # cpplint exits 1 when it reports anything.
-        proc = _run(["cpplint", "--quiet", "--output=emacs",
-                     f"--filter={CPPLINT_FILTER}", *batch], root, ok_codes=(0, 1))
+        proc = _run(cpplint_command(batch), root, ok_codes=(0, 1))
         findings += parsers.parse_cpplint(proc.stderr, str(root))
     return findings
 
@@ -117,6 +123,8 @@ def run_clang_tidy(root: pathlib.Path, build: pathlib.Path,
     sources, no_includer = choose_tidy_sources(files, db_files, read_text)
     notes = [f"note: {h} is not included by any compiled file; clang-tidy skipped it"
              for h in no_includer]
+    notes += [f"note: {s} is not in the Linux compile database (platform-specific?); "
+              "clang-tidy skipped it" for s in sources_not_in_db(files, db_files)]
     config = str(CONFIG_DIR / "clang-tidy.yaml")
 
     def tidy(path: str) -> list[Finding]:

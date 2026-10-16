@@ -25,3 +25,13 @@ class CliArgsTest(unittest.TestCase):
             code = cli.main(["--win-repo", "/w", "--commit", "c", "--base", "b"])
         self.assertEqual(code, 2)
         self.assertIn("checker broken: missing tools", err.getvalue())
+
+    def test_unexpected_exception_returns_2(self):
+        # Review finding: a traceback exited 1, which reads as "findings".
+        with mock.patch.object(cli.runners, "require",
+                               side_effect=FileNotFoundError("cmake")), \
+             redirect_stderr(io.StringIO()) as err:
+            code = cli.main(["--win-repo", "/w", "--commit", "c", "--base", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("checker broken", err.getvalue())
+        self.assertIn("FileNotFoundError", err.getvalue())

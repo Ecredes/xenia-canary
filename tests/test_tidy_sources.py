@@ -3,7 +3,8 @@ import os
 import tempfile
 import unittest
 
-from fork_check.tidy_sources import choose_tidy_sources, load_compile_db_files
+from fork_check.tidy_sources import (choose_tidy_sources, load_compile_db_files,
+                                     sources_not_in_db)
 
 FILES = {
     "src/xenia/base/a.cc": '#include "xenia/base/a.h"\n',
@@ -62,6 +63,16 @@ class ChooseTest(unittest.TestCase):
     def test_no_duplicates(self):
         sources, _ = self.choose(["src/xenia/base/b.cc", "src/xenia/base/shared.h"])
         self.assertEqual(sources, ["src/xenia/base/b.cc"])
+
+
+class NotInDbTest(unittest.TestCase):
+    def test_platform_sources_reported(self):
+        # Review finding: d3d12 / *_win.cc sources aren't in the Linux database
+        # and were skipped without a note.
+        self.assertEqual(
+            sources_not_in_db(["src/xenia/gpu/d3d12/x.cc", "src/xenia/base/a.cc",
+                               "src/xenia/base/a.h"], DB),
+            ["src/xenia/gpu/d3d12/x.cc"])
 
 
 class LoadDbTest(unittest.TestCase):

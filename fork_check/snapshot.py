@@ -14,6 +14,8 @@ SCRATCH = pathlib.Path.home() / "src" / "xenia-fork-check"
 REFERENCE_CLONE = pathlib.Path.home() / "src" / "xenia-canary"
 KEY_FILE = ".fork-check-key"
 SOURCE_GLOBS = ("*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hpp", "*.inl")
+# Shader sources: XeniaHelpers.cmake collects them with file(GLOB) as well.
+SHADER_GLOBS = ("*.xesl", "*.xesli", "*.glsl", "*.glsli", "*.hlsl", "*.hlsli")
 
 
 def _run(cmd: list[str], cwd: pathlib.Path | None = None,
@@ -38,6 +40,15 @@ def _submodule_paths() -> list[str]:
             if line and not line.startswith("-")]
 
 
+def clean(root: pathlib.Path) -> None:
+    """Removes untracked files but keeps the build and generated headers.
+
+    Every `shaders/bytecode/` dir (gpu and ui) must survive: ninja's stamps in
+    build/ say they are up to date, so deleted headers would never come back.
+    """
+    git(root, "clean", "-ffdxq", "-e", "/build/", "-e", "**/shaders/bytecode/")
+
+
 def prepare(win_repo: str, commit: str, base: str) -> pathlib.Path:
     root = SCRATCH
     if not (root / ".git").exists():
@@ -54,8 +65,7 @@ def prepare(win_repo: str, commit: str, base: str) -> pathlib.Path:
         if _run(["git", "-C", str(root), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
             raise CheckerBroken(f"commit {sha} not found after fetching {win_repo}")
     git(root, "checkout", "--force", "--detach", commit)
-    # Keep the build dir and generated shader headers between runs.
-    git(root, "clean", "-ffdxq", "-e", "build/", "-e", "src/xenia/gpu/shaders/bytecode/")
+    clean(root)
     git(root, "submodule", "sync", "--recursive")
     paths = _submodule_paths()
     args = ["-c", "protocol.file.allow=always", "submodule", "update", "--init",
@@ -82,10 +92,11 @@ def shader_targets(ninja_targets_output: str) -> list[str]:
 
 
 def _current_key(root: pathlib.Path) -> str:
-    # Sources are part of the key because CMake collects them with file(GLOB).
+    # Sources and shaders are part of the key because CMake collects them
+    # with file(GLOB).
     return cache_key(
         git(root, "ls-files", "-s", "--", "*CMakeLists.txt", "*.cmake"),
-        git(root, "ls-files", "--", *SOURCE_GLOBS),
+        git(root, "ls-files", "--", *SOURCE_GLOBS, *SHADER_GLOBS),
         git(root, "submodule", "status", "--recursive"))
 
 

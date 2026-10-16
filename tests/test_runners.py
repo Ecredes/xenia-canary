@@ -1,7 +1,7 @@
 import unittest
 
 from fork_check.findings import Finding
-from fork_check.runners import cppcheck_groups, drop_flawfinder_ignored
+from fork_check.runners import cppcheck_groups, cpplint_command, drop_flawfinder_ignored
 
 
 class CppcheckGroupsTest(unittest.TestCase):
@@ -14,6 +14,15 @@ class CppcheckGroupsTest(unittest.TestCase):
 
     def test_empty_groups_dropped(self):
         self.assertEqual(cppcheck_groups(["src/b.cc"]), [(["--language=c++"], ["src/b.cc"])])
+
+
+class CpplintCommandTest(unittest.TestCase):
+    def test_inl_files_accepted(self):
+        # cpplint 2.0 prints "Ignoring x.inl; not a valid file name" otherwise.
+        cmd = cpplint_command(["src/xenia/cpu/hir/opcodes.inl"])
+        ext = next(a for a in cmd if a.startswith("--extensions="))
+        self.assertIn("inl", ext.split("=", 1)[1].split(","))
+        self.assertEqual(cmd[-1], "src/xenia/cpu/hir/opcodes.inl")
 
 
 class FlawfinderIgnoredTest(unittest.TestCase):
