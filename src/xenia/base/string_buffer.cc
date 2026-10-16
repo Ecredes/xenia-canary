@@ -70,13 +70,19 @@ void StringBuffer::Append(const std::string_view value) {
 }
 
 void StringBuffer::AppendVarargs(const char* format, va_list args) {
-  int result = vsnprintf(nullptr, 0, format, args);
+  // Measuring consumes the va_list on some ABIs (x86-64 System V), so measure
+  // with a copy and format with the original.
+  va_list args_copy;
+  va_copy(args_copy, args);
+  int result = vsnprintf(nullptr, 0, format, args_copy);
+  va_end(args_copy);
   if (result <= 0) {
     return;
   }
   auto length = static_cast<size_t>(result);
   Grow(length + 1);
-  vsnprintf(buffer_ + buffer_offset_, buffer_capacity_, format, args);
+  vsnprintf(buffer_ + buffer_offset_, buffer_capacity_ - buffer_offset_, format,
+            args);
   buffer_offset_ += length;
   buffer_[buffer_offset_] = 0;
 }
