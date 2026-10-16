@@ -103,3 +103,14 @@ class ParseChangedLinesTest(unittest.TestCase):
 
     def test_empty_diff(self):
         self.assertEqual(parse_changed_lines(""), {})
+
+    def test_path_with_space_drops_trailing_tab(self):
+        # Real git output: a path containing a space gets a trailing tab.
+        diff = "+++ b/src/a b/c d.cc\t\n@@ -0,0 +1 @@\n+x\n"
+        self.assertEqual(parse_changed_lines(diff), {"src/a b/c d.cc": {1}})
+
+    def test_c_quoted_path_unquoted(self):
+        # git quotes paths with `"`, `\` or control characters, even with
+        # core.quotePath=false.
+        diff = r'+++ "b/src/q\"t\\u.cc"' + "\n@@ -0,0 +1 @@\n+x\n"
+        self.assertEqual(parse_changed_lines(diff), {r'src/q"t\u.cc': {1}})

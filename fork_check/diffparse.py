@@ -5,6 +5,20 @@ from __future__ import annotations
 import re
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_ESCAPE_RE = re.compile(rb'\\([0-7]{3}|.)')
+_ESCAPES = {b"a": b"\a", b"b": b"\b", b"t": b"\t", b"n": b"\n", b"v": b"\v",
+            b"f": b"\f", b"r": b"\r"}
+
+
+def _unquote(path: str) -> str:
+    """Undoes git's C-style quoting ("b/a\\"b.cc", octal UTF-8 bytes)."""
+    def unescape(match: re.Match) -> bytes:
+        code = match.group(1)
+        if len(code) == 3:
+            return bytes([int(code, 8)])
+        return _ESCAPES.get(code, code)  # `\"` and `\\` stand for themselves.
+    raw = _ESCAPE_RE.sub(unescape, path[1:-1].encode("utf-8"))
+    return raw.decode("utf-8", errors="replace")
 
 
 def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
@@ -19,7 +33,10 @@ def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
         if line.startswith("diff --git "):
             current = None
         elif line.startswith("+++ "):
-            target = line[4:]
+            # git ends a path containing a space with a tab.
+            target = line[4:].rstrip("\t")
+            if target.startswith('"') and target.endswith('"'):
+                target = _unquote(target)
             if target == "/dev/null":
                 current = None
             else:
