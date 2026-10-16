@@ -1,0 +1,2 @@
+src/xenia/base/planted.cc:7:  Missing username in TODO; it should look like "// TODO(my_username): Stuff."  [readability/todo] [2]
+src/xenia/base/planted.cc:21:  Almost always, snprintf is better than strcpy  [runtime/printf] [4]

@@ -1,0 +1,4 @@
+src/xenia/base/planted.cc:8:1: style:noConstructor: The class 'lower_class' does not declare a constructor although it has private member variables which likely require initialization.
+src/xenia/base/planted.cc:18:11: error:nullPointer: Null pointer dereference: p
+src/xenia/base/planted.cc:17:8: style:constVariablePointer: Variable 'p' can be declared as pointer to const
+src/xenia/base/planted.cc:24:9: style:unreadVariable: Variable 'a' is assigned a value that is never used.

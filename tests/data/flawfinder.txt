@@ -1,0 +1,1 @@
+src/xenia/base/planted.cc:21:  [4] (buffer) strcpy:Does not check for buffer overflows when copying to destination [MS-banned] (CWE-120).  Consider using snprintf, strcpy_s, or strlcpy (warning: strncpy easily misused). 

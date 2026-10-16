@@ -1,0 +1,48 @@
+14366 warnings generated.
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:5:11: warning: invalid case style for namespace 'Bad_Namespace' [readability-identifier-naming]
+    5 | namespace Bad_Namespace {
+      |           ^~~~~~~~~~~~~
+      |           bad_namespace
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:7:1: warning: missing username/bug in TODO [google-readability-todo]
+    7 | // TODO: unattributed todo for cpplint and clang-tidy.
+      | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      | // TODO(adam): unattributed todo for cpplint and clang-tidy.
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:8:7: warning: invalid case style for class 'lower_class' [readability-identifier-naming]
+    8 | class lower_class {
+      |       ^~~~~~~~~~~
+      |       LowerClass
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:13:7: warning: invalid case style for private member 'value' [readability-identifier-naming]
+   10 |   int Value() { return value; }
+      |                        ~~~~~
+      |                        value_
+   11 | 
+   12 |  private:
+   13 |   int value;
+      |       ^~~~~
+      |       value_
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:18:10: warning: Dereference of null pointer (loaded from variable 'p') [clang-analyzer-core.NullDereference]
+   18 |   return *p;
+      |          ^~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:17:3: note: 'p' initialized to a null pointer value
+   17 |   int* p = nullptr;
+      |   ^~~~~~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:18:10: note: Dereference of null pointer (loaded from variable 'p')
+   18 |   return *p;
+      |          ^~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:21:41: warning: Call to function 'strcpy' is insecure as it does not provide bounding of the memory buffer. Replace unbounded copy functions with analogous functions that support length arguments such as 'strlcpy'. CWE-119 [clang-analyzer-security.insecureAPI.strcpy]
+   21 | void Copy(char* dst, const char* src) { strcpy(dst, src); }
+      |                                         ^~~~~~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:21:41: note: Call to function 'strcpy' is insecure as it does not provide bounding of the memory buffer. Replace unbounded copy functions with analogous functions that support length arguments such as 'strlcpy'. CWE-119
+   21 | void Copy(char* dst, const char* src) { strcpy(dst, src); }
+      |                                         ^~~~~~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:24:7: warning: Although the value stored to 'a' is used in the enclosing expression, the value is never actually read from 'a' [clang-analyzer-deadcode.DeadStores]
+   24 |   if (a = b) {
+      |       ^   ~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:24:7: note: Although the value stored to 'a' is used in the enclosing expression, the value is never actually read from 'a'
+   24 |   if (a = b) {
+      |       ^   ~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:24:9: warning: an assignment within an 'if' condition is bug-prone [bugprone-assignment-in-if-condition]
+   24 |   if (a = b) {
+      |       ~~^~~
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:24:9: note: if it should be an assignment, move it out of the 'if' condition
+/home/adam/src/xenia-fork-check/src/xenia/base/planted.cc:24:9: note: if it is meant to be an equality check, change '=' to '=='
