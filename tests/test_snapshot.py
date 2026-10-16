@@ -3,7 +3,8 @@ import subprocess
 import tempfile
 import unittest
 
-from fork_check.snapshot import _current_key, cache_key, clean, shader_targets
+from fork_check.snapshot import (_current_key, cache_key, clean, ensure_version_h,
+                                 shader_targets)
 
 
 def make_repo(d):
@@ -32,6 +33,22 @@ class CleanTest(unittest.TestCase):
             clean(root)
             self.assertEqual([p for p in keep if not (root / p).exists()], [])
             self.assertFalse((root / "src/junk.txt").exists())
+
+
+class VersionHeaderTest(unittest.TestCase):
+    def test_written_when_missing(self):
+        # -Full found emulator_window.cc includes "version.h", which
+        # `xb` generates outside CMake.
+        with tempfile.TemporaryDirectory() as d:
+            ensure_version_h(pathlib.Path(d))
+            text = (pathlib.Path(d) / "version.h").read_text()
+            self.assertIn("#define XE_BUILD_COMMIT_SHORT", text)
+
+    def test_existing_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "version.h").write_text("// mine\n")
+            ensure_version_h(pathlib.Path(d))
+            self.assertEqual((pathlib.Path(d) / "version.h").read_text(), "// mine\n")
 
 
 class CurrentKeyTest(unittest.TestCase):

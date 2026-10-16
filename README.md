@@ -42,7 +42,8 @@ Paths excluded by upstream's `.codacy.yaml` are skipped by every tool.
 
 The configure re-runs only when CMake files, the list of tracked source files
 (CMake uses `file(GLOB)`) or submodule commits change. Typical timings: first
-run ~4 min (submodule clone), later runs ~10–30 s.
+run ~4 min (submodule clone), later runs ~10–30 s; `-Full` ~30 min
+(914 files).
 
 ## What it checks
 

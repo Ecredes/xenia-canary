@@ -110,8 +110,29 @@ def _tool_env() -> dict:
     return env
 
 
+_VERSION_H = """\
+// Placeholder written by the fork check; `xb` normally generates this file.
+#ifndef GENERATED_VERSION_H_
+#define GENERATED_VERSION_H_
+#define XE_BUILD_BRANCH "fork-check"
+#define XE_BUILD_COMMIT "fork-check"
+#define XE_BUILD_COMMIT_SHORT "fork-check"
+#define XE_BUILD_DATE __DATE__
+#endif  // GENERATED_VERSION_H_
+"""
+
+
+def ensure_version_h(build: pathlib.Path) -> None:
+    """Writes build/version.h if missing (xenia-build.py makes it, not CMake)."""
+    path = build / "version.h"
+    if not path.exists():
+        build.mkdir(parents=True, exist_ok=True)
+        path.write_text(_VERSION_H)
+
+
 def configure(root: pathlib.Path) -> pathlib.Path:
     build = root / "build"
+    ensure_version_h(build)
     key_path = build / KEY_FILE
     key = _current_key(root)
     db = build / "compile_commands.json"
