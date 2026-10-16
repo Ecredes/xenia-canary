@@ -122,9 +122,11 @@ def run_clang_tidy(root: pathlib.Path, build: pathlib.Path,
             cache[path] = (root / path).read_text(errors="replace")
         return cache[path]
 
-    sources, no_includer = choose_tidy_sources(files, db_files, read_text)
-    notes = [f"note: {h} is not included by any compiled file; clang-tidy skipped it"
-             for h in no_includer]
+    headers = [p for p in _run(["git", "ls-files", "--", "*.h", "*.hpp", "*.inl"],
+                               root).stdout.splitlines() if p.startswith("src/")]
+    sources, no_includer = choose_tidy_sources(files, db_files, read_text, headers)
+    notes = [f"note: {h} is not included by any compiled file, even through other "
+             "headers; clang-tidy skipped it" for h in no_includer]
     notes += [f"note: {s} is not in the Linux compile database (platform-specific?); "
               "clang-tidy skipped it" for s in sources_not_in_db(files, db_files)]
     config = str(CONFIG_DIR / "clang-tidy.yaml")

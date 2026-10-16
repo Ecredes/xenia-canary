@@ -65,6 +65,37 @@ class ChooseTest(unittest.TestCase):
         self.assertEqual(sources, ["src/xenia/base/b.cc"])
 
 
+# -Full found 67 headers (base/hash.h, ...) that only other headers include.
+CHAIN = {
+    "src/xenia/base/a.cc": '#include "xenia/base/mid.h"\n',
+    "src/xenia/base/far.cc": '#include "xenia/base/top.h"\n',
+    "src/xenia/base/top.h": '#include "xenia/base/mid.h"\n',
+    "src/xenia/base/mid.h": '#include "deep.h"\n',
+    "src/xenia/base/deep.h": "",
+    "src/xenia/base/x.h": '#include "y.h"\n',
+    "src/xenia/base/y.h": '#include "x.h"\n',
+}
+CHAIN_DB = ["src/xenia/base/far.cc", "src/xenia/base/a.cc"]
+CHAIN_HEADERS = sorted(p for p in CHAIN if p.endswith(".h"))
+
+
+class TransitiveTest(unittest.TestCase):
+    def choose(self, touched):
+        return choose_tidy_sources(touched, CHAIN_DB, CHAIN.__getitem__, CHAIN_HEADERS)
+
+    def test_header_reached_through_headers_uses_nearest_source(self):
+        self.assertEqual(self.choose(["src/xenia/base/deep.h"]),
+                         (["src/xenia/base/a.cc"], []))
+
+    def test_touched_source_covers_header_through_headers(self):
+        self.assertEqual(self.choose(["src/xenia/base/far.cc", "src/xenia/base/deep.h"]),
+                         (["src/xenia/base/far.cc"], []))
+
+    def test_include_cycle_without_source_reported(self):
+        self.assertEqual(self.choose(["src/xenia/base/x.h"]),
+                         ([], ["src/xenia/base/x.h"]))
+
+
 class NotInDbTest(unittest.TestCase):
     def test_platform_sources_reported(self):
         # Review finding: d3d12 / *_win.cc sources aren't in the Linux database
