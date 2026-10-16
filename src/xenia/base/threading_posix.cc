@@ -1343,7 +1343,11 @@ class PosixThread final : public PosixConditionHandle<Thread> {
                   std::function<void()> start_routine) {
     auto start_data =
         new ThreadStartData({std::move(start_routine), false, this});
-    return handle_.Initialize(params, start_data);
+    if (!handle_.Initialize(params, start_data)) {
+      delete start_data;
+      return false;
+    }
+    return true;
   }
 
   void set_name(std::string name) override {
