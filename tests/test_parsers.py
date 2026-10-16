@@ -53,6 +53,12 @@ class CppcheckTest(unittest.TestCase):
                 "src/a.cc:3:1: information:missingIncludeSystem: Include not found\n")
         self.assertEqual(parse_cppcheck(text, "/r"), [])
 
+    def test_syntax_error_ignored(self):
+        # cppcheck can't parse Catch2's TEST_CASE without include paths;
+        # Codacy reports no syntaxError issues at all.
+        text = "src/xenia/base/testing/threading_test.cc:58:1: error:syntaxError: syntax error\n"
+        self.assertEqual(parse_cppcheck(text, "/r"), [])
+
     def test_line_fields(self):
         out = parse_cppcheck("src/a.cc:12:5: warning:nullPointer: Null pointer dereference: p\n", "/r")
         self.assertEqual(len(out), 1)

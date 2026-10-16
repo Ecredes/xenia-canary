@@ -24,8 +24,11 @@ def rel(path: str, root: str) -> str | None:
 
 # Template: {file}:{line}:{column}: {severity}:{id}: {message}
 _CPPCHECK_RE = re.compile(r"^(.+?):(\d+):(\d+): (\w+):(\w+): (.*)$")
+# syntaxError: without include paths cppcheck can't parse macros such as
+# Catch2's TEST_CASE, and Codacy (which runs it the same way) reports no
+# syntaxError issues, so it drops them too.
 _CPPCHECK_IGNORED_IDS = {"missingInclude", "missingIncludeSystem",
-                         "checkersReport", "unmatchedSuppression"}
+                         "checkersReport", "unmatchedSuppression", "syntaxError"}
 
 
 def parse_cppcheck(text: str, root: str) -> list[Finding]:

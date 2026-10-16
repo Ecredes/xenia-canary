@@ -7,7 +7,16 @@ Checks: >
   clang-analyzer-*,
   google-readability-todo,
   readability-identifier-naming,
-  -bugprone-easily-swappable-parameters
+  -bugprone-easily-swappable-parameters,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-switch-missing-default-case,
+  -bugprone-branch-clone,
+  -clang-analyzer-optin.performance.Padding
+# Calibration on #1299/#1300 (2026-10-16), all hits noise:
+# - implicit-widening (7): guest sizes in 32-bit math, e.g. `size_dwords * 4`.
+# - switch-missing-default-case (2), branch-clone (1): register switch tables
+#   with deliberate no-op cases.
+# - optin.performance.Padding (1): class layout, not a bug.
 HeaderFilterRegex: '.*/src/xenia/.*'
 CheckOptions:
   readability-identifier-naming.NamespaceCase: lower_case
@@ -26,6 +35,10 @@ CheckOptions:
   # Google allows accessors and mutators named like variables: count(), set_count().
   readability-identifier-naming.MethodIgnoredRegexp: '^[a-z][a-z0-9_]*$'
   readability-identifier-naming.VariableCase: lower_case
+  # Google: the k prefix is optional for constants without static storage, so
+  # both `const uint32_t kPendingSentinel` and `constexpr int timer_count` in a
+  # function are fine.
+  readability-identifier-naming.VariableIgnoredRegexp: '^k[A-Z][A-Za-z0-9]*$'
   readability-identifier-naming.ParameterCase: lower_case
   readability-identifier-naming.MemberCase: lower_case
   readability-identifier-naming.PrivateMemberSuffix: _
@@ -34,5 +47,6 @@ CheckOptions:
   readability-identifier-naming.GlobalConstantPrefix: k
   readability-identifier-naming.StaticConstantCase: CamelCase
   readability-identifier-naming.StaticConstantPrefix: k
-  readability-identifier-naming.ConstexprVariableCase: CamelCase
-  readability-identifier-naming.ConstexprVariablePrefix: k
+  # No ConstexprVariable rule: it would also cover function-local constexpr
+  # (3 noise hits in calibration). Global and static constexpr constants are
+  # still checked by the GlobalConstant and StaticConstant rules above.

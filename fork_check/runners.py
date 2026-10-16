@@ -24,10 +24,18 @@ INSTALL = {
     "clang-tidy-20": "sudo apt install clang-tidy-20 (apt.llvm.org, llvm-toolchain-noble-20)",
     "cpplint": "pipx install cpplint",
 }
-# Only what clang-format and `xb lint` don't already enforce.
-CPPLINT_FILTER = ("-,+build/include_order,+build/include_what_you_use,"
-                  "+readability/todo,+runtime,+build/namespaces")
+# Only what clang-format and `xb lint` don't already enforce. Calibrated on
+# #1299/#1300 (2026-10-16): dropped build/include_what_you_use (14 hits;
+# xenia relies on transitive includes throughout) and build/namespaces (8 hits;
+# `using namespace` is normal in xenia .cc and test files), and
+# runtime/references (Google style allows non-const reference parameters
+# since 2020).
+CPPLINT_FILTER = ("-,+build/include_order,+readability/todo,+runtime,"
+                  "-runtime/references")
 CPPCHECK_TEMPLATE = "{file}:{line}:{column}: {severity}:{id}: {message}"
+# Codacy reports no memcpy issues although src/xenia has 300+ memcpy calls, so
+# its Flawfinder patterns leave memcpy out; mirror that.
+FLAWFINDER_IGNORED = {"memcpy"}
 _BATCH = 200  # Keeps command lines short in --full runs.
 
 
@@ -51,14 +59,31 @@ def _batches(files: list[str]):
         yield files[i:i + _BATCH]
 
 
+def cppcheck_groups(files: list[str]) -> list[tuple[list[str], list[str]]]:
+    """Splits files into (extra args, files) runs: .c as C, the rest as C++.
+
+    cppcheck guesses C for .h files and then reports syntaxError on every
+    namespace; Codacy reports no such errors, so it must parse them as C++.
+    """
+    c_files = [p for p in files if p.endswith(".c")]
+    cpp_files = [p for p in files if not p.endswith(".c")]
+    groups = [([], c_files), (["--language=c++"], cpp_files)]
+    return [(args, group) for args, group in groups if group]
+
+
 def run_cppcheck(root: pathlib.Path, files: list[str]) -> list[Finding]:
     findings: list[Finding] = []
-    for batch in _batches(files):
-        proc = _run(["cppcheck", "--quiet", "--enable=warning,style,performance",
-                     f"--template={CPPCHECK_TEMPLATE}", f"-j{os.cpu_count() or 1}",
-                     *batch], root)
-        findings += parsers.parse_cppcheck(proc.stderr, str(root))
+    for extra, group in cppcheck_groups(files):
+        for batch in _batches(group):
+            proc = _run(["cppcheck", "--quiet", "--enable=warning,style,performance",
+                         f"--template={CPPCHECK_TEMPLATE}", f"-j{os.cpu_count() or 1}",
+                         *extra, *batch], root)
+            findings += parsers.parse_cppcheck(proc.stderr, str(root))
     return findings
+
+
+def drop_flawfinder_ignored(findings: list[Finding]) -> list[Finding]:
+    return [x for x in findings if x.rule not in FLAWFINDER_IGNORED]
 
 
 def run_flawfinder(root: pathlib.Path, files: list[str]) -> list[Finding]:
@@ -66,7 +91,7 @@ def run_flawfinder(root: pathlib.Path, files: list[str]) -> list[Finding]:
     for batch in _batches(files):
         proc = _run(["flawfinder", "--dataonly", "--quiet", "--singleline", *batch], root)
         findings += parsers.parse_flawfinder(proc.stdout, str(root))
-    return findings
+    return drop_flawfinder_ignored(findings)
 
 
 def run_cpplint(root: pathlib.Path, files: list[str]) -> list[Finding]:
