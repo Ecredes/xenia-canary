@@ -72,10 +72,13 @@ Run from the xenia-canary repo, on any branch:
    ranges of added/modified lines in the new version. Deleted files and
    non-C/C++ files are dropped. Paths excluded by upstream's `.codacy.yaml`
    are also dropped from every tool, so the scan set matches Codacy's.
-3. **Compile database.** `cmake -G "Ninja Multi-Config"
-   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` with clang-20, Debug config. Configure
-   only, no build. Re-run only when a CMake file changed since the last run.
-   Headers are analyzed through the `.cc` files that include them (clang-tidy
+3. **Compile database.** `cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug
+   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DXENIA_BUILD_TESTS=ON` with clang-20.
+   Configure only, plus the SPIR-V shader header targets and a placeholder
+   `version.h` (both generated, and included by compiled files). Re-run only
+   when CMake files, the tracked source/shader list (`file(GLOB)`) or
+   submodule commits change. Headers are analyzed through the `.cc` files
+   that include them, directly or through other headers (clang-tidy
    `HeaderFilterRegex` restricted to `src/xenia/`).
 4. **Tools**, each run on the touched files (or all files with `-Full`):
 

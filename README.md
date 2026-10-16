@@ -40,6 +40,11 @@ Windows repo's branch heads into it, checks the commit out, configures CMake
 SPIR-V shader headers, and runs the tools on the touched C/C++ files.
 Paths excluded by upstream's `.codacy.yaml` are skipped by every tool.
 
+clang-tidy analyzes a touched header through a compiled file that includes
+it, directly or through other headers; headers only Windows, D3D12, a64 or
+Android code includes can't be reached from the Linux build and get a note.
+It runs one job per CPU, capped at one per 1.5 GiB of available memory.
+
 The configure re-runs only when CMake files, the list of tracked source files
 (CMake uses `file(GLOB)`) or submodule commits change. Typical timings: first
 run ~4 min (submodule clone), later runs ~10–30 s; `-Full` ~30 min
@@ -69,8 +74,9 @@ setup was needed. The WSL login shell already sets `CC`, `CXX` and
 newest `~/vulkan-sdk/*/x86_64`.
 
 The Windows repo is a partial clone, so upstream refs can't be fetched from it
-(objects missing); the scratch clone fetches only branch heads, which is
-enough because the base is an ancestor of the branch.
+(objects missing); the scratch clone fetches only branch heads and `HEAD`
+(so a detached HEAD works), which is enough because the base is an ancestor
+of HEAD. A `-Base` outside that history exits 2.
 
 ## Calibration notes (2026-10-16, on #1299 and #1300)
 
