@@ -1,0 +1,27 @@
+import io
+import unittest
+from contextlib import redirect_stderr
+from unittest import mock
+
+from fork_check import cli
+
+
+class CliArgsTest(unittest.TestCase):
+    def test_unknown_tool_is_usage_error(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            cli.parse_args(["--win-repo", "/w", "--commit", "c", "--base", "b",
+                            "--tools", "cppcheck,bogus"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_defaults(self):
+        args = cli.parse_args(["--win-repo", "/w", "--commit", "c", "--base", "b"])
+        self.assertEqual(args.scope, "changed")
+        self.assertEqual(args.tools, ["cppcheck", "flawfinder", "clang-tidy", "cpplint"])
+
+    def test_broken_returns_2(self):
+        with mock.patch.object(cli.runners, "require",
+                               side_effect=cli.CheckerBroken("missing tools")), \
+             redirect_stderr(io.StringIO()) as err:
+            code = cli.main(["--win-repo", "/w", "--commit", "c", "--base", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("checker broken: missing tools", err.getvalue())

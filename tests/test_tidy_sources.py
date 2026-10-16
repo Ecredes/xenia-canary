@@ -38,6 +38,27 @@ class ChooseTest(unittest.TestCase):
     def test_source_missing_from_db_skipped(self):
         self.assertEqual(self.choose(["src/xenia/base/new.cc"]), ([], []))
 
+    def test_relative_includes_resolve_against_the_source_dir(self):
+        # Seen in upstream: command_processor.cc includes
+        # "pm4_command_processor_implement.h" and d3d12/... includes "../...".
+        files = {
+            "src/xenia/gpu/d3d12/d3d12_cp.cc": '#include "../pm4_impl.h"\n',
+            "src/xenia/gpu/cp.cc": '#include "pm4_impl.h"\n',
+            "src/xenia/gpu/other.cc": '#include "unrelated/pm4_impl.h"\n',
+        }
+        db = ["src/xenia/gpu/other.cc", "src/xenia/gpu/d3d12/d3d12_cp.cc",
+              "src/xenia/gpu/cp.cc"]
+        self.assertEqual(
+            choose_tidy_sources(["src/xenia/gpu/pm4_impl.h"], db, files.__getitem__),
+            (["src/xenia/gpu/d3d12/d3d12_cp.cc"], []))
+
+    def test_touched_source_with_relative_include_covers_header(self):
+        files = {"src/xenia/gpu/cp.cc": '#include "pm4_impl.h"\n'}
+        self.assertEqual(
+            choose_tidy_sources(["src/xenia/gpu/cp.cc", "src/xenia/gpu/pm4_impl.h"],
+                                ["src/xenia/gpu/cp.cc"], files.__getitem__),
+            (["src/xenia/gpu/cp.cc"], []))
+
     def test_no_duplicates(self):
         sources, _ = self.choose(["src/xenia/base/b.cc", "src/xenia/base/shared.h"])
         self.assertEqual(sources, ["src/xenia/base/b.cc"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+import re
 from typing import Callable
 
 from fork_check.parsers import rel
@@ -27,8 +28,23 @@ def load_compile_db_files(db_path: str, root: str) -> list[str]:
     return files
 
 
-def _include_string(header: str) -> str:
-    return header[len("src/"):] if header.startswith("src/") else header
+_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
+
+
+def _includes(source: str, text: str, header: str) -> bool:
+    """Whether `source` includes `header` with a quoted include.
+
+    xenia includes headers by their path under src/ ("xenia/base/a.h") or
+    relative to the including file ("pm4_impl.h", "../pm4_impl.h").
+    """
+    if posixpath.basename(header) not in text:
+        return False  # Cheap pre-filter; most files don't mention it.
+    source_dir = posixpath.dirname(source)
+    for name in _INCLUDE_RE.findall(text):
+        if (posixpath.normpath(posixpath.join("src", name)) == header
+                or posixpath.normpath(posixpath.join(source_dir, name)) == header):
+            return True
+    return False
 
 
 def choose_tidy_sources(touched: list[str], db_files: list[str],
@@ -36,7 +52,6 @@ def choose_tidy_sources(touched: list[str], db_files: list[str],
                         ) -> tuple[list[str], list[str]]:
     """Returns (sources to run, touched headers no compiled file includes).
 
-    xenia includes headers by their path under src/, e.g. "xenia/base/a.h".
     A touched header is analyzed through a touched source that includes it,
     or else through the first compiled file that does.
     """
@@ -44,10 +59,10 @@ def choose_tidy_sources(touched: list[str], db_files: list[str],
     sources = [p for p in touched if p in db_set]
     no_includer: list[str] = []
     for header in (p for p in touched if p.endswith(HEADER_EXTS)):
-        needle = f'"{_include_string(header)}"'
-        if any(needle in read_text(s) for s in sources):
+        if any(_includes(s, read_text(s), header) for s in sources):
             continue
-        includer = next((s for s in db_files if needle in read_text(s)), None)
+        includer = next((s for s in db_files
+                         if _includes(s, read_text(s), header)), None)
         if includer is None:
             no_includer.append(header)
         elif includer not in sources:

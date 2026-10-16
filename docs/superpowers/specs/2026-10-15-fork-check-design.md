@@ -10,7 +10,7 @@ it changes and report anything that Codacy would flag, plus the bugs and
 style-guide violations that nothing upstream checks. Fork-only and local-only:
 nothing is added to topic branches, and no GitHub configuration changes.
 
-Later, the same tool scans the whole codebase (`--full`) to produce a baseline
+Later, the same tool scans the whole codebase (`-Full`) to produce a baseline
 report for triage into fork issues (lane C).
 
 ## Background
@@ -44,18 +44,18 @@ report for triage into fork issues (lane C).
 Run from the xenia-canary repo, on any branch:
 
 ```
-..\xenia-canary-tooling\check.ps1 [--base REF] [--all-lines | --full]
+..\xenia-canary-tooling\check.ps1 [-Base REF] [-AllLines | -Full] [-Tools cppcheck,flawfinder,clang-tidy,cpplint]
 ```
 
 - `check.ps1` is a thin wrapper that runs `fork_check.py` in the
   `Ubuntu-24.04` WSL distro through a login shell, so the toolchain matches
   upstream CI (clang-20).
 - **Base**: default `merge-base(upstream/canary_experimental, HEAD)`.
-  `--base` overrides it.
+  `-Base` overrides it.
 - **Scope**:
   - default: findings on lines added or modified since the base.
-  - `--all-lines`: all findings in files touched since the base.
-  - `--full`: all findings in all scanned files (lane C).
+  - `-AllLines`: all findings in files touched since the base.
+  - `-Full`: all findings in all scanned files (lane C).
 - **Output**: one list sorted by file and line:
   `path:line: [tool:rule] message`, then a per-tool count.
 - **Exit codes**: 0 = clean, 1 = findings, 2 = checker broken (missing tool,
@@ -77,7 +77,7 @@ Run from the xenia-canary repo, on any branch:
    only, no build. Re-run only when a CMake file changed since the last run.
    Headers are analyzed through the `.cc` files that include them (clang-tidy
    `HeaderFilterRegex` restricted to `src/xenia/`).
-4. **Tools**, each run on the touched files (or all files with `--full`):
+4. **Tools**, each run on the touched files (or all files with `-Full`):
 
    | Lane | Tool | Configuration |
    |---|---|---|
