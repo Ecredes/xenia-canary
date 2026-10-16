@@ -7,7 +7,8 @@ import os
 import pathlib
 import shutil
 import subprocess
-from typing import Iterable
+import threading
+from typing import Callable, Iterable, TypeVar
 
 from fork_check import parsers
 from fork_check.findings import CheckerBroken, Finding
@@ -38,6 +39,7 @@ CPPCHECK_TEMPLATE = "{file}:{line}:{column}: {severity}:{id}: {message}"
 # its Flawfinder patterns leave memcpy out; mirror that.
 FLAWFINDER_IGNORED = {"memcpy"}
 _BATCH = 200  # Keeps command lines short in --full runs.
+T = TypeVar("T")
 
 
 def require(tools: Iterable[str]) -> None:
@@ -137,8 +139,52 @@ def run_clang_tidy(root: pathlib.Path, build: pathlib.Path,
             raise CheckerBroken(f"clang-tidy failed on {path}:\n{out[-4000:]}")
         return found
 
-    findings: list[Finding] = []
-    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
-        for result in pool.map(tidy, sources):
-            findings += result
-    return findings, notes
+    jobs = tidy_jobs(os.cpu_count() or 1, _mem_available_kb())
+    return run_parallel(tidy, sources, jobs), notes
+
+
+# A heavy xenia translation unit peaks near 1 GB in clang-tidy (measured on
+# command_processor.cc, 2026-10-16); WSL gets half the host's RAM by default.
+_TIDY_JOB_KB = 1536 * 1024
+
+
+def tidy_jobs(cpus: int, mem_available_kb: int | None) -> int:
+    if mem_available_kb is None:
+        return max(1, cpus)
+    return max(1, min(cpus, mem_available_kb // _TIDY_JOB_KB))
+
+
+def _mem_available_kb() -> int | None:
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def run_parallel(fn: Callable[[T], list], items: list[T], jobs: int) -> list:
+    """Runs `fn` on each item; the first failure stops what hasn't started."""
+    failed = threading.Event()
+
+    def guarded(item: T) -> list:
+        if failed.is_set():
+            return []
+        try:
+            return fn(item)
+        except BaseException:
+            failed.set()
+            raise
+
+    results: list = []
+    with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
+        futures = [pool.submit(guarded, item) for item in items]
+        try:
+            for future in futures:
+                results += future.result()
+        except BaseException:
+            pool.shutdown(cancel_futures=True)
+            raise
+    return results
