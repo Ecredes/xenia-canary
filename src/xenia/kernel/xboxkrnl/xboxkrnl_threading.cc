@@ -473,9 +473,13 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             dword_t alertable,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
+  // A null guest pointer used to be forwarded as nullptr and dereferenced on
+  // the host (found by clang-analyzer-core.NullDereference). Treat it as a
+  // zero interval instead, which XThread::Delay handles as a yield.
+  // TODO(Ecredes): Verify on hardware what the kernel does with a null
+  // interval; no title is known to pass one.
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
-  return KeDelayExecutionThread(processor_mode, alertable,
-                                interval_ptr ? &interval : nullptr, context);
+  return KeDelayExecutionThread(processor_mode, alertable, &interval, context);
 }
 DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
