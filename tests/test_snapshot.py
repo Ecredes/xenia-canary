@@ -2,7 +2,10 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
+from fork_check import snapshot
+from fork_check.findings import CheckerBroken
 from fork_check.snapshot import (_current_key, cache_key, clean, ensure_version_h,
                                  shader_targets)
 
@@ -61,6 +64,62 @@ class CurrentKeyTest(unittest.TestCase):
             (root / "src/new.xesl").write_text("x")
             subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
             self.assertNotEqual(_current_key(root), before)
+
+def commit_all(root, message):
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m",
+                    message], check=True)
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+class PrepareTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = pathlib.Path(self._tmp.name)
+        self.win = make_repo(tmp / "win")
+        for name, value in (("SCRATCH", tmp / "scratch"),
+                            ("REFERENCE_CLONE", tmp / "no-reference")):
+            patcher = mock.patch.object(snapshot, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    # A local clone copies every object, so each test clones first; the bugs
+    # only show on the fetch of a later run.
+    def _first_run(self):
+        base = commit_all(self.win, "base")
+        snapshot.prepare(str(self.win), base, base)
+        return base
+
+    def test_detached_head_commit_is_fetched(self):
+        base = self._first_run()
+        subprocess.run(["git", "-C", str(self.win), "checkout", "-q", "--detach"],
+                       check=True)
+        head = commit_all(self.win, "on no branch")
+        root = snapshot.prepare(str(self.win), head, base)
+        self.assertEqual(snapshot.git(root, "rev-parse", "HEAD").strip(), head)
+
+    def test_unreachable_base_names_the_cause(self):
+        head = self._first_run()
+        subprocess.run(["git", "-C", str(self.win), "checkout", "-q", "--orphan", "x"],
+                       check=True)
+        stray = commit_all(self.win, "stray")
+        subprocess.run(["git", "-C", str(self.win), "checkout", "-q", "--detach", head],
+                       check=True)
+        subprocess.run(["git", "-C", str(self.win), "branch", "-q", "-D", "x"], check=True)
+        with self.assertRaises(CheckerBroken) as ctx:
+            snapshot.prepare(str(self.win), head, stray)
+        self.assertIn("-Base", str(ctx.exception))
+
+
+class ShaderTargetNamesTest(unittest.TestCase):
+    def test_failed_target_listing_is_broken(self):
+        failed = subprocess.CompletedProcess([], 1, "", "ninja: error: loading 'build.ninja'")
+        with mock.patch.object(snapshot, "_run", return_value=failed):
+            with self.assertRaises(CheckerBroken) as ctx:
+                snapshot.list_shader_targets(pathlib.Path("/b"), {})
+        self.assertIn("build.ninja", str(ctx.exception))
+
 
 CMAKE = "100644 aaa 0\tCMakeLists.txt\n100644 bbb 0\tcmake/XeniaHelpers.cmake\n"
 SOURCES = "src/xenia/base/a.cc\nsrc/xenia/base/b.cc\n"

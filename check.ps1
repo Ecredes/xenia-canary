@@ -8,6 +8,12 @@ param(
   [string[]]$Tools
 )
 $ErrorActionPreference = 'Stop'
+# Any unexpected error (wsl.exe missing, a $null result) is "checker broken",
+# never PowerShell's default exit 1, which reads as "findings".
+trap {
+  Write-Error $_ -ErrorAction Continue
+  exit 2
+}
 
 function Fail([string]$message) {
   Write-Error $message -ErrorAction Continue
@@ -18,7 +24,8 @@ if ($AllLines -and $Full) { Fail '-AllLines and -Full are mutually exclusive.' }
 
 $repo = git rev-parse --show-toplevel
 if ($LASTEXITCODE -or -not $repo) { Fail 'Run this from inside the xenia-canary repo.' }
-$commit = git rev-parse HEAD
+$commit = git rev-parse --verify HEAD
+if ($LASTEXITCODE -or -not $commit) { Fail 'Could not resolve HEAD (no commits yet?).' }
 if ($Base) {
   $baseSha = git rev-parse --verify "$Base^{commit}"
 } else {

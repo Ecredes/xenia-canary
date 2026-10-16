@@ -56,14 +56,17 @@ def prepare(win_repo: str, commit: str, base: str) -> pathlib.Path:
         proc = _run(["git", "clone", "--no-checkout", win_repo, str(root)])
         if proc.returncode != 0:
             raise CheckerBroken(f"cloning {win_repo} failed:\n{proc.stderr.strip()}")
-    # Only branch heads: the Windows repo is a partial clone, so upstream refs
-    # can point at objects it doesn't have. The base is the merge-base, an
-    # ancestor of the branch, so it arrives with the heads.
+    # Only branch heads and HEAD (which may be detached): the Windows repo is
+    # a partial clone, so upstream refs can point at objects it doesn't have.
+    # The base is the merge-base, an ancestor of HEAD, so it arrives too.
     git(root, "fetch", "--no-tags", "--force", win_repo,
-        "+refs/heads/*:refs/remotes/win/*")
-    for sha in (commit, base):
+        "+refs/heads/*:refs/remotes/win/*", "+HEAD:refs/remotes/win-HEAD")
+    for sha, what in ((commit, "HEAD"), (base, "base")):
         if _run(["git", "-C", str(root), "cat-file", "-e", f"{sha}^{{commit}}"]).returncode:
-            raise CheckerBroken(f"commit {sha} not found after fetching {win_repo}")
+            hint = ("; -Base must be an ancestor of HEAD or of a local branch"
+                    if what == "base" else "")
+            raise CheckerBroken(f"{what} commit {sha} not found after fetching "
+                                f"{win_repo}{hint}")
     git(root, "checkout", "--force", "--detach", commit)
     clean(root)
     git(root, "submodule", "sync", "--recursive")
@@ -89,6 +92,14 @@ def shader_targets(ninja_targets_output: str) -> list[str]:
     """Bare `*-shaders` target names from `ninja -t targets all`."""
     names = (line.split(":")[0] for line in ninja_targets_output.splitlines())
     return sorted({n for n in names if n.endswith("-shaders") and "/" not in n})
+
+
+def list_shader_targets(build: pathlib.Path, env: dict) -> list[str]:
+    proc = _run(["ninja", "-C", str(build), "-t", "targets", "all"], env=env)
+    if proc.returncode != 0:
+        raise CheckerBroken("listing ninja targets failed:\n"
+                            + (proc.stdout + proc.stderr)[-4000:])
+    return shader_targets(proc.stdout)
 
 
 def _current_key(root: pathlib.Path) -> str:
@@ -149,8 +160,7 @@ def configure(root: pathlib.Path) -> pathlib.Path:
         if proc.returncode != 0 or not db.exists():
             raise CheckerBroken("cmake configure failed:\n"
                                 + (proc.stdout + proc.stderr)[-4000:])
-    targets = _run(["ninja", "-C", str(build), "-t", "targets", "all"], env=env)
-    names = shader_targets(targets.stdout)
+    names = list_shader_targets(build, env)
     if names:
         proc = _run(["ninja", "-C", str(build), *names], env=env)
         if proc.returncode != 0:
