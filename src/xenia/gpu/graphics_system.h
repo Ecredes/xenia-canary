@@ -92,7 +92,7 @@ class GraphicsSystem {
   uint64_t swap_count() const {
     return swap_count_.load(std::memory_order_relaxed);
   }
-  void MarkSwap() { swap_count_.fetch_add(1, std::memory_order_relaxed); }
+  void MarkSwap();
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);

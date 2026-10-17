@@ -21,6 +21,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/cpu_flags.h"
@@ -613,6 +614,10 @@ void Processor::DemandDebugListener() {
 }
 
 bool Processor::OnThreadBreakpointHit(Exception* ex) {
+  // Telemetry first: once guest threads are suspended, one may hold a
+  // telemetry lock.
+  telemetry::OnPause(telemetry::PauseSource::kDebugger, true);
+
   auto global_lock = global_critical_region_.Acquire();
 
   // Suspend all threads (but ourselves).
@@ -710,6 +715,9 @@ bool Processor::OnUnhandledException(Exception* ex) {
   if (!Thread::IsInThread()) {
     return false;
   }
+
+  // Before suspending guest threads, which may hold a telemetry lock.
+  telemetry::OnPause(telemetry::PauseSource::kDebugger, true);
 
   auto global_lock = global_critical_region_.Acquire();
 
@@ -884,6 +892,8 @@ void Processor::ResumeAllBreakpoints() {
 }
 
 void Processor::Pause() {
+  // Before suspending guest threads, which may hold a telemetry lock.
+  telemetry::OnPause(telemetry::PauseSource::kDebugger, true);
   {
     auto global_lock = global_critical_region_.Acquire();
     assert_true(execution_state_ == ExecutionState::kRunning);
@@ -908,6 +918,9 @@ void Processor::Continue() {
   execution_state_ = ExecutionState::kRunning;
   ResumeAllBreakpoints();
   ResumeAllThreads();
+  // After the guest threads are resumed. The state stays paused if the
+  // emulator itself is still paused.
+  telemetry::OnPause(telemetry::PauseSource::kDebugger, false);
 
   if (debug_listener_) {
     debug_listener_->OnExecutionContinued();
