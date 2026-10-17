@@ -34,6 +34,15 @@ jobs:
           path: ~/vulkan-sdk
           key: ${{ runner.os }}-vulkan-sdk-latest
 
+      - name: Cache compiler output
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.ccache
+            ~/.cache/thinlto
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-ccache-
+
       - name: Cache linuxdeploy tools
         id: cache-linuxdeploy
         uses: actions/cache@v6
@@ -46,7 +55,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           sudo apt-add-repository "deb http://apt.llvm.org/${{ inputs.ubuntu_base }}/ llvm-toolchain-${{ inputs.ubuntu_base }}-${{ inputs.llvm_version }} main"
           sudo apt-get -y update
-          sudo apt-get -y install mesa-vulkan-drivers valgrind libc++-dev libc++abi-dev libgtk-3-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-${{ inputs.llvm_version }} lld-${{ inputs.llvm_version }} spirv-tools libfuse2
+          sudo apt-get -y install mesa-vulkan-drivers valgrind libc++-dev libc++abi-dev libgtk-3-dev libsdl2-dev libvulkan-dev libx11-xcb-dev ccache clang-${{ inputs.llvm_version }} lld-${{ inputs.llvm_version }} spirv-tools libfuse2
 
           # Pin LLVM tools to the correct version so system ar/ranlib/lld
           # don't use the older LLVM 17 gold plugin with clang-20 LTO bitcode
@@ -92,7 +101,19 @@ jobs:
         env:
           CC: clang-${{ inputs.llvm_version }}
           CXX: clang++-${{ inputs.llvm_version }}
-        run: ./xenia-build.py build --config=Release
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 2G
+        run: |-
+          export CCACHE_DIR=$HOME/.ccache
+          # ThinLTO code generation runs at link time; cache it too. Release links
+          # with lld anyway, and CMake's compiler check needs it for the flag.
+          export LDFLAGS="-fuse-ld=lld -Wl,--thinlto-cache-dir=$HOME/.cache/thinlto"
+          ccache --zero-stats
+          ./xenia-build.py build --config=Release
+          ccache --show-stats
+          du -sh ~/.ccache ~/.cache/thinlto || true
 
       - name: Prepare AppImage
         id: prepare_artifacts
