@@ -23,6 +23,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/vec128.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
@@ -787,6 +788,19 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
 
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
+  if (xe::telemetry::enabled() &&
+      xe::telemetry::FirstTime("extern",
+                               fmt::format("{:08X}", function->address()))) {
+    auto event = xe::telemetry::Event("extern_undefined_call")
+                     .Hex("address", function->address(), 8)
+                     .Str("name", function->name());
+    if (cvars::ignore_undefined_externs) {
+      xe::telemetry::Emit(std::move(event));
+    } else {
+      // FatalError below ends the process; flush first.
+      xe::telemetry::EmitNow(std::move(event));
+    }
+  }
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
                                function->address(), function->name().c_str()));

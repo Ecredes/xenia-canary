@@ -27,6 +27,23 @@ TEST_CASE("ShouldReportFirstCall selects stub and sketchy", "[telemetry]") {
   CHECK(ShouldReportFirstCall(ExportTag::kImplemented, true));
 }
 
+TEST_CASE("IsUnimplementedImport covers listed but unimplemented exports",
+          "[telemetry]") {
+  CHECK(cpu::IsUnimplementedImport(nullptr));
+  // Listed in the kernel tables, no trampoline registered.
+  Export listed(10, Export::Type::kFunction, "FakeListed");
+  CHECK(cpu::IsUnimplementedImport(&listed));
+  Export implemented(11, Export::Type::kFunction, "FakeImplemented",
+                     ExportTag::kImplemented);
+  implemented.function_data.trampoline = [](cpu::ppc::PPCContext*) {};
+  CHECK_FALSE(cpu::IsUnimplementedImport(&implemented));
+  Export no_value(12, Export::Type::kVariable, "FakeNoValue");
+  CHECK(cpu::IsUnimplementedImport(&no_value));
+  Export with_value(13, Export::Type::kVariable, "FakeWithValue",
+                    ExportTag::kImplemented);
+  CHECK_FALSE(cpu::IsUnimplementedImport(&with_value));
+}
+
 TEST_CASE("ExportCallsJson lists exports with calls", "[telemetry]") {
   Export fake_a(1, Export::Type::kFunction, "FakeA", ExportTag::kImplemented);
   Export fake_b(2, Export::Type::kFunction, "FakeB", ExportTag::kImplemented);

@@ -17,6 +17,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/pe_image.h"
+#include "xenia/base/telemetry.h"
 
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/export_resolver.h"
@@ -86,6 +87,23 @@ void aes_decrypt_buffer(const uint8_t* session_key, const uint8_t* input_buffer,
 
 namespace xe {
 namespace cpu {
+
+namespace {
+// import_missing, at most once per importing module, library and ordinal.
+void ReportImportMissing(std::string_view module, std::string_view library,
+                         uint16_t ordinal, std::string_view name) {
+  if (xe::telemetry::enabled() &&
+      xe::telemetry::FirstTime(
+          "import_missing",
+          fmt::format("{}|{}|{}", module, library, ordinal))) {
+    xe::telemetry::Emit(xe::telemetry::Event("import_missing")
+                            .Str("module", module)
+                            .Str("library", library)
+                            .UInt("ordinal", ordinal)
+                            .Str("name", name));
+  }
+}
+}  // namespace
 
 using xe::kernel::KernelState;
 
@@ -1312,6 +1330,7 @@ bool XexModule::SetupLibraryImports(const std::string_view name,
             *record_slot = 0xD000BEEF | (kernel_export->ordinal & 0xFFF) << 16;
             XELOGCPU("WARNING: imported a variable with no value: {}",
                      kernel_export->name);
+            ReportImportMissing(name_, name, ordinal, kernel_export->name);
           }
         }
       } else if (user_export_addr) {
@@ -1398,6 +1417,12 @@ bool XexModule::SetupLibraryImports(const std::string_view name,
         } else {
           XELOGW("WARNING: Imported kernel function {} is unimplemented!",
                  import_name.to_string_view());
+        }
+        // A listed but unimplemented export (no trampoline) is as missing as
+        // an unknown ordinal: calls reach UndefinedCallExtern either way.
+        if (IsUnimplementedImport(kernel_export)) {
+          ReportImportMissing(name_, name, ordinal,
+                              import_name.to_string_view());
         }
         static_cast<GuestFunction*>(function)->SetupExtern(handler,
                                                            kernel_export);

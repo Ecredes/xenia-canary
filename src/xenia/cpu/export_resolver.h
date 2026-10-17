@@ -112,6 +112,19 @@ class Export {
                                                  : Type::kFunction;
   }
 };
+
+// True when an import of kernel_export has nothing behind it: no export at
+// all, a function export with no trampoline (listed in the kernel tables but
+// not implemented), or a variable export with no value.
+inline bool IsUnimplementedImport(const Export* kernel_export) {
+  if (!kernel_export) {
+    return true;
+  }
+  if (kernel_export->get_type() == Export::Type::kVariable) {
+    return !kernel_export->is_implemented();
+  }
+  return !kernel_export->function_data.trampoline;
+}
 class ExportResolver {
  public:
   class Table {
