@@ -1,0 +1,70 @@
+note: osv-scanner matches commits by file contents; check each hit against the pinned commit. Skipped 22 nested package(s) (dev lockfiles, nested submodules).
+audited 34 submodule(s) and .github/workflows at dac2794ca7
+.github/workflows/Check_commit_message.yml:11: [zizmor:artipacked] Low/Low: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+.github/workflows/Check_commit_message.yml:12: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Create_release.yml:23: [zizmor:artipacked] Low/Low: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+.github/workflows/Create_release.yml:24: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Create_release.yml:34: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Create_release.yml:36: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Create_release.yml:80: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Create_release.yml:107: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Lint.yml:29: [zizmor:artipacked] Low/Low: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+.github/workflows/Lint.yml:29: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Lint.yml:36: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Lint.yml:38: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:25: [zizmor:artipacked] Low/Low: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+.github/workflows/Linux_x86.yml:26: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Linux_x86.yml:32: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Linux_x86.yml:39: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Linux_x86.yml:47: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:49: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:53: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:54: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:55: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:56: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:57: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:58: [zizmor:template-injection] High/High: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:62: [zizmor:template-injection] Informational/Low: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:71: [zizmor:template-injection] Informational/Low: code injection via template expansion: may expand into attacker-controllable code
+.github/workflows/Linux_x86.yml:140: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Orchestrator.yml:1: [zizmor:excessive-permissions] Medium/Medium: overly broad permissions: default permissions used due to no permissions: block
+.github/workflows/Orchestrator.yml:24: [zizmor:excessive-permissions] Medium/Medium: overly broad permissions: default permissions used due to no permissions: block
+.github/workflows/Orchestrator.yml:27: [zizmor:self-repository] Low/High: use GitHub's dedicated self-repository syntax: use '$/...' instead of './...'
+.github/workflows/Orchestrator.yml:29: [zizmor:excessive-permissions] Medium/Medium: overly broad permissions: default permissions used due to no permissions: block
+.github/workflows/Orchestrator.yml:31: [zizmor:self-repository] Low/High: use GitHub's dedicated self-repository syntax: use '$/...' instead of './...'
+.github/workflows/Orchestrator.yml:41: [zizmor:excessive-permissions] Medium/Medium: overly broad permissions: default permissions used due to no permissions: block
+.github/workflows/Orchestrator.yml:45: [zizmor:self-repository] Low/High: use GitHub's dedicated self-repository syntax: use '$/...' instead of './...'
+.github/workflows/Orchestrator.yml:47: [zizmor:excessive-permissions] Medium/Medium: overly broad permissions: default permissions used due to no permissions: block
+.github/workflows/Orchestrator.yml:51: [zizmor:self-repository] Low/High: use GitHub's dedicated self-repository syntax: use '$/...' instead of './...'
+.github/workflows/Orchestrator.yml:90: [zizmor:secrets-inherit] Medium/High: secrets unconditionally inherited by called workflow: this reusable workflow
+.github/workflows/Orchestrator.yml:90: [zizmor:self-repository] Low/High: use GitHub's dedicated self-repository syntax: use '$/...' instead of './...'
+.github/workflows/Windows_x86.yml:15: [zizmor:artipacked] Low/Low: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+.github/workflows/Windows_x86.yml:16: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Windows_x86.yml:22: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.github/workflows/Windows_x86.yml:86: [zizmor:unpinned-uses] High/High: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+.gitmodules:17: [osv:CVE-2024-38517] third_party/rapidjson: Tencent RapidJSON include/rapidjson/reader.h GenericReader::ParseNumber() Function Template Exponent Parsing Integer Underflow [CVSS 7.8] (matched f54b0e47a0, pinned 7c73dd7de7)
+.gitmodules:53: [osv:CVE-2026-107675] third_party/FFmpeg: FFmpeg through 9.0.2 Missing SSH Host Key Verification in sftp Protocol [CVSS 6.0] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-107676] third_party/FFmpeg: FFmpeg through 9.0.2 Uninitialized Memory Disclosure via HDR10+ Metadata Serializer [CVSS 4.8] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-107677] third_party/FFmpeg: FFmpeg through 9.0.2 DASH Demuxer Infinite Loop via Empty SegmentTemplate Media [CVSS 5.7] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-107678] third_party/FFmpeg: FFmpeg through 9.0.2 Stack Exhaustion via Recursive Free of pssh Boxes [CVSS 5.7] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-107695] third_party/FFmpeg: FFmpeg before 8.1.3 HLS Demuxer Infinite Loop via Self-Referencing Playlist [CVSS 7.1] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-107696] third_party/FFmpeg: FFmpeg through 9.0.2 Infinite Loop via RTSP Redirect Handling in rtsp.c [CVSS 7.1] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-107697] third_party/FFmpeg: FFmpeg before 8.1.3 HLS Demuxer Security Check Bypass via parse_playlist() [CVSS 5.3] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-18393] third_party/FFmpeg: Ffmpeg: ffmpeg: heap buffer overflow in tdsc_load_cursor() via cur_fmt_mono cursor [CVSS 5.4] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-52295] third_party/FFmpeg: no summary [CVSS 2.9] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-52296] third_party/FFmpeg: no summary [CVSS 2.9] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-52297] third_party/FFmpeg: no summary [CVSS 2.9] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-58049] third_party/FFmpeg: FFmpeg - Out-of-Bounds Write in RASC Decoder decode_dlta() [CVSS 8.8] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-70632] third_party/FFmpeg: FFmpeg 4.4 < 9.0 Heap Out-of-Bounds Write in CFHD Decoder via AVI Demuxing [CVSS 8.5] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75141] third_party/FFmpeg: FFmpeg Heap Buffer Overflow in hvcC Box Writer via HEVC Muxing [CVSS 8.5] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75142] third_party/FFmpeg: FFmpeg Stack Buffer Overflow in MPEG-PS Muxer via mpegenc.c [CVSS 8.5] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75143] third_party/FFmpeg: FFmpeg Heap Buffer Overflow via RIST Protocol Reader [CVSS 9.3] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75144] third_party/FFmpeg: FFmpeg Heap Buffer Overflow in VC-2/Dirac RTP Packetizer [CVSS 8.5] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75145] third_party/FFmpeg: FFmpeg Integer Narrowing Conversion OOB Memory Access in AV1 RTP Packetizer [CVSS 5.8] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75146] third_party/FFmpeg: FFmpeg Out-of-Bounds Read in DASH Demuxer via dashdec.c [CVSS 7.2] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-75147] third_party/FFmpeg: FFmpeg Out-of-Bounds Read in AV1 RTP Packetizer via rtpenc_av1.c [CVSS 6.9] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:53: [osv:CVE-2026-96611] third_party/FFmpeg: no summary [CVSS 6.9] (matched c1263a3dd9, pinned d980192e17)
+.gitmodules:69: [osv:OSV-2025-447] third_party/SPIRV-Tools: Use-of-uninitialized-value in spvtools::EmitNumericLiteral [CVSS ?] (matched 33e0256818, pinned 33e0256818)
+.gitmodules:94: [osv:CVE-2026-23679] third_party/libusb: libusb < 1.0.30 NULL Pointer Dereference in parse_interface() [CVSS 6.9] (matched a61afe5f75, pinned a61afe5f75)
+.gitmodules:94: [osv:CVE-2026-47104] third_party/libusb: libusb < 1.0.30 Out-of-Bounds Read in parse_iad_array() [CVSS 5.1] (matched a61afe5f75, pinned a61afe5f75)
+-- 67 finding(s) (osv: 25, zizmor: 42)
