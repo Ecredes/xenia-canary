@@ -1,0 +1,11 @@
+# Keeps the commit SHAs that pin GitHub Actions in .github/workflows current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns:
+          - '*'
