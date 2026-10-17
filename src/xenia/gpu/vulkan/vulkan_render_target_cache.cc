@@ -2270,7 +2270,8 @@ void VulkanRenderTargetCache::MarkEdramBufferModified(
     case EdramBufferUsage::kComputeWrite:
       assert_true(modification_status ==
                   EdramBufferModificationStatus::kViaUnordered);
-      modification_status = EdramBufferModificationStatus::kViaUnordered;
+      edram_buffer_modification_status_ =
+          EdramBufferModificationStatus::kViaUnordered;
       break;
     default:
       assert_always(
