@@ -142,6 +142,15 @@ jobs:
           Get-ChildItem build\bin\Windows\Release -ErrorAction SilentlyContinue | Format-Table Name, Length
           exit $build_result
 
+      # Fork-only until upstream runs tests (fork issue #5, branch ci/run-tests).
+      - name: Run tests
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_DIR: C:\ccache
+          CCACHE_MAXSIZE: 2G
+        run: python xenia-build.py test --config=Release --continue
+
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |-
