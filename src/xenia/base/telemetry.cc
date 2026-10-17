@@ -90,6 +90,8 @@ struct Globals {
   std::string exit_reason = "shutdown";
   // Bit per PauseSource currently paused.
   uint8_t pause_sources = 0;
+  // Set by the first ReportCrash of the session.
+  bool crash_reported = false;
 
   // Held while writing to the sinks, so lines leave in queue order and
   // EmitNow lines land after everything queued before them.
@@ -861,6 +863,24 @@ void EmitNow(Event event) {
                         CurrentState()));
 }
 
+bool ReportCrash(Event event) {
+  if (!enabled()) {
+    return false;
+  }
+  Globals& g = G();
+  {
+    std::lock_guard<std::mutex> lock(g.state_mutex);
+    if (!enabled() || g.crash_reported) {
+      return false;
+    }
+    g.crash_reported = true;
+  }
+  EmitNow(std::move(event));
+  SetExitReason("crash");
+  Notify(Signal::kCrash);
+  return true;
+}
+
 bool FirstTime(std::string_view kind, std::string_view key) {
   std::string combined;
   combined.reserve(kind.size() + 1 + key.size());
@@ -1027,6 +1047,7 @@ void Shutdown() {
     g.machine = StateMachine();
     g.exit_reason = "shutdown";
     g.pause_sources = 0;
+    g.crash_reported = false;
     current_state_.store(uint8_t(State::kStarting), std::memory_order_relaxed);
   }
 }

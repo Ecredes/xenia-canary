@@ -123,6 +123,7 @@ reports.
 | `gpu_error` | the GPU command processor met a malformed command stream | `kind` (`packet_overflow_type0`, `packet_overflow_type3`, `ringbuffer_execute_failed`, `unknown_opcode`), `detail` (for overflows, `reg=` the base register index (type 0) or `opcode=` the opcode (type 3), then `read=` and `packet=` byte counts, all in hex; `primary`, `indirect` or `packet` for ring buffer failures; the opcode in hex for `unknown_opcode`). At most one per kind and detail, except the overflow kinds, which are written at most once per register (type 0) or opcode (type 3), with the counts of the first occurrence |
 | `xma_error` | the XMA audio decoder fails on a context in one of the kinds listed (these failures are also logged as `XmaContext` errors, but not every `XmaContext` error has a kind) | `kind` (`decode_failed`, `send_packet_failed`, `invalid_packet`, `no_output_blocks`, `codec_init_failed`), `context` (XMA context id), `detail` (the failing values, e.g. the FFmpeg error text and code, or the read offset). At most one per kind and context |
 | `audio_client` | a guest audio client is registered or unregistered, or its host audio driver could not be created (the client then plays silence) | `event` (`registered`, `unregistered`, `driver_failed`), `index` (client slot). Every occurrence is written |
+| `crash` | a guest crash: an unhandled exception in guest code, or `KeBugCheckEx`. Written and flushed before the crash dump is logged (for a bugcheck, after its `STOP` log line) and before Xenia pauses or shows its crash dialog, followed by `state` → `crashed`. Only the first crash of either kind is reported | `side` (`guest`), `code` (`access_violation`, `illegal_instruction`, `unknown`, or `bugcheck_0xXXXXXXXX`), `message`; from an exception also `guest_pc` (hex), `address` (hex fault address, access violations only), `thread` (guest thread id), `module` (title module name, if known). For a bugcheck `message` holds the code and four parameters |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
 | `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
@@ -176,8 +177,10 @@ QueryPerformanceCounter, on Linux `CLOCK_MONOTONIC`, the same clocks Python's
 up with its own recordings without estimating an offset. A unit test checks
 this on Windows.
 
-## Planned events
+## Host crashes
 
-The format is growing. These events are planned and not written yet:
-
-- `crash`: guest crash details, followed by `state` → `crashed`.
+`crash` has `side` `guest` only. Xenia cannot reliably report its own host
+crashes: the exception callback lets exceptions outside guest code pass, and
+the process may be gone before anything is written. A reader that sees the file
+end without `exit` or `crash` should infer a host crash. The `side` value
+`host` is reserved.

@@ -207,6 +207,12 @@ void Emit(Event event);
 // when disabled.
 void EmitNow(Event event);
 
+// Reports a guest crash. The first call per session writes event like EmitNow,
+// sets the exit reason to "crash" and moves the state to crashed; later calls
+// write nothing (only the first crash is reported). Returns whether this call
+// reported. No-op (false) when disabled.
+bool ReportCrash(Event event);
+
 // True the first time a (kind, key) pair is seen in this process.
 bool FirstTime(std::string_view kind, std::string_view key);
 
