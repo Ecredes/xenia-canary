@@ -11,6 +11,10 @@ on:
         description: 'Commit to build'
         required: true
         type: string
+      save-cache:
+        description: 'Save the compiler cache (fork-ci builds only)'
+        required: true
+        type: boolean
     outputs:
       cacheable:
         description: "'false' if the Release flags to rewrite weren't all found"
@@ -79,8 +83,10 @@ jobs:
           $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
           git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
 
-      - name: Cache compiler output
-        uses: actions/cache@v6
+      # Restored by every build, saved only by fork-ci builds (see "Save
+      # compiler output" below, fork issue #29).
+      - name: Restore compiler output
+        uses: actions/cache/restore@v6
         with:
           path: |
             C:\ccache
@@ -135,6 +141,7 @@ jobs:
           CCACHE_DIR: C:\ccache
           CCACHE_MAXSIZE: 2G
         run: |-
+          echo "BUILD_START=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV
           ccache --zero-stats
           python xenia-build.py build --config=Release --target=xenia-app
           $build_result = $LASTEXITCODE
@@ -155,6 +162,43 @@ jobs:
         run: >-
           python xenia-build.py test --config=Release --continue --
           "~PhysicalHeap vE0000000 alignment"
+
+      # Only entries this build used are kept, so the cache doesn't grow with
+      # every upstream change, and the entries it replaces are deleted to stay
+      # under the repository's 10 GB cache limit.
+      - name: Trim compiler output
+        if: ${{ inputs.save-cache }}
+        env:
+          CCACHE_DIR: C:\ccache
+        run: |-
+          $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $env:BUILD_START + 300
+          ccache --evict-older-than "${age}s"
+          ccache --show-stats
+
+      - name: Save compiler output
+        if: ${{ inputs.save-cache }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            C:\ccache
+            build\bin\Windows\Release\*.iobj
+            build\bin\Windows\Release\*.ipdb
+          key: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
+
+      - name: Delete replaced compiler output
+        if: ${{ inputs.save-cache }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PREFIX: ${{ runner.os }}-ccache-v2-
+          KEY: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
+        run: |-
+          gh api "repos/$REPO/actions/caches?key=$PREFIX&per_page=100" \
+            -q ".actions_caches[] | select(.key != \"$KEY\") | .id" |
+            while read -r id; do
+              gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+            done
 
       - name: Prepare artifacts
         id: prepare_artifacts
