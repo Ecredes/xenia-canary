@@ -1043,7 +1043,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   /// from a signal handler (e.g., the SIGRTMIN suspend signal handler)
   /// without risking deadlock or heap corruption from non-reentrant
   /// mutex/condvar operations.
-  void WaitSuspended() {
+  /// interrupted_context is the ucontext_t the suspend signal handler got, or
+  /// null outside of it, and is passed to RunWhileSuspended callbacks.
+  void WaitSuspended(const void* interrupted_context = nullptr) {
     // The suspend signal does not queue, and a Resume() whose sem_post lands
     // before the signal is delivered leaves a token behind. Re-check the
     // count rather than trusting one token, or that stale post releases the
@@ -1057,7 +1059,62 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         // The semaphore is gone (the thread has been joined). Do not spin.
         break;
       }
+      // RunWhileSuspended posts the same semaphore to wake us.
+      SuspendedCall* call =
+          suspended_call_.exchange(nullptr, std::memory_order_acq_rel);
+      if (call) {
+        call->callback(call->data, interrupted_context);
+        sem_post(&call->done);
+      }
     }
+  }
+
+  bool RunWhileSuspended(void (*callback)(void* data,
+                                          const void* interrupted_context),
+                         void* data) {
+    if (pthread_self() == thread_) {
+      return false;
+    }
+    WaitStarted();
+    // One call at a time, as the thread picks up a single pending call.
+    std::lock_guard call_lock(suspended_call_mutex_);
+    {
+      std::unique_lock lock(state_mutex_);
+      if (state_ != State::kSuspended) {
+        return false;
+      }
+    }
+    SuspendedCall call;
+    call.callback = callback;
+    call.data = data;
+    sem_init(&call.done, 0, 0);
+    suspended_call_.store(&call, std::memory_order_release);
+    // If a Resume() races this, the thread may leave WaitSuspended without
+    // taking the call, and this post becomes a stale token, which
+    // WaitSuspended tolerates.
+    sem_post(&suspend_sem_);
+    timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    int ret;
+    do {
+      ret = sem_timedwait(&call.done, &deadline);
+    } while (ret == -1 && errno == EINTR);
+    if (ret == -1) {
+      SuspendedCall* expected = &call;
+      if (suspended_call_.compare_exchange_strong(expected, nullptr,
+                                                  std::memory_order_acq_rel)) {
+        // Withdrawn before the thread took it.
+        sem_destroy(&call.done);
+        return false;
+      }
+      // The thread took the call and is still running it on our memory.
+      do {
+        ret = sem_wait(&call.done);
+      } while (ret == -1 && errno == EINTR);
+    }
+    sem_destroy(&call.done);
+    return true;
   }
 
   void* native_handle() const override {
@@ -1088,6 +1145,14 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   std::atomic<uint32_t> suspend_count_;
   std::atomic<bool> joined_{false};  // Prevents a second pthread_join
   sem_t suspend_sem_;  // Async-signal-safe suspend/resume semaphore
+  struct SuspendedCall {
+    void (*callback)(void* data, const void* interrupted_context);
+    void* data;
+    sem_t done;
+  };
+  // Set by RunWhileSuspended, taken by the suspended thread in WaitSuspended.
+  std::atomic<SuspendedCall*> suspended_call_{nullptr};
+  std::mutex suspended_call_mutex_;
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
   mutable std::condition_variable state_signal_;
@@ -1381,7 +1446,15 @@ class PosixThread final : public PosixConditionHandle<Thread> {
 
   void Terminate(int exit_code) override { handle_.Terminate(exit_code); }
 
-  void WaitSuspended() { handle_.WaitSuspended(); }
+  void WaitSuspended(const void* interrupted_context = nullptr) {
+    handle_.WaitSuspended(interrupted_context);
+  }
+
+  bool RunWhileSuspended(void (*callback)(void* data,
+                                          const void* interrupted_context),
+                         void* data) {
+    return handle_.RunWhileSuspended(callback, data);
+  }
 };
 
 thread_local PosixThread* current_thread_ = nullptr;
@@ -1493,6 +1566,17 @@ void set_name(const std::string_view name) {
 #endif
 }
 
+bool RunOnSuspendedThread(Thread* thread,
+                          void (*callback)(void* data,
+                                           const void* interrupted_context),
+                          void* data) {
+  auto posix_thread = dynamic_cast<PosixThread*>(thread);
+  if (!posix_thread) {
+    return false;
+  }
+  return posix_thread->RunWhileSuspended(callback, data);
+}
+
 static void signal_handler(int signal, siginfo_t* info, void* context) {
   switch (GetSystemSignalType(signal)) {
     case SignalType::kThreadSuspend: {
@@ -1501,7 +1585,7 @@ static void signal_handler(int signal, siginfo_t* info, void* context) {
         // before the thread has initialized or after it has exited
         return;
       }
-      current_thread_->WaitSuspended();
+      current_thread_->WaitSuspended(context);
     } break;
     case SignalType::kThreadUserCallback: {
       assert_not_null(info->si_value.sival_ptr);

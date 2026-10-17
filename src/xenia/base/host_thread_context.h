@@ -210,6 +210,11 @@ class HostThreadContext {
 
   static const char* GetRegisterName(HostRegister reg);
   std::string GetStringFromValue(HostRegister reg, bool hex) const;
+
+#if XE_PLATFORM_LINUX
+  // Copies the registers from the ucontext_t a signal handler received.
+  void InitializeFromUcontext(const void* ucontext);
+#endif  // XE_PLATFORM_LINUX
 };
 
 }  // namespace xe

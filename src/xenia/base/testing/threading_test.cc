@@ -8,8 +8,14 @@
 */
 
 #include <array>
+#include <atomic>
 
+#include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
+
+#if XE_PLATFORM_LINUX
+#include <pthread.h>
+#endif
 
 #define CATCH_CONFIG_ENABLE_CHRONO_STRINGMAKER
 #include "third_party/catch/include/catch.hpp"
@@ -1255,6 +1261,78 @@ TEST_CASE("Test Thread QueueUserCallback", "[thread]") {
   // TODO(bwrsandman): Test alertable wait returning kUserCallback by using IO
   // callbacks.
 }
+
+#if XE_PLATFORM_LINUX
+struct SuspendedCallRecord {
+  std::atomic<int> calls{0};
+  std::atomic<bool> had_context{false};
+  std::atomic<pthread_t> ran_on{};
+};
+
+void RecordSuspendedCall(void* data, const void* interrupted_context) {
+  auto record = static_cast<SuspendedCallRecord*>(data);
+  record->had_context = interrupted_context != nullptr;
+  record->ran_on = pthread_self();
+  ++record->calls;
+}
+
+TEST_CASE("Run on Suspended Thread", "[thread]") {
+  SuspendedCallRecord record;
+  std::atomic<bool> stop(false);
+  std::atomic<uint64_t> spins(0);
+  Thread::CreationParameters params = {};
+
+  SECTION("Suspended by another thread") {
+    auto thread = Thread::Create(params, [&] {
+      while (!stop) {
+        ++spins;
+      }
+    });
+    REQUIRE(spin_wait_for(1s, [&] { return spins > 0; }));
+    thread->Suspend();
+    REQUIRE(RunOnSuspendedThread(thread.get(), RecordSuspendedCall, &record));
+    REQUIRE(record.calls == 1);
+    REQUIRE(record.had_context);
+    REQUIRE(pthread_equal(
+        record.ran_on, reinterpret_cast<pthread_t>(thread->native_handle())));
+    // Repeatable, and the thread stays suspended.
+    REQUIRE(RunOnSuspendedThread(thread.get(), RecordSuspendedCall, &record));
+    REQUIRE(record.calls == 2);
+    uint64_t spins_while_suspended = spins;
+    Sleep(20ms);
+    REQUIRE(spins == spins_while_suspended);
+    thread->Resume();
+    REQUIRE(spin_wait_for(1s, [&] { return spins > spins_while_suspended; }));
+    stop = true;
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+
+  SECTION("Created suspended") {
+    params.create_suspended = true;
+    auto thread = Thread::Create(params, [] {});
+    REQUIRE(RunOnSuspendedThread(thread.get(), RecordSuspendedCall, &record));
+    REQUIRE(record.calls == 1);
+    REQUIRE_FALSE(record.had_context);
+    thread->Resume();
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+
+  SECTION("Not suspended") {
+    auto thread = Thread::Create(params, [&] {
+      while (!stop) {
+        ++spins;
+      }
+    });
+    REQUIRE_FALSE(
+        RunOnSuspendedThread(thread.get(), RecordSuspendedCall, &record));
+    REQUIRE_FALSE(RunOnSuspendedThread(Thread::GetCurrentThread(),
+                                       RecordSuspendedCall, &record));
+    REQUIRE(record.calls == 0);
+    stop = true;
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+}
+#endif  // XE_PLATFORM_LINUX
 
 }  // namespace test
 }  // namespace base

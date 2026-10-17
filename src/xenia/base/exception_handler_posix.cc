@@ -39,36 +39,8 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       reinterpret_cast<ucontext_t*>(signal_context)->uc_mcontext;
 
   HostThreadContext thread_context;
-
-#if XE_ARCH_AMD64
-  thread_context.rip = uint64_t(mcontext.gregs[REG_RIP]);
-  thread_context.eflags = uint32_t(mcontext.gregs[REG_EFL]);
-  // The REG_ order may be different than the register indices in the
-  // instruction encoding.
-  thread_context.rax = uint64_t(mcontext.gregs[REG_RAX]);
-  thread_context.rcx = uint64_t(mcontext.gregs[REG_RCX]);
-  thread_context.rdx = uint64_t(mcontext.gregs[REG_RDX]);
-  thread_context.rbx = uint64_t(mcontext.gregs[REG_RBX]);
-  thread_context.rsp = uint64_t(mcontext.gregs[REG_RSP]);
-  thread_context.rbp = uint64_t(mcontext.gregs[REG_RBP]);
-  thread_context.rsi = uint64_t(mcontext.gregs[REG_RSI]);
-  thread_context.rdi = uint64_t(mcontext.gregs[REG_RDI]);
-  thread_context.r8 = uint64_t(mcontext.gregs[REG_R8]);
-  thread_context.r9 = uint64_t(mcontext.gregs[REG_R9]);
-  thread_context.r10 = uint64_t(mcontext.gregs[REG_R10]);
-  thread_context.r11 = uint64_t(mcontext.gregs[REG_R11]);
-  thread_context.r12 = uint64_t(mcontext.gregs[REG_R12]);
-  thread_context.r13 = uint64_t(mcontext.gregs[REG_R13]);
-  thread_context.r14 = uint64_t(mcontext.gregs[REG_R14]);
-  thread_context.r15 = uint64_t(mcontext.gregs[REG_R15]);
-  std::memcpy(thread_context.xmm_registers, mcontext.fpregs->_xmm,
-              sizeof(thread_context.xmm_registers));
-#elif XE_ARCH_ARM64
-  std::memcpy(thread_context.x, mcontext.regs, sizeof(thread_context.x));
-  thread_context.sp = mcontext.sp;
-  thread_context.pc = mcontext.pc;
-  thread_context.pstate = mcontext.pstate;
-  struct fpsimd_context* mcontext_fpsimd = nullptr;
+  thread_context.InitializeFromUcontext(signal_context);
+#if XE_ARCH_ARM64
   struct esr_context* mcontext_esr = nullptr;
   for (struct _aarch64_ctx* mcontext_extension =
            reinterpret_cast<struct _aarch64_ctx*>(mcontext.__reserved);
@@ -76,27 +48,12 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
        mcontext_extension = reinterpret_cast<struct _aarch64_ctx*>(
            reinterpret_cast<uint8_t*>(mcontext_extension) +
            mcontext_extension->size)) {
-    switch (mcontext_extension->magic) {
-      case FPSIMD_MAGIC:
-        mcontext_fpsimd =
-            reinterpret_cast<struct fpsimd_context*>(mcontext_extension);
-        break;
-      case ESR_MAGIC:
-        mcontext_esr =
-            reinterpret_cast<struct esr_context*>(mcontext_extension);
-        break;
-      default:
-        break;
+    if (mcontext_extension->magic == ESR_MAGIC) {
+      mcontext_esr = reinterpret_cast<struct esr_context*>(mcontext_extension);
+      break;
     }
   }
-  assert_not_null(mcontext_fpsimd);
-  if (mcontext_fpsimd) {
-    thread_context.fpsr = mcontext_fpsimd->fpsr;
-    thread_context.fpcr = mcontext_fpsimd->fpcr;
-    std::memcpy(thread_context.v, mcontext_fpsimd->vregs,
-                sizeof(thread_context.v));
-  }
-#endif  // XE_ARCH
+#endif  // XE_ARCH_ARM64
 
   Exception ex;
   switch (signal_number) {

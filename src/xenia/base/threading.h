@@ -497,6 +497,21 @@ class Thread : public WaitHandle {
   std::string name_;
 };
 
+#if XE_PLATFORM_LINUX
+// Runs the callback on a thread that another thread suspended with Suspend(),
+// inside that thread's suspend signal handler, and waits for it to return. The
+// thread stays suspended. interrupted_context is the ucontext_t of the point
+// where the suspend signal stopped the thread, or null if the thread suspended
+// itself or was created suspended. The callback runs in a signal handler, so it
+// must be async-signal-safe.
+// Returns false if the thread isn't suspended, is the calling thread, or
+// didn't pick up the callback within a second.
+bool RunOnSuspendedThread(Thread* thread,
+                          void (*callback)(void* data,
+                                           const void* interrupted_context),
+                          void* data);
+#endif  // XE_PLATFORM_LINUX
+
 }  // namespace threading
 }  // namespace xe
 
