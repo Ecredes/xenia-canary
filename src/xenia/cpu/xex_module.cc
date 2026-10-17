@@ -662,12 +662,23 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
     const uint32_t data_size = comp_info.blocks[n].data_size;
     const uint32_t zero_size = comp_info.blocks[n].zero_size;
 
+    // The block sizes come from the file, so check each block against both
+    // the file data and the image allocated from the page descriptors.
+    // Decryption reads and writes whole 16-byte blocks.
+    const size_t copy_size =
+        opt_file_format_info()->encryption_type == XEX_ENCRYPTION_NORMAL
+            ? xe::align<size_t>(data_size, 16)
+            : data_size;
+    const size_t source_offset = size_t(p - source_buffer);
+    const size_t dest_offset = size_t(d - buffer);
+    if (copy_size > exe_length - source_offset || dest_offset > total_size ||
+        copy_size > total_size - dest_offset) {
+      XELOGE("XEX basic compression block {} is out of bounds", n);
+      return 1;
+    }
+
     switch (opt_file_format_info()->encryption_type) {
       case XEX_ENCRYPTION_NONE:
-        if (data_size > uncompressed_size - (d - buffer)) {
-          // Overflow.
-          return 1;
-        }
         memcpy(d, p, data_size);
         break;
       case XEX_ENCRYPTION_NORMAL: {
