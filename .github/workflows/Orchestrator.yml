@@ -17,6 +17,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # ===========================================================================
   # Pre-requirements
@@ -90,7 +93,6 @@ jobs:
     uses: ./.github/workflows/Create_release.yml
     permissions:
       contents: write
-    secrets: inherit
     with:
       tag: ${{ github.sha }}
       branch: ${{ github.ref_name }}
