@@ -49,11 +49,13 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       drift: ${{ steps.drift.outputs.drift }}
+      save_cache: ${{ steps.resolve.outputs.save_cache }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       RUN_ID: ${{ github.event.workflow_run.id }}
       HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
       INPUT_REF: ${{ inputs.ref }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -70,6 +72,13 @@ jobs:
             sha=$(gh api "repos/$REPO/commits/$INPUT_REF" -q .sha)
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Only fork-ci builds save the compiler caches; every other branch
+          # restores the newest fork-ci entry (fork issue #29).
+          if [ "$HEAD_BRANCH" = fork-ci ] || [ "$INPUT_REF" = fork-ci ]; then
+            echo "save_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "save_cache=false" >> "$GITHUB_OUTPUT"
+          fi
           gh api "repos/$REPO/statuses/$sha" -f state=pending -f context="Fork CI" \
             -f description="Building" -f target_url="$RUN_URL" > /dev/null
 
@@ -121,6 +130,7 @@ jobs:
     uses: ./.github/workflows/Fork_Windows_x86.yml
     with:
       ref: ${{ needs.setup.outputs.sha }}
+      save-cache: ${{ needs.setup.outputs.save_cache == 'true' }}
 
   build-linux:
     name: Linux (x86-64)
@@ -128,6 +138,7 @@ jobs:
     uses: ./.github/workflows/Fork_Linux_x86.yml
     with:
       ref: ${{ needs.setup.outputs.sha }}
+      save-cache: ${{ needs.setup.outputs.save_cache == 'true' }}
 
   report:
     name: Report

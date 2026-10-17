@@ -11,6 +11,10 @@ on:
         description: 'Commit to build'
         required: true
         type: string
+      save-cache:
+        description: 'Save the compiler cache (fork-ci builds only)'
+        required: true
+        type: boolean
 
 env:
   LLVM_VERSION: 20
@@ -34,8 +38,10 @@ jobs:
           path: ~/vulkan-sdk
           key: ${{ runner.os }}-vulkan-sdk-latest
 
-      - name: Cache compiler output
-        uses: actions/cache@v6
+      # Restored by every build, saved only by fork-ci builds (see "Save
+      # compiler output" below, fork issue #29).
+      - name: Restore compiler output
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.ccache
@@ -111,6 +117,7 @@ jobs:
           # ThinLTO code generation runs at link time; cache it too. Release links
           # with lld anyway, and CMake's compiler check needs it for the flag.
           export LDFLAGS="-fuse-ld=lld -Wl,--thinlto-cache-dir=$HOME/.cache/thinlto"
+          echo "BUILD_START=$(date +%s)" >> "$GITHUB_ENV"
           ccache --zero-stats
           ./xenia-build.py build --config=Release
           ccache --show-stats
@@ -134,6 +141,38 @@ jobs:
           ccache --zero-stats
           ./xenia-build.py test --config=Release --continue -- \
             "~PhysicalHeap vE0000000 AllocRange alignment"
+
+      # Only entries this build used are kept, and the entries this save
+      # replaces are deleted, as in Fork_Windows_x86.yml.
+      - name: Trim compiler output
+        if: ${{ inputs.save-cache }}
+        run: |-
+          export CCACHE_DIR=$HOME/.ccache
+          ccache --evict-older-than "$(( $(date +%s) - BUILD_START + 300 ))s"
+          ccache --show-stats
+
+      - name: Save compiler output
+        if: ${{ inputs.save-cache }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.ccache
+            ~/.cache/thinlto
+          key: ${{ runner.os }}-ccache-${{ inputs.ref }}
+
+      - name: Delete replaced compiler output
+        if: ${{ inputs.save-cache }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PREFIX: ${{ runner.os }}-ccache-
+          KEY: ${{ runner.os }}-ccache-${{ inputs.ref }}
+        run: |-
+          gh api "repos/$REPO/actions/caches?key=$PREFIX&per_page=100" \
+            -q ".actions_caches[] | select(.key != \"$KEY\") | .id" |
+            while read -r id; do
+              gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+            done
 
       - name: Prepare AppImage
         id: prepare_artifacts
