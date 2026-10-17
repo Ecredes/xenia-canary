@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_CODE_CACHE_H_
 #define XENIA_CPU_BACKEND_CODE_CACHE_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -35,6 +36,16 @@ class CodeCache {
 
   // Finds platform-specific function unwind info for the given host PC.
   virtual void* LookupUnwindInfo(uint64_t host_pc) = 0;
+
+  // Whether any thread is registering unwind info with the host unwinder. That
+  // thread may hold the unwinder's locks, so a thread interrupted there can't
+  // unwind its own stack without deadlocking.
+  bool IsRegisteringUnwindInfo() const {
+    return unwind_info_registrations_.load() != 0;
+  }
+
+ protected:
+  std::atomic<uint32_t> unwind_info_registrations_{0};
 };
 
 }  // namespace backend

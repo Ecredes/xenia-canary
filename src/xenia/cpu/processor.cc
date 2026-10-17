@@ -847,9 +847,8 @@ void Processor::UpdateThreadExecutionStates(
       in_host_context = override_context;
     }
     size_t count = stack_walker_->CaptureStackTrace(
-        thread->thread()->native_handle(), frame_host_pcs, 0,
-        xe::countof(frame_host_pcs), in_host_context,
-        &thread_info->host_context, &hash);
+        thread->thread(), frame_host_pcs, 0, xe::countof(frame_host_pcs),
+        in_host_context, &thread_info->host_context, &hash);
     stack_walker_->ResolveStack(frame_host_pcs, cpu_frames, count);
     thread_info->frames.resize(count);
     for (size_t i = 0; i < count; ++i) {
@@ -1154,8 +1153,8 @@ uint32_t Processor::StepToGuestSafePoint(uint32_t thread_id, bool ignore_host) {
   uint64_t frame_host_pcs[64];
   cpu::StackFrame cpu_frames[64];
   size_t count = stack_walker_->CaptureStackTrace(
-      thread->thread()->native_handle(), frame_host_pcs, 0,
-      xe::countof(frame_host_pcs), nullptr, nullptr);
+      thread->thread(), frame_host_pcs, 0, xe::countof(frame_host_pcs), nullptr,
+      nullptr);
   stack_walker_->ResolveStack(frame_host_pcs, cpu_frames, count);
   if (count == 0) {
     return 0;

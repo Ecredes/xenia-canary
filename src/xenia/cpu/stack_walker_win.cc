@@ -151,7 +151,7 @@ class Win32StackWalker : public StackWalker {
     return captured_count;
   }
 
-  size_t CaptureStackTrace(void* thread_handle, uint64_t* frame_host_pcs,
+  size_t CaptureStackTrace(threading::Thread* thread, uint64_t* frame_host_pcs,
                            size_t frame_offset, size_t frame_count,
                            const HostThreadContext* in_host_context,
                            HostThreadContext* out_host_context,
@@ -161,6 +161,7 @@ class Win32StackWalker : public StackWalker {
     // Query context. Thread must be suspended.
     // Need at least CONTEXT_CONTROL (for rip and rsp) and CONTEXT_INTEGER (for
     // rbp).
+    HANDLE thread_handle = thread->native_handle();
     CONTEXT thread_context;
     if (!in_host_context) {
       // If not given a context we need to ask for it.

@@ -14,6 +14,7 @@
 #include <string>
 
 #include "xenia/base/host_thread_context.h"
+#include "xenia/base/threading.h"
 #include "xenia/cpu/function.h"
 
 namespace xe {
@@ -74,13 +75,13 @@ class StackWalker {
                                    uint64_t* out_stack_hash = nullptr) = 0;
 
   // Captures up to the given number of stack frames from the given thread,
-  // referenced by native thread handle. The thread must be suspended.
+  // which must be suspended or the calling thread.
   // This does not populate any information other than host_pc.
   // Use ResolveStackTrace to populate additional information.
   // Returns the number of frames captured, or 0 if an error occurred.
   // Optionally provides a hash value for the stack that can be used for
   // deduping.
-  virtual size_t CaptureStackTrace(void* thread_handle,
+  virtual size_t CaptureStackTrace(threading::Thread* thread,
                                    uint64_t* frame_host_pcs,
                                    size_t frame_offset, size_t frame_count,
                                    const HostThreadContext* in_host_context,

@@ -163,7 +163,9 @@ void PosixA64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
   void* unwind_execute_address = unwind_reservation.entry_address -
                                  generated_code_write_base_ +
                                  generated_code_execute_base_;
+  ++unwind_info_registrations_;
   __register_frame(unwind_execute_address);
+  --unwind_info_registrations_;
   registered_frames_.push_back(unwind_execute_address);
 }
 
