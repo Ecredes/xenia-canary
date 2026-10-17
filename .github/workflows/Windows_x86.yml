@@ -66,6 +66,16 @@ jobs:
       - name: Build Xenia
         run: python xenia-build.py build --config=Release --target=xenia-app
 
+      # PhysicalHeap vE0000000 alignment is excluded on Windows: it expects a
+      # 64 KB-aligned allocation in the 0xE0000000 heap to be rejected, which
+      # contradicts PhysicalHeap vE0000000 AllocRange alignment (excluded on
+      # Linux). Remove both exclusions once PhysicalHeap::AllocRange checks the
+      # physical address.
+      - name: Run tests
+        run: >-
+          python xenia-build.py test --config=Release --continue --
+          "~PhysicalHeap vE0000000 alignment"
+
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |-
