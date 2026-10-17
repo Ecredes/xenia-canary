@@ -15,6 +15,7 @@
 #include <string>
 
 #include "xenia/cpu/export_resolver.h"
+#include "xenia/cpu/ppc/ppc_context.h"
 
 namespace xe::kernel::shim {
 enum class KernelModuleId;
@@ -31,6 +32,10 @@ bool ShouldReportFirstCall(cpu::ExportTag::type tags, bool report_all);
 // The id of the calling guest thread, or 0 when not on a guest thread.
 uint32_t CurrentGuestThreadId();
 
+// True for the exports that put a dialog on screen: category kUI and a name
+// starting with XamShow (XamIsUIActive is excluded by name).
+bool IsUiShowExport(const cpu::Export& entry);
+
 // Per-export call counter. Production instances are heap-allocated by the
 // export trampoline and never destroyed (the exit handlers and still-running
 // guest threads use them during process exit). They register themselves in a
@@ -46,10 +51,16 @@ class ExportStats {
   // Counts the call (one relaxed fetch_add). On the first call only,
   // guest_thread_id() is evaluated and export_first_call is emitted when the
   // telemetry_exports cvar selects this export.
+  // Exports that show UI also emit xam_ui on every call (they are rare and each
+  // is a real UI moment).
   template <typename ThreadIdFn>
-  void OnCall(uint32_t caller_lr, ThreadIdFn&& guest_thread_id) {
+  void OnCall(const cpu::ppc::PPCContext& context,
+              ThreadIdFn&& guest_thread_id) {
     if (calls_.fetch_add(1, std::memory_order_relaxed) == 0) {
-      ReportFirstCall(caller_lr, guest_thread_id());
+      ReportFirstCall(static_cast<uint32_t>(context.lr), guest_thread_id());
+    }
+    if (is_ui_show_) {
+      ReportUiShown(static_cast<uint32_t>(context.r[3]));
     }
   }
   uint64_t calls() const { return calls_.load(std::memory_order_relaxed); }
@@ -58,9 +69,11 @@ class ExportStats {
   friend std::string ExportCallsJson();
 
   void ReportFirstCall(uint32_t caller_lr, uint32_t guest_thread_id);
+  void ReportUiShown(uint32_t user);
 
   const char* library_;
   const cpu::Export* entry_;
+  const bool is_ui_show_;
   std::atomic<uint64_t> calls_{0};
   ExportStats* prev_ = nullptr;
   ExportStats* next_ = nullptr;

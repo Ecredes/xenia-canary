@@ -11,6 +11,7 @@
 #define XENIA_KERNEL_XAM_XAM_STATE_H_
 
 #include <memory>
+#include <mutex>
 
 #include "xenia/kernel/xam/achievement_manager.h"
 #include "xenia/kernel/xam/app_manager.h"
@@ -59,6 +60,10 @@ class XamState {
 
   void SetContentRegisterCallback(uint32_t callback);
 
+  // Records whether a dialog is up and tells telemetry (system_ui state) when
+  // the value changes.
+  void SetUIActive(bool active);
+
   bool IsUIActive() const { return is_xam_dialog_present_.load(); }
 
   uint32_t GetLanguageFallbackAddress(uint32_t index) const {
@@ -82,6 +87,10 @@ class XamState {
   void LoadIptvServiceName();
 
   KernelState* kernel_state_;
+
+  // Held across the dialog flag change and its telemetry notification, so
+  // racing show/close calls notify in the order they changed the flag.
+  std::mutex ui_active_mutex_;
 
   std::unique_ptr<AppManager> app_manager_;
   std::unique_ptr<ContentManager> content_manager_;

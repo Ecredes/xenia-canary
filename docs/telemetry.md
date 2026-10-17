@@ -62,7 +62,7 @@ starting ──► loading ──► running ◄──► paused
 | `starting` | telemetry opened, no title yet |
 | `loading` | a title launched, no swap since |
 | `running` | first swap after `loading`, resume from `paused`, or a system UI closed |
-| `system_ui` | a system (XAM) UI is shown; left when the UI closes |
+| `system_ui` | a system (XAM) dialog is up, shown by the guest or by the emulator's own dialogs; left when it closes |
 | `paused` | the emulator is paused (save/restore state, or a debugger break); resume returns to the state it left |
 | `crashed` | guest crash (terminal) |
 | `exited` | telemetry closing (terminal) |
@@ -80,7 +80,10 @@ Transition rules (the `reason` written with each transition is in parentheses):
   and the debugger pause independently: the state stays `paused` until both
   have resumed.
 - A system UI moves `loading` or `running` to `system_ui` (`xam_ui`); closing
-  it returns to the state it left (`xam_ui_closed`). While `paused`, a UI
+  it returns to the state it left (`xam_ui_closed`). The `xam_ui` event names
+  the UI; the state change records that a dialog is up, so a dialog may move
+  the state without an `xam_ui` event, and one `xam_ui` event may not move it
+  if a dialog was already up. While `paused`, a UI
   opening or closing only changes the state that resume returns to.
 - A guest crash moves any non-terminal state to `crashed` (`guest_crash`).
 - Exit moves any state but `exited` to `exited`. Its reason is the exit
@@ -114,6 +117,7 @@ reports.
 | `file_open_failed` | a guest file open fails (including a path rejected as invalid) | `path` (the guest path as given, before any host translation), `status` (hex NTSTATUS), `disposition` (the guest creation disposition, unsigned). At most one per path |
 | `file_open` | a guest file open succeeds; only when `telemetry_file_opens` is `all` | `path`. At most one per path |
 | `input_first_poll` | the first controller state poll for a user index | `user` (index), `connected` (bool: whether any input driver returned a state for that poll). At most one per user; later polls, connected or not, only count towards `input_polls` |
+| `xam_ui` | a guest call to a kernel export that shows system UI (a `XamShow*` export in the UI category), on every call | `ui` (the export name, e.g. `XamShowMessageBoxUI`), `user` (the call's first argument as an unsigned integer; for most of these exports the user index) |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
 | `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
@@ -173,7 +177,6 @@ this on Windows.
 The format is growing. These events are planned and not written yet:
 
 - `gpu`: the graphics backend and adapter.
-- `xam_ui`: a system UI is shown.
 - `shader_failed`: a shader that failed to translate or compile.
 - `xma_error`, `audio_client`: audio decoding and host audio driver events.
 - `gpu_error`: command stream errors.

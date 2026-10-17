@@ -75,14 +75,14 @@ X_RESULT xeXamShowDialog(std::function<void(std::function<void(Answer)>)> ask,
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_ACCESS_DENIED;
   }
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   auto pre = []() {
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
   };
   auto run = [ask = std::move(ask), on_answer]() -> X_RESULT {
     Answer answer = xeXamWaitForAnswer<Answer>(ask);
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    kernel_state()->xam_state()->SetUIActive(false);
     return on_answer(std::move(answer));
   };
   auto post = []() {
@@ -123,7 +123,7 @@ X_RESULT xeXamShowText(
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_ACCESS_DENIED;
   }
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   auto pre = []() {
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
@@ -136,7 +136,7 @@ X_RESULT xeXamShowText(
               kernel_state()->emulator()->host().RequestText(request,
                                                              std::move(done));
             });
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    kernel_state()->xam_state()->SetUIActive(false);
     return on_answer(std::move(text), extended_error, length);
   };
   auto post = []() {
@@ -162,11 +162,11 @@ X_RESULT xeXamShowDialogAsync(
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_ACCESS_DENIED;
   }
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
   kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
   ask([on_answer](Answer answer) {
     on_answer(std::move(answer));
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    kernel_state()->xam_state()->SetUIActive(false);
     std::thread([] {
       xe::threading::Sleep(kUIDelayMillis);
       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
