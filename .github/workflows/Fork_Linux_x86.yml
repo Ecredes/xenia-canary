@@ -116,6 +116,25 @@ jobs:
           ccache --show-stats
           du -sh ~/.ccache ~/.cache/thinlto || true
 
+      # Fork-only until upstream runs tests (fork issue #5, branch ci/run-tests).
+      # PhysicalHeap vE0000000 AllocRange alignment is excluded: it fails on
+      # Linux until PhysicalHeap::AllocRange checks the physical address (fork
+      # issue #9, branch memory/physical-heap-alignment).
+      - name: Run tests
+        env:
+          CC: clang-${{ env.LLVM_VERSION }}
+          CXX: clang++-${{ env.LLVM_VERSION }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 2G
+        run: |-
+          export CCACHE_DIR=$HOME/.ccache
+          export LDFLAGS="-fuse-ld=lld -Wl,--thinlto-cache-dir=$HOME/.cache/thinlto"
+          ccache --zero-stats
+          ./xenia-build.py test --config=Release --continue -- \
+            "~PhysicalHeap vE0000000 AllocRange alignment"
+
       - name: Prepare AppImage
         id: prepare_artifacts
         run: |-
