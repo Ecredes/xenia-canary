@@ -74,7 +74,7 @@ X_RESULT xeXamDispatchDialog(T* dialog,
     if (app_context.CallInUIThreadSynchronous(
             [&dialog, &fence]() { dialog->Then(&fence); })) {
       fence.Wait();
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+      kernel_state()->xam_state()->SetUIActive(false);
     } else {
       delete dialog;
     }
@@ -118,7 +118,7 @@ X_RESULT xeXamDispatchDialogEx(
     if (display_window->app_context().CallInUIThreadSynchronous(
             [&dialog, &fence]() { dialog->Then(&fence); })) {
       fence.Wait();
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+      kernel_state()->xam_state()->SetUIActive(false);
     } else {
       delete dialog;
     }
@@ -202,7 +202,7 @@ X_RESULT xeXamDispatchDialogAsync(T* dialog,
   dialog->set_close_callback([dialog, close_callback]() {
     close_callback(dialog);
 
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    kernel_state()->xam_state()->SetUIActive(false);
 
     auto run = []() -> void {
       xe::threading::Sleep(kUIDelayMillis);
@@ -223,7 +223,7 @@ X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
   display_window->app_context().CallInUIThread([run_callback]() {
     run_callback();
 
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    kernel_state()->xam_state()->SetUIActive(false);
 
     auto run = []() -> void {
       xe::threading::Sleep(kUIDelayMillis);
@@ -373,7 +373,7 @@ static dword_result_t XamShowMessageBoxUi(
       return X_ERROR_ACCESS_DENIED;
     }
 
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+    kernel_state()->xam_state()->SetUIActive(true);
 
     const Emulator* emulator = kernel_state()->emulator();
     xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
@@ -395,7 +395,7 @@ static dword_result_t XamShowMessageBoxUi(
     } else {
       auto close = [result_ptr](MessageBoxDialog* dialog) -> X_RESULT {
         result_ptr->ButtonPressed = dialog->chosen_button();
-        kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+        kernel_state()->xam_state()->SetUIActive(false);
         return X_ERROR_SUCCESS;
       };
 
@@ -530,7 +530,7 @@ dword_result_t XamShowKeyboardUI_entry(
       return X_ERROR_ACCESS_DENIED;
     }
 
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+    kernel_state()->xam_state()->SetUIActive(true);
 
     const Emulator* emulator = kernel_state()->emulator();
     xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
@@ -595,7 +595,7 @@ dword_result_t XamShowDeviceSelectorUI_entry(
     return X_ERROR_ACCESS_DENIED;
   }
 
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   std::string title = "Select storage device";
   std::string desc = "";
@@ -714,7 +714,7 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
     return X_ERROR_ACCESS_DENIED;
   }
 
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   bool is_xbla_unlock_offer =
       (offer_id == ((uint64_t(kernel_state()->title_id()) << 32) | 1ull));
@@ -867,7 +867,7 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
     return X_ERROR_ACCESS_DENIED;
   }
 
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   auto close = [hresult_ptr](MessageBoxDialog* dialog) -> X_RESULT {
     if (hresult_ptr) {
@@ -1024,7 +1024,7 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
     return X_ERROR_ACCESS_DENIED;
   }
 
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   auto close = [](ui::SigninUI* dialog) -> void {};
 
@@ -1050,7 +1050,7 @@ X_RESULT xeXamShowCreateProfileUIEx(uint32_t user_index, dword_t flag,
     return X_ERROR_ACCESS_DENIED;
   }
 
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->xam_state()->SetUIActive(true);
 
   auto close = [](ui::CreateProfileUI* dialog) -> void {};
 
@@ -1211,9 +1211,9 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(dword_t user_index,
               "The game has indicated there is a problem with NUI (Kinect).")
               ->Then(&fence);
         })) {
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+      kernel_state()->xam_state()->SetUIActive(true);
       fence.Wait();
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+      kernel_state()->xam_state()->SetUIActive(false);
     }
   }
 

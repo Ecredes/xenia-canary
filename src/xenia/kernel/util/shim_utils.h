@@ -559,8 +559,7 @@ struct ExportRegistrerHelper {
           // Never destroyed: exit handlers and running guest threads use it.
           static auto* stats = new xe::kernel::util::ExportStats(
               xe::kernel::util::ExportLibraryName(MODULE), export_entry);
-          stats->OnCall(static_cast<uint32_t>(ppc_context->lr),
-                        xe::kernel::util::CurrentGuestThreadId);
+          stats->OnCall(*ppc_context, xe::kernel::util::CurrentGuestThreadId);
         }
         if (TAGS & xe::cpu::ExportTag::kLog &&
             (!(TAGS & xe::cpu::ExportTag::kHighFrequency) ||

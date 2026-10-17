@@ -8,11 +8,21 @@
  */
 
 #include "xenia/kernel/xam/xam_state.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/emulator.h"
 
 namespace xe {
 namespace kernel {
 namespace xam {
+
+void XamState::SetUIActive(bool active) {
+  std::lock_guard<std::mutex> lock(ui_active_mutex_);
+  const bool was_active = is_xam_dialog_present_.exchange(active);
+  if (was_active != active && telemetry::enabled()) {
+    telemetry::Notify(active ? telemetry::Signal::kUiShown
+                             : telemetry::Signal::kUiClosed);
+  }
+}
 
 XamState::XamState(Emulator* emulator, KernelState* kernel_state)
     : kernel_state_(kernel_state) {

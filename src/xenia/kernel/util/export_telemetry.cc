@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -46,8 +47,17 @@ bool ShouldReportFirstCall(cpu::ExportTag::type tags, bool report_all) {
          (tags & (cpu::ExportTag::kStub | cpu::ExportTag::kSketchy)) != 0;
 }
 
+bool IsUiShowExport(const cpu::Export& entry) {
+  const auto category = static_cast<cpu::ExportCategory>(
+      (entry.tags >> cpu::ExportTag::CategoryShift) & 0xFF);
+  return category == cpu::ExportCategory::kUI &&
+         std::string_view(entry.name).starts_with("XamShow");
+}
+
 ExportStats::ExportStats(const char* library, const cpu::Export* entry)
-    : library_(library), entry_(entry) {
+    : library_(library),
+      entry_(entry),
+      is_ui_show_(IsUiShowExport(*entry)) {
   Registry& registry = GetRegistry();
   std::lock_guard<std::mutex> lock(registry.mutex);
   next_ = registry.head;
@@ -86,6 +96,12 @@ void ExportStats::ReportFirstCall(uint32_t caller_lr,
       .Str("tag", tag)
       .Hex("caller", caller_lr)
       .UInt("thread", guest_thread_id);
+  telemetry::Emit(std::move(event));
+}
+
+void ExportStats::ReportUiShown(uint32_t user) {
+  telemetry::Event event("xam_ui");
+  event.Str("ui", entry_->name).UInt("user", user);
   telemetry::Emit(std::move(event));
 }
 
