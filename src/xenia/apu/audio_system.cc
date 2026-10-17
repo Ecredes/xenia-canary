@@ -9,6 +9,8 @@
 
 #include "xenia/apu/audio_system.h"
 
+#include <cmath>
+#include <cstring>
 #include <limits>
 
 #include "xenia/apu/apu_flags.h"
@@ -16,6 +18,7 @@
 #include "xenia/apu/nop_audio_driver.h"
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -23,6 +26,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
@@ -41,6 +45,18 @@
 
 namespace xe {
 namespace apu {
+
+namespace {
+// Not deduplicated: clients are registered and unregistered rarely.
+void ReportAudioClient(const char* event, size_t index) {
+  if (!xe::telemetry::enabled()) {
+    return;
+  }
+  xe::telemetry::Emit(xe::telemetry::Event("audio_client")
+                          .Str("event", event)
+                          .UInt("index", index));
+}
+}  // namespace
 
 AudioSystem::AudioSystem(cpu::Processor* processor)
     : memory_(processor->memory()),
@@ -187,6 +203,9 @@ void AudioSystem::WorkerThreadMain() {
       uint64_t args[] = {client_callback_arg};
       processor_->Execute(worker_thread_->thread_state(), client_callback, args,
                           xe::countof(args));
+    } else if (client_callback) {
+      // No free host output slot: this pump is dropped.
+      xe::telemetry::Count(xe::telemetry::Counter::kAudioDropped);
     }
   }
   worker_running_ = false;
@@ -251,6 +270,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   if (XFAILED(result)) {
     XELOGE("AudioSystem::RegisterClient: CreateDriver failed for index={}",
            index);
+    ReportAudioClient("driver_failed", index);
     return result;
   }
   assert_not_null(driver);
@@ -272,6 +292,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
 
   XELOGI("AudioSystem::RegisterClient: client {} registered successfully",
          index);
+  ReportAudioClient("registered", index);
 
   if (out_index) {
     *out_index = index;
@@ -302,6 +323,28 @@ void AudioSystem::SubmitFrame(size_t index, float* samples) {
     }
     return;
   }
+  if (xe::telemetry::enabled()) {
+    // The guest always submits kFrameChannelsDefault x kChannelSamplesDefault
+    // floats; the driver does not expose a per-client channel count. They are
+    // big endian: the XAudio2 driver's SubmitFrame byte-swaps them too
+    // (conversion::sequential_6_BE_to_interleaved_6_LE), and reading them
+    // without the swap gave a nonsense peak of about +770 dBFS in a test run.
+    // NaN and infinite samples are ignored so they cannot poison the window's
+    // peak.
+    float peak = 0.0f;
+    const uint32_t* raw = reinterpret_cast<const uint32_t*>(samples);
+    for (uint32_t i = 0; i < AudioDriver::kFrameSamplesMax; ++i) {
+      const uint32_t bits = xe::byte_swap(raw[i]);
+      float sample;
+      std::memcpy(&sample, &bits, sizeof(sample));
+      const float a = std::fabs(sample);
+      if (a > peak && a <= std::numeric_limits<float>::max()) {
+        peak = a;
+      }
+    }
+    xe::telemetry::Count(xe::telemetry::Counter::kAudioFrames);
+    xe::telemetry::ObservePeak(peak);
+  }
   (clients_[index].driver)->SubmitFrame(samples);
 }
 
@@ -320,6 +363,7 @@ void AudioSystem::UnregisterClient(size_t index) {
   clients_[index].callback_arg = 0;
   clients_[index].wrapped_callback_arg = 0;
   clients_[index].in_use = false;
+  ReportAudioClient("unregistered", index);
 
   // Drain the semaphore of its count.
   auto client_semaphore = client_semaphores_[index].get();
@@ -444,6 +488,7 @@ X_STATUS AudioSystem::CreateClientDriver(size_t index,
   *out_driver = new nop::NopAudioDriver(semaphore);
   XELOGW("APU: {} failed to create a driver for client {}; continuing silently",
          name(), index);
+  ReportAudioClient("driver_failed", index);
   return X_STATUS_SUCCESS;
 }
 
