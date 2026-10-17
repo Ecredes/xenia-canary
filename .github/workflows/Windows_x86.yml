@@ -63,8 +63,42 @@ jobs:
           $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
           git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
 
+      - name: Cache compiler output
+        uses: actions/cache@v6
+        with:
+          path: |
+            C:\ccache
+            build\bin\Windows\Release\*.iobj
+            build\bin\Windows\Release\*.ipdb
+          key: ${{ runner.os }}-ccache-v2-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-ccache-v2-
+
+      - name: Install ccache
+        env:
+          CCACHE_VERSION: 4.11.3
+        run: |-
+          $name = "ccache-$env:CCACHE_VERSION-windows-x86_64"
+          Invoke-WebRequest -Uri "https://github.com/ccache/ccache/releases/download/v$env:CCACHE_VERSION/$name.zip" -OutFile "$env:RUNNER_TEMP\ccache.zip"
+          Expand-Archive "$env:RUNNER_TEMP\ccache.zip" -DestinationPath "$env:RUNNER_TEMP"
+          echo "$env:RUNNER_TEMP\$name" >> $env:GITHUB_PATH
+
       - name: Build Xenia
-        run: python xenia-build.py build --config=Release --target=xenia-app
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_DIR: C:\ccache
+          CCACHE_MAXSIZE: 2G
+        run: |-
+          ccache --zero-stats
+          # The artifact ships without a .pdb, so skip debug info: it also keeps
+          # the cache small. Incremental LTCG reuses the cached .iobj/.ipdb files.
+          python xenia-build.py build --config=Release --target=xenia-app `
+            --cmake-define XENIA_RELEASE_DEBUG_INFO=OFF `
+            --cmake-define XENIA_INCREMENTAL_LTCG=ON
+          $build_result = $LASTEXITCODE
+          ccache --show-stats -v
+          Get-ChildItem build\bin\Windows\Release -ErrorAction SilentlyContinue | Format-Table Name, Length
+          exit $build_result
 
       - name: Prepare artifacts
         id: prepare_artifacts

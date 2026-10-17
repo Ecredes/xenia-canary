@@ -37,6 +37,8 @@ message(STATUS "Target architecture: XE_TARGET_AARCH64=${XE_TARGET_AARCH64} XE_T
 option(XENIA_BUILD_TESTS "Build test suites" OFF)
 option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler, vfs-dump, demos)" OFF)
 option(XENIA_ENABLE_GPU_TRACE "Enable GPU trace capture in Release" OFF)
+option(XENIA_RELEASE_DEBUG_INFO "Generate a .pdb for Release builds (MSVC)" ON)
+option(XENIA_INCREMENTAL_LTCG "Use incremental LTCG for Release builds (MSVC)" OFF)
 
 if(XENIA_ENABLE_GPU_TRACE)
   add_compile_definitions(XE_OPTION_GPU_TRACE=1)
@@ -172,8 +174,10 @@ if(MSVC)
   add_compile_definitions($<$<CONFIG:Release>:_NO_DEBUG_HEAP=1>)
   add_compile_options($<$<CONFIG:Release>:/Gw>)
   add_compile_options($<$<CONFIG:Release>:/GS->)  # NoBufferSecurityCheck
-  add_compile_options($<$<CONFIG:Release>:/Zi>)    # Generate PDB debug info
-  add_link_options($<$<CONFIG:Release>:/DEBUG>)     # Emit .pdb for the linked binary
+  if(XENIA_RELEASE_DEBUG_INFO)
+    add_compile_options($<$<CONFIG:Release>:/Zi>)  # Generate PDB debug info
+    add_link_options($<$<CONFIG:Release>:/DEBUG>)   # Emit .pdb for the linked binary
+  endif()
   add_link_options($<$<CONFIG:Release>:/OPT:REF>)   # Remove unreferenced functions/data
   add_link_options($<$<CONFIG:Release>:/OPT:ICF>)   # Fold identical COMDATs
   # Replace /Ob2 with /Ob3 in CMake's default Release flags
@@ -181,7 +185,13 @@ if(MSVC)
   string(REPLACE "/Ob2" "/Ob3" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
   # Link-time optimization (whole program optimization)
   add_compile_options($<$<CONFIG:Release>:/GL>)
-  add_link_options($<$<CONFIG:Release>:/LTCG>)
+  if(XENIA_INCREMENTAL_LTCG)
+    # Keeps the previous link's code generation state in .iobj/.ipdb files
+    # next to the output and only regenerates functions that changed.
+    add_link_options($<$<CONFIG:Release>:/LTCG:INCREMENTAL>)
+  else()
+    add_link_options($<$<CONFIG:Release>:/LTCG>)
+  endif()
   set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "${CMAKE_STATIC_LINKER_FLAGS_RELEASE} /LTCG")
 
 else()
