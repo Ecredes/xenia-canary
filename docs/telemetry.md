@@ -113,6 +113,7 @@ reports.
 | `unimplemented_instruction` | the JIT meets a PowerPC instruction Xenia does not implement | `address` (hex), `opcode` (hex instruction word), `name` (disassembly mnemonic). At most one per address. Written at JIT translation time, which can be before the instruction ever runs, or without it running at all |
 | `file_open_failed` | a guest file open fails (including a path rejected as invalid) | `path` (the guest path as given, before any host translation), `status` (hex NTSTATUS), `disposition` (the guest creation disposition, unsigned). At most one per path |
 | `file_open` | a guest file open succeeds; only when `telemetry_file_opens` is `all` | `path`. At most one per path |
+| `input_first_poll` | the first controller state poll for a user index | `user` (index), `connected` (bool: whether any input driver returned a state for that poll). At most one per user; later polls, connected or not, only count towards `input_polls` |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
 | `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
@@ -172,7 +173,6 @@ this on Windows.
 The format is growing. These events are planned and not written yet:
 
 - `gpu`: the graphics backend and adapter.
-- `input_first_poll`: the first controller poll per user index.
 - `xam_ui`: a system UI is shown.
 - `shader_failed`: a shader that failed to translate or compile.
 - `xma_error`, `audio_client`: audio decoding and host audio driver events.
