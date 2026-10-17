@@ -60,6 +60,7 @@ KernelState::KernelState(Emulator* emulator)
       kernel_trampoline_group_(emulator->processor()->backend()) {
   assert_null(shared_kernel_state_);
   shared_kernel_state_ = this;
+  util::RegisterExportTelemetry();
   processor_ = emulator->processor();
   file_system_ = emulator->file_system();
   xam_state_ = std::make_unique<xam::XamState>(emulator, this);

@@ -18,6 +18,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
@@ -114,6 +115,13 @@ XThread* XThread::GetCurrentThread() {
     assert_always("Attempting to use guest stuff from a non-guest thread.");
   }
   return thread;
+}
+
+XThread* XThread::TryGetCurrentThread() { return current_xthread_tls_; }
+
+bool XThread::IsCurrentGuestThread() {
+  XThread* thread = current_xthread_tls_;
+  return thread && thread->is_guest_thread();
 }
 
 uint32_t XThread::GetCurrentThreadHandle() {
@@ -448,6 +456,14 @@ X_STATUS XThread::Create() {
     return X_STATUS_NO_MEMORY;
   }
 
+  // Count the thread before it can run, so Exit cannot decrement first.
+  // Only guest threads count; host threads (GPU, audio, ...) wait on host
+  // primitives and would defeat the blocked == guest deadlock check.
+  if (xe::telemetry::enabled() && is_guest_thread()) {
+    telemetry_counted_.store(true, std::memory_order_relaxed);
+    xe::telemetry::AddGauge(xe::telemetry::Gauge::kGuestThreads, 1);
+  }
+
   // Set the thread name based on host ID (for easier debugging).
   if (thread_name_.empty()) {
     set_name(fmt::format("XThread{:04X}", thread_->system_id()));
@@ -477,6 +493,7 @@ X_STATUS XThread::Exit(int exit_code) {
   assert_true(XThread::GetCurrentThread() == this);
   // TODO(chrispy): not sure if this order is correct, should it come after
   // apcs?
+  OnTelemetryThreadEnd();
   auto kthread = guest_object<X_KTHREAD>();
   auto cpu_context = thread_state_->context();
   kthread->terminated = 1;
@@ -518,7 +535,15 @@ X_STATUS XThread::Exit(int exit_code) {
   return X_STATUS_SUCCESS;
 }
 
+void XThread::OnTelemetryThreadEnd() {
+  // Exit and Terminate can both run for one thread; only the first counts.
+  if (telemetry_counted_.exchange(false, std::memory_order_relaxed)) {
+    xe::telemetry::AddGauge(xe::telemetry::Gauge::kGuestThreads, -1);
+  }
+}
+
 X_STATUS XThread::Terminate(int exit_code) {
+  OnTelemetryThreadEnd();
   // TODO(benvanik): inform the profiler that this thread is exiting.
 
   // Set exit code.

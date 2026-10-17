@@ -22,5 +22,30 @@ XThread* ContextParam::CurrentXThread() const {
 }
 
 }  // namespace shim
+
+// Defined here (not in export_telemetry.cc) so the export statistics stay
+// linkable without the rest of the kernel.
+namespace util {
+const char* ExportLibraryName(shim::KernelModuleId id) {
+  switch (id) {
+    case shim::KernelModuleId::xboxkrnl:
+      return "xboxkrnl";
+    case shim::KernelModuleId::xam:
+      return "xam";
+    case shim::KernelModuleId::xbdm:
+      return "xbdm";
+  }
+  return "unknown";
+}
+
+uint32_t CurrentGuestThreadId() {
+  XThread* thread = XThread::TryGetCurrentThread();
+  if (!thread) {
+    return 0;
+  }
+  return thread->guest_object<X_KTHREAD>()->thread_id;
+}
+
+}  // namespace util
 }  // namespace kernel
 }  // namespace xe

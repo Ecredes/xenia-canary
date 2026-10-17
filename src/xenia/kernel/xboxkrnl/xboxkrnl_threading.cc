@@ -8,6 +8,9 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <optional>
+
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/platform.h"
@@ -460,7 +463,14 @@ uint32_t KeDelayExecutionThread(uint32_t processor_mode, uint32_t alertable,
       return stat;
     }
   }
-  X_STATUS result = thread->Delay(processor_mode, alertable, *interval_ptr);
+  X_STATUS result;
+  {
+    std::optional<xe::telemetry::GaugeScope> sleeping_scope;
+    if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
+      sleeping_scope.emplace(xe::telemetry::Gauge::kSleepingThreads);
+    }
+    result = thread->Delay(processor_mode, alertable, *interval_ptr);
+  }
 
   if (result == X_STATUS_USER_APC) {
     xeProcessUserApcs(ctx);

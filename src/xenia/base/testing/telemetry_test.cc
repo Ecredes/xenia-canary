@@ -222,6 +222,25 @@ TEST_CASE("telemetry: Shutdown writes exit and exited last", "[telemetry]") {
   REQUIRE(queued == 100);
 }
 
+TEST_CASE("telemetry: exit-field providers fill the exit line", "[telemetry]") {
+  using namespace xe::telemetry;
+  auto path = std::filesystem::temp_directory_path() /
+              "xe_telemetry_exit_field_test.jsonl";
+  AddExitField([](Event& event) { event.Raw("provided", R"({"a":1})"); });
+  REQUIRE(OpenFile(path));
+  Shutdown();
+
+  std::ifstream in(path);
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);) {
+    lines.push_back(line);
+  }
+  REQUIRE(lines.size() >= 2);
+  const std::string& exit_line = lines[lines.size() - 2];
+  REQUIRE(exit_line.find(R"("type":"exit")") != std::string::npos);
+  REQUIRE(exit_line.find(R"("provided":{"a":1})") != std::string::npos);
+}
+
 #if XE_PLATFORM_WIN32
 // External tools line telemetry up with their own clock (e.g. Python's
 // time.perf_counter_ns, which reads QueryPerformanceCounter), so NowNs must
