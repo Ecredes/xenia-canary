@@ -613,6 +613,10 @@ void Processor::DemandDebugListener() {
 }
 
 bool Processor::OnThreadBreakpointHit(Exception* ex) {
+  if (OnStepBreakpointHit(ex)) {
+    return true;
+  }
+
   auto global_lock = global_critical_region_.Acquire();
 
   // Suspend all threads (but ourselves).
@@ -979,37 +983,104 @@ void Processor::StepGuestInstruction(uint32_t thread_id) {
   ResumeThread(thread_id);
 }
 
-bool Processor::StepToGuestAddress(uint32_t thread_id, uint32_t pc) {
-  auto functions = FindFunctionsWithAddress(pc);
-  if (functions.empty()) {
-    // Function hasn't been generated yet. Generate it.
-    if (!ResolveFunction(pc)) {
+// A RunGuestThreadUntil in progress.
+struct Processor::GuestStep {
+  uint32_t thread_id = 0;
+  std::vector<std::unique_ptr<Breakpoint>> breakpoints;
+  // Set by the stepped thread when it reaches one of the breakpoints.
+  bool reached = false;
+  uint32_t reached_address = 0;
+  threading::Fence reached_fence;
+  // Set when the step is done. Threads stopped at the breakpoints wait for it.
+  std::shared_ptr<threading::Event> done;
+};
+
+uint32_t Processor::RunGuestThreadUntil(
+    uint32_t thread_id, const std::vector<uint32_t>& guest_addresses) {
+  for (uint32_t address : guest_addresses) {
+    if (FindFunctionsWithAddress(address).empty() &&
+        !ResolveFunction(address)) {
       XELOGE(
-          "Processor::StepToAddress({:08X}) - Function could not be resolved",
-          pc);
-      return false;
+          "Processor::RunGuestThreadUntil({:08X}) - Function could not be "
+          "resolved",
+          address);
+      return 0;
     }
   }
 
-  // Instruct the thread to step forwards.
-  threading::Fence fence;
-  cpu::Breakpoint bp(
-      this, Breakpoint::AddressType::kGuest, pc,
-      [&fence](Breakpoint* breakpoint, ThreadDebugInfo* thread_info,
-               uint64_t host_address) { fence.Signal(); });
-  bp.Resume();
-
-  // HACK
-  auto thread_info = QueryThreadDebugInfo(thread_id);
-  uint32_t suspend_count = 1;
-  while (suspend_count) {
-    thread_info->thread->thread()->Resume(&suspend_count);
+  std::lock_guard step_lock(guest_step_mutex_);
+  auto thread = QueryThreadDebugInfo(thread_id)->thread->thread();
+  GuestStep step;
+  step.thread_id = thread_id;
+  step.done = threading::Event::CreateManualResetEvent(false);
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (uint32_t address : guest_addresses) {
+      auto breakpoint = std::make_unique<Breakpoint>(
+          this, Breakpoint::AddressType::kGuest, address,
+          [](Breakpoint* breakpoint, ThreadDebugInfo* thread_info,
+             uint64_t host_address) {});
+      breakpoint->Resume();
+      step.breakpoints.push_back(std::move(breakpoint));
+    }
+    guest_step_ = &step;
   }
 
-  fence.Wait();
-  bp.Suspend();
+  uint32_t suspend_count = 1;
+  while (suspend_count) {
+    thread->Resume(&suspend_count);
+  }
+  step.reached_fence.Wait();
 
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    guest_step_ = nullptr;
+  }
+  // The thread waits for step.done in OnStepBreakpointHit, so it can't run on
+  // before it's suspended.
+  thread->Suspend();
+  step.done->Set();
+  return step.reached_address;
+}
+
+bool Processor::OnStepBreakpointHit(Exception* ex) {
+  auto global_lock = global_critical_region_.Acquire();
+  GuestStep* step = guest_step_;
+  if (!step) {
+    return false;
+  }
+  Breakpoint* breakpoint = nullptr;
+  for (auto& step_breakpoint : step->breakpoints) {
+    if (step_breakpoint->ContainsHostAddress(ex->pc())) {
+      breakpoint = step_breakpoint.get();
+      break;
+    }
+  }
+  if (!breakpoint) {
+    return false;
+  }
+  if (!step->reached && ThreadState::GetThreadID() == step->thread_id) {
+    step->reached = true;
+    step->reached_address = breakpoint->guest_address();
+    // Restore the original code, so this thread runs it when resumed and other
+    // threads no longer stop here.
+    for (auto& step_breakpoint : step->breakpoints) {
+      step_breakpoint->Suspend();
+    }
+    step->reached_fence.Signal();
+  }
+  // Other threads that reach a breakpoint wait for the step to finish, too.
+  auto done = step->done;
+  global_lock.unlock();
+  threading::Wait(done.get(), false);
+
+  // The original instruction is back in place of the breakpoint.
+  ex->set_resume_pc(ex->pc());
   return true;
+}
+
+bool Processor::StepToGuestAddress(uint32_t thread_id, uint32_t pc) {
+  return RunGuestThreadUntil(thread_id, {pc}) != 0;
 }
 
 uint32_t Processor::StepIntoGuestBranchTarget(uint32_t thread_id, uint32_t pc) {
@@ -1043,18 +1114,6 @@ uint32_t Processor::StepIntoGuestBranchTarget(uint32_t thread_id, uint32_t pc) {
     pc = nia;
   } else if (opcode == PPCOpcode::bcx || opcode == PPCOpcode::bcctrx ||
              opcode == PPCOpcode::bclrx) {
-    threading::Fence fence;
-    auto callback = [&fence, &pc](Breakpoint* breakpoint,
-                                  ThreadDebugInfo* thread_info,
-                                  uint64_t host_address) {
-      pc = breakpoint->guest_address();
-      fence.Signal();
-    };
-
-    cpu::Breakpoint bpf(this, Breakpoint::AddressType::kGuest, pc + 4,
-                        callback);
-    bpf.Resume();
-
     uint32_t nia = 0;
     if (opcode == PPCOpcode::bcx) {
       // bcx
@@ -1067,18 +1126,12 @@ uint32_t Processor::StepIntoGuestBranchTarget(uint32_t thread_id, uint32_t pc) {
       nia = uint32_t(context->lr);
     }
 
-    cpu::Breakpoint bpt(this, Breakpoint::AddressType::kGuest, nia, callback);
-    bpt.Resume();
-
-    // HACK
-    uint32_t suspend_count = 1;
-    while (suspend_count) {
-      thread->thread()->Resume(&suspend_count);
+    // Taken or not.
+    if (nia == pc + 4) {
+      pc = RunGuestThreadUntil(thread_id, {nia});
+    } else {
+      pc = RunGuestThreadUntil(thread_id, {nia, pc + 4});
     }
-
-    fence.Wait();
-    bpt.Suspend();
-    bpf.Suspend();
   }
 
   return pc;

@@ -12,6 +12,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -212,8 +213,19 @@ class Processor {
   uint8_t* AllocateFunctionTraceData(size_t size);
 
  private:
+  struct GuestStep;
+
   // Synchronously demands a debug listener.
   void DemandDebugListener();
+
+  // Runs the thread until it reaches one of the guest addresses, and leaves it
+  // suspended there, before the instruction at that address. Returns the
+  // address reached, or 0 if one couldn't be resolved.
+  uint32_t RunGuestThreadUntil(uint32_t thread_id,
+                               const std::vector<uint32_t>& guest_addresses);
+  // Handles reaching a breakpoint of RunGuestThreadUntil. Returns false if the
+  // exception isn't one.
+  bool OnStepBreakpointHit(Exception* ex);
 
   // Suspends all known threads (except the caller).
   bool SuspendAllThreads();
@@ -278,6 +290,11 @@ class Processor {
 
   // TODO(benvanik): cleanup/change structures.
   std::vector<Breakpoint*> breakpoints_;
+
+  // Serializes RunGuestThreadUntil.
+  std::mutex guest_step_mutex_;
+  // The RunGuestThreadUntil in progress. Guarded by the global lock.
+  GuestStep* guest_step_ = nullptr;
 
   Irql irql_;
 };
