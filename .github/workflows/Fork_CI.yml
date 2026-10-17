@@ -9,6 +9,11 @@ name: Fork CI
 # that push's Orchestrator run and lints and builds the same commit with ccache.
 # Runs started this way use the default branch's cache scope, so every branch
 # shares one compiler cache.
+#
+# It builds with copies of upstream's workflows, so it can't see changes to
+# them. Setup warns, and the commit status says so, when the commit's
+# Orchestrator/Lint/Linux_x86/Windows_x86.yml differ from the synced versions
+# recorded in SYNCED below (fork issue #25).
 
 on:
   workflow_run:
@@ -39,6 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      drift: ${{ steps.drift.outputs.drift }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -62,6 +68,30 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           gh api "repos/$REPO/statuses/$sha" -f state=pending -f context="Fork CI" \
             -f description="Building" -f target_url="$RUN_URL" > /dev/null
+
+      - name: Check the Fork_* copies against upstream
+        id: drift
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          # Blob SHAs (git rev-parse <commit>:.github/workflows/<file>) of the
+          # upstream workflows this file, Fork_Linux_x86.yml and
+          # Fork_Windows_x86.yml were last synced with. Update them together
+          # with the copies.
+          SYNCED: |-
+            Orchestrator.yml fc5130d5926c8234810cd5c032264c8ab4656a47
+            Lint.yml 669929cd86094207e305bde8a8abbb5794672e66
+            Linux_x86.yml a1cea2ea6ae0bbe6bf559bc21d305d15a583353c
+            Windows_x86.yml dff4513c3927a7ff713c4afb9e4115d895bf3a2e
+        run: |-
+          drift=
+          while read -r file blob; do
+            current=$(gh api "repos/$REPO/contents/.github/workflows/$file?ref=$SHA" -q .sha 2>/dev/null) || current=missing
+            if [ "$current" != "$blob" ]; then
+              echo "::warning title=Fork CI copies out of date::$file at ${SHA::9} differs from the version the Fork_* copies were synced with, so Fork CI isn't testing it. Refresh the copies (fork issue #25)."
+              drift="$drift $file"
+            fi
+          done <<< "$SYNCED"
+          echo "drift=${drift# }" >> "$GITHUB_OUTPUT"
 
   lint:
     name: Lint
@@ -106,6 +136,8 @@ jobs:
       SHA: ${{ needs.setup.outputs.sha }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       RESULTS: ${{ needs.lint.result }} ${{ needs.build-windows.result }} ${{ needs.build-linux.result }}
+      DRIFT: ${{ needs.setup.outputs.drift }}
+      WINDOWS_CACHEABLE: ${{ needs.build-windows.outputs.cacheable }}
     steps:
       - name: Set commit status
         run: |-
@@ -114,5 +146,12 @@ jobs:
             *" cancelled "*) state=error; description="Cancelled" ;;
             *) state=success; description="Lint and builds passed" ;;
           esac
+          if [ -n "$DRIFT" ]; then
+            description="$description; untested workflow changes: $DRIFT"
+          fi
+          if [ "$WINDOWS_CACHEABLE" = "false" ]; then
+            description="$description; Windows not cacheable"
+          fi
+          description="${description:0:140}"
           gh api "repos/$REPO/statuses/$SHA" -f state=$state -f context="Fork CI" \
             -f description="$description" -f target_url="$RUN_URL" > /dev/null

@@ -11,11 +11,17 @@ on:
         description: 'Commit to build'
         required: true
         type: string
+    outputs:
+      cacheable:
+        description: "'false' if the Release flags to rewrite weren't all found"
+        value: ${{ jobs.build.outputs.cacheable }}
 
 jobs:
   build:
     name: Build
     runs-on: windows-2025-vs2026
+    outputs:
+      cacheable: ${{ steps.cacheable.outputs.cacheable }}
 
     env:
       POWERSHELL_TELEMETRY_OPTOUT: 1
@@ -97,16 +103,30 @@ jobs:
         # so drop Release debug info. Incremental LTCG reuses the cached
         # .iobj/.ipdb files. Rewriting the flags works on any branch, with or
         # without the XENIA_RELEASE_DEBUG_INFO/XENIA_INCREMENTAL_LTCG options.
+        # Any flag that isn't found is reported, and Fork_CI.yml notes it in
+        # the commit status.
+        id: cacheable
         run: |-
           $path = "CMakeLists.txt"
           $text = [IO.File]::ReadAllText($path)
-          $new = $text.Replace('$<$<CONFIG:Release>:/Zi>', '$<$<CONFIG:Release>:>')
-          $new = $new.Replace('$<$<CONFIG:Release>:/DEBUG>', '$<$<CONFIG:Release>:>')
-          $new = $new.Replace('$<$<CONFIG:Release>:/LTCG>', '$<$<CONFIG:Release>:/LTCG:INCREMENTAL>')
-          if ($new -eq $text) {
-            echo "::warning::Release flags not found in CMakeLists.txt; the build may not be cacheable."
+          $missing = @()
+          foreach ($flag in @(
+              @('$<$<CONFIG:Release>:/Zi>', '$<$<CONFIG:Release>:>'),
+              @('$<$<CONFIG:Release>:/DEBUG>', '$<$<CONFIG:Release>:>'),
+              @('$<$<CONFIG:Release>:/LTCG>', '$<$<CONFIG:Release>:/LTCG:INCREMENTAL>'))) {
+            if ($text.Contains($flag[0])) {
+              $text = $text.Replace($flag[0], $flag[1])
+            } else {
+              $missing += $flag[0]
+            }
           }
-          [IO.File]::WriteAllText($path, $new)
+          [IO.File]::WriteAllText($path, $text)
+          if ($missing) {
+            echo "::warning title=Windows build not cacheable::CMakeLists.txt no longer contains $($missing -join ', '). Update this step (fork issue #25)."
+            echo "cacheable=false" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "cacheable=true" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Build Xenia
         env:
