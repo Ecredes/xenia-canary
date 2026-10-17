@@ -15,10 +15,10 @@ jobs:
           fetch-depth: 0
 
       - name: Validate commit messages
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |-
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-
           COMMITS=$(git log --format='%H %s' "${BASE}..$HEAD" --)
 
           if [ -z "$COMMITS" ]; then

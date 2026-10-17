@@ -31,10 +31,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          FULL_SHA: ${{ inputs.tag }}
+          BRANCH: ${{ inputs.branch }}
         run: |-
-          FULL_SHA="${{ inputs.tag }}"
           SHORT_SHA="${FULL_SHA::7}"
-          BRANCH="${{ inputs.branch }}"
           TAG_NAME="$SHORT_SHA"
           TITLE="${SHORT_SHA}_$BRANCH"
 
@@ -105,7 +105,7 @@ jobs:
           else
             gh release create "$TAG" \
               --repo "$REPO" \
-              --target "${{ inputs.tag }}" \
+              --target "$TARGET" \
               --title "$TITLE" \
               --notes-file release_notes.md \
               --latest \
