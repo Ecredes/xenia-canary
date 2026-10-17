@@ -11,6 +11,7 @@
 #include "xenia/vfs/virtual_file_system.h"
 
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/kernel/kernel_state.h"
 
 namespace xe {
@@ -188,6 +189,10 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
               position_ = byte_offset;
             }
             position_ += bytes_read;
+            if (xe::telemetry::enabled()) {
+              xe::telemetry::Count(xe::telemetry::Counter::kFileReadBytes,
+                                   bytes_read);
+            }
           }
         }
       }

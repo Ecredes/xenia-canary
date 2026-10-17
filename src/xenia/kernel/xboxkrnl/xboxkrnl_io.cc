@@ -7,7 +7,9 @@
  ******************************************************************************
  */
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -19,6 +21,9 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
+
+DEFINE_string(telemetry_file_opens, "failed",
+              "File opens reported: failed or all.", "Telemetry");
 
 namespace xe {
 namespace kernel {
@@ -36,6 +41,26 @@ struct CreateOptions {
   // Optimization - file access will be random, not sequential.
   static constexpr uint32_t FILE_RANDOM_ACCESS = 0x00000800;
 };
+
+// Reports failed opens, and every distinct open when telemetry_file_opens is
+// "all". The path is the guest path as given.
+static void ReportFileOpen(const std::string& path, X_STATUS status,
+                           uint32_t disposition) {
+  if (!xe::telemetry::enabled()) {
+    return;
+  }
+  if (XFAILED(status)) {
+    if (xe::telemetry::FirstTime("open_failed", path)) {
+      xe::telemetry::Emit(xe::telemetry::Event("file_open_failed")
+                              .Str("path", path)
+                              .Hex("status", status, 8)
+                              .UInt("disposition", disposition));
+    }
+  } else if (cvars::telemetry_file_opens == "all" &&
+             xe::telemetry::FirstTime("open", path)) {
+    xe::telemetry::Emit(xe::telemetry::Event("file_open").Str("path", path));
+  }
+}
 
 dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
                                   pointer_t<X_OBJECT_ATTRIBUTES> object_attrs,
@@ -65,6 +90,8 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
+    ReportFileOpen(target_path, X_STATUS_OBJECT_NAME_INVALID,
+                   creation_disposition);
     return X_STATUS_OBJECT_NAME_INVALID;
   }
 
@@ -87,6 +114,7 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
       (create_options & CreateOptions::FILE_DIRECTORY_FILE) != 0,
       (create_options & CreateOptions::FILE_NON_DIRECTORY_FILE) != 0, &vfs_file,
       &file_action);
+  ReportFileOpen(target_path, result, creation_disposition);
   object_ref<XFile> file = nullptr;
 
   X_HANDLE handle = X_INVALID_HANDLE_VALUE;
