@@ -18,6 +18,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
+#include "xenia/base/telemetry.h"
 
 extern "C" {
 #if XE_COMPILER_MSVC
@@ -37,6 +38,27 @@ extern "C" {
 
 namespace xe {
 namespace apu {
+
+namespace {
+// Reports the first xma_error of each kind per context. Formats only when
+// telemetry is on and the (kind, context) pair is new.
+template <typename... Args>
+void ReportXmaError(const char* kind, uint32_t context,
+                    fmt::format_string<const Args&...> detail,
+                    const Args&... args) {
+  if (!xe::telemetry::enabled()) {
+    return;
+  }
+  const std::string key = fmt::format("{}:{}", kind, context);
+  if (!xe::telemetry::FirstTime("xma", key)) {
+    return;
+  }
+  xe::telemetry::Emit(xe::telemetry::Event("xma_error")
+                          .Str("kind", kind)
+                          .UInt("context", context)
+                          .Str("detail", fmt::format(detail, args...)));
+}
+}  // namespace
 
 XmaContextMaster::XmaContextMaster() = default;
 
@@ -67,12 +89,14 @@ int XmaContextMaster::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
   av_codec_ = avcodec_find_decoder(AV_CODEC_ID_XMAFRAMES);
   if (!av_codec_) {
     XELOGE("XmaContext {}: Codec not found", id);
+    ReportXmaError("codec_init_failed", id, "codec not found");
     return 1;
   }
 
   av_context_ = avcodec_alloc_context3(av_codec_);
   if (!av_context_) {
     XELOGE("XmaContext {}: Couldn't allocate context", id);
+    ReportXmaError("codec_init_failed", id, "couldn't allocate context");
     return 1;
   }
 
@@ -83,6 +107,7 @@ int XmaContextMaster::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
   av_frame_ = av_frame_alloc();
   if (!av_frame_) {
     XELOGE("XmaContext {}: Couldn't allocate frame", id);
+    ReportXmaError("codec_init_failed", id, "couldn't allocate frame");
     return 1;
   }
 
@@ -563,6 +588,7 @@ void XmaContextMaster::Decode(XMA_CONTEXT_DATA* data) {
     auto ret = avcodec_send_packet(av_context_, av_packet_);
     if (ret < 0) {
       XELOGE("XmaContext {}: Error sending packet for decoding", id());
+      ReportXmaError("send_packet_failed", id(), "error {}", ret);
       // TODO bail out
       assert_always();
     }
@@ -575,6 +601,7 @@ void XmaContextMaster::Decode(XMA_CONTEXT_DATA* data) {
       av_strerror(ret, errbuf, sizeof(errbuf));
       XELOGE("XmaContext {}: Error during decoding: {} ({})", id(), errbuf,
              ret);
+      ReportXmaError("decode_failed", id(), "{} ({})", errbuf, ret);
       return;
     }
     assert_true(ret == 0);
@@ -824,6 +851,8 @@ int XmaContextMaster::PrepareDecoder(uint8_t* packet, int sample_rate,
 
     if (avcodec_open2(av_context_, av_codec_, NULL) < 0) {
       XELOGE("XmaContext: Failed to reopen FFmpeg context");
+      ReportXmaError("codec_init_failed", id(),
+                     "failed to reopen FFmpeg context");
       return -1;
     }
     return 1;

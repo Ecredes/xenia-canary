@@ -121,6 +121,8 @@ reports.
 | `gpu` | once per process, when the graphics backend settles on its adapter, before the first `frame_stats` | `backend` (`d3d12`, `vulkan`, `null`), then for `d3d12` and `vulkan`: `adapter` (adapter name), `vendor_id`, `device_id` (hex strings, 4 digits), `driver` (D3D12: user-mode driver version `a.b.c.d`, omitted if the query fails; Vulkan: `driverName driverInfo` when the driver properties extension is present, else the raw `driverVersion` as hex), `vram_mb` (dedicated video memory; Vulkan: the largest device-local heap). With `--gpu=null` only `backend` is written |
 | `shader_failed` | a shader failed to translate | `hash` (hex, 16 digits, the guest microcode hash), `stage` (`vertex`, `pixel`), `reason` (`translation`). At most one per hash |
 | `gpu_error` | the GPU command processor met a malformed command stream | `kind` (`packet_overflow_type0`, `packet_overflow_type3`, `ringbuffer_execute_failed`, `unknown_opcode`), `detail` (for overflows, `reg=` the base register index (type 0) or `opcode=` the opcode (type 3), then `read=` and `packet=` byte counts, all in hex; `primary`, `indirect` or `packet` for ring buffer failures; the opcode in hex for `unknown_opcode`). At most one per kind and detail, except the overflow kinds, which are written at most once per register (type 0) or opcode (type 3), with the counts of the first occurrence |
+| `xma_error` | the XMA audio decoder fails on a context in one of the kinds listed (these failures are also logged as `XmaContext` errors, but not every `XmaContext` error has a kind) | `kind` (`decode_failed`, `send_packet_failed`, `invalid_packet`, `no_output_blocks`, `codec_init_failed`), `context` (XMA context id), `detail` (the failing values, e.g. the FFmpeg error text and code, or the read offset). At most one per kind and context |
+| `audio_client` | a guest audio client is registered or unregistered, or its host audio driver could not be created (the client then plays silence) | `event` (`registered`, `unregistered`, `driver_failed`), `index` (client slot). Every occurrence is written |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
 | `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
@@ -142,9 +144,9 @@ example `10.0.26200`, or the kernel release on Linux), `arch` (`x86_64`,
 | `guest_threads` | guest threads alive now (threads running guest code; emulator-internal host threads are not counted) |
 | `blocked_threads` | guest threads inside a kernel wait now |
 | `sleeping_threads` | guest threads inside a delay (sleep) now |
-| `audio_frames` | audio frames submitted to the host driver in this window |
-| `audio_dropped` | audio frames dropped because the host queue was full |
-| `audio_peak_db` | peak absolute sample in the window as dBFS, 1 decimal; `null` when silent |
+| `audio_frames` | audio frames submitted to the host driver in this window, summed over audio clients; at full speed about 187 per second of window for each active client |
+| `audio_dropped` | audio pumps skipped in this window because the host had no free output slot |
+| `audio_peak_db` | peak absolute sample over the frames submitted in this window as dBFS, 1 decimal; `null` when silent or when no frame was submitted. This is activity, not content: no samples are recorded |
 
 The thread gauges are current values, not per-window counts. `blocked_threads`
 never exceeds `guest_threads`. A title that makes no progress (`swaps` stays 0
@@ -153,8 +155,7 @@ in the `running` state) with `blocked_threads` equal to `guest_threads` and
 means a deadlock. Threads in a delay are counted in `sleeping_threads`, not in
 `blocked_threads`.
 
-Counters that are not hooked up yet report 0. Guest memory use is not reported
-in this version.
+Guest memory use is not reported in this version.
 
 `crash` and `exit` lines, and the `state` lines into `crashed` and `exited`,
 are written and flushed before Xenia continues, since the process may be about
@@ -179,5 +180,4 @@ this on Windows.
 
 The format is growing. These events are planned and not written yet:
 
-- `xma_error`, `audio_client`: audio decoding and host audio driver events.
 - `crash`: guest crash details, followed by `state` → `crashed`.
