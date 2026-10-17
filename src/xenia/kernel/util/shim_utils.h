@@ -18,10 +18,12 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/cpu/export_resolver.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/util/export_telemetry.h"
 
 namespace xe {
 namespace kernel {
@@ -553,6 +555,13 @@ struct ExportRegistrerHelper {
         // The make_tuple order is undefined per the C++ standard and
         // cause inconsitencies between msvc and clang.
         std::tuple<Ps...> params = {Ps(init)...};
+        if (xe::telemetry::enabled()) {
+          // Never destroyed: exit handlers and running guest threads use it.
+          static auto* stats = new xe::kernel::util::ExportStats(
+              xe::kernel::util::ExportLibraryName(MODULE), export_entry);
+          stats->OnCall(static_cast<uint32_t>(ppc_context->lr),
+                        xe::kernel::util::CurrentGuestThreadId);
+        }
         if (TAGS & xe::cpu::ExportTag::kLog &&
             (!(TAGS & xe::cpu::ExportTag::kHighFrequency) ||
              cvars::log_high_frequency_kernel_calls)) {

@@ -18,6 +18,7 @@ line:
 |---|---|---|
 | `telemetry_file` | empty (off) | Path of the JSONL file to write. Truncated when opened. Other processes can read it while it grows. |
 | `telemetry_window` | `60` | Vblanks per `frame_stats` event. |
+| `telemetry_exports` | `stub` | Exports whose first call is reported by `export_first_call`: `stub` (stubbed and sketchy exports) or `all`. |
 
 Example:
 
@@ -105,8 +106,9 @@ reports.
 | `session_start` | telemetry opened; always the first line | `format` (int, currently 1), `xenia` (object: `branch`, `commit`, `commit_short`, `date`, `config` `debug`/`checked`/`release`), `host` (object, below), `cvars` (object: `gpu`, `vsync`, `framerate_limit`, `draw_resolution_scale_x`, `draw_resolution_scale_y`, `telemetry_window`), `wall_time` (ISO 8601, UTC) |
 | `state` | the emulator state changes | `from`, `to`, `reason` (see above). The envelope's `state` is already `to` |
 | `title` | a title launches (including a launch from another title) | `title_id` (hex string), `media_id` (hex string), `version`, `disc` (`number/count`), `module` (executable file name). `media_id` and `disc` are omitted when the executable has no execution info |
+| `export_first_call` | the first call of a kernel export selected by `telemetry_exports` | `library` (`xboxkrnl`, `xam`, `xbdm`), `ordinal`, `name`, `tag` (`stub`, `sketchy` or `implemented`; stub wins over sketchy), `caller` (hex guest address of the call site), `thread` (guest thread id). At most one per export per session |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
-| `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total` |
+| `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
 `host` in `session_start`: `os` (`windows`, `linux`), `os_version` (for
 example `10.0.26200`, or the kernel release on Linux), `arch` (`x86_64`,
@@ -123,12 +125,19 @@ example `10.0.26200`, or the kernel release on Linux), `arch` (`x86_64`,
 | `shader_compiles`, `pipeline_compiles` | compiled in this window |
 | `file_read_bytes` | guest file bytes read in this window |
 | `input_polls` | guest controller polls in this window |
-| `guest_threads` | guest threads alive now |
+| `guest_threads` | guest threads alive now (threads running guest code; emulator-internal host threads are not counted) |
 | `blocked_threads` | guest threads inside a kernel wait now |
 | `sleeping_threads` | guest threads inside a delay (sleep) now |
 | `audio_frames` | audio frames submitted to the host driver in this window |
 | `audio_dropped` | audio frames dropped because the host queue was full |
 | `audio_peak_db` | peak absolute sample in the window as dBFS, 1 decimal; `null` when silent |
+
+The thread gauges are current values, not per-window counts. `blocked_threads`
+never exceeds `guest_threads`. A title that makes no progress (`swaps` stays 0
+in the `running` state) with `blocked_threads` equal to `guest_threads` and
+`sleeping_threads` 0 has every guest thread waiting on another, which usually
+means a deadlock. Threads in a delay are counted in `sleeping_threads`, not in
+`blocked_threads`.
 
 Counters that are not hooked up yet report 0. Guest memory use is not reported
 in this version.
@@ -158,8 +167,8 @@ The format is growing. These events are planned and not written yet:
 
 - `gpu`: the graphics backend and adapter.
 - `input_first_poll`: the first controller poll per user index.
-- `import_missing`, `extern_undefined_call`, `export_first_call`: missing or
-  stubbed kernel functions the title uses.
+- `import_missing`, `extern_undefined_call`: missing kernel functions the
+  title uses.
 - `unimplemented_instruction`: the first unimplemented guest instruction per
   address.
 - `file_open_failed`, `file_open`: guest file opens.
@@ -168,4 +177,3 @@ The format is growing. These events are planned and not written yet:
 - `xma_error`, `audio_client`: audio decoding and host audio driver events.
 - `gpu_error`: command stream errors.
 - `crash`: guest crash details, followed by `state` → `crashed`.
-- `export_calls` in `exit`: kernel export call counts for the session.

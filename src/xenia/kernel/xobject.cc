@@ -9,7 +9,10 @@
 
 #include "xenia/kernel/xobject.h"
 
+#include <optional>
+
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -215,6 +218,12 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  // Counted as blocked for telemetry for the duration of the wait.
+  std::optional<xe::telemetry::GaugeScope> blocked_scope;
+  if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
+    blocked_scope.emplace(xe::telemetry::Gauge::kBlockedThreads);
+  }
+
   auto result =
       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
 
@@ -248,6 +257,12 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
+
+  // Counted as blocked for telemetry for the duration of the wait.
+  std::optional<xe::telemetry::GaugeScope> blocked_scope;
+  if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
+    blocked_scope.emplace(xe::telemetry::Gauge::kBlockedThreads);
+  }
 
   auto result = xe::threading::SignalAndWait(
       signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
@@ -291,6 +306,12 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
+
+  // Counted as blocked for telemetry for the duration of the wait.
+  std::optional<xe::telemetry::GaugeScope> blocked_scope;
+  if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
+    blocked_scope.emplace(xe::telemetry::Gauge::kBlockedThreads);
+  }
 
   X_STATUS status;
   uint32_t boost_increment = 0;

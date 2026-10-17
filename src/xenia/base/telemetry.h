@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -226,6 +227,12 @@ bool OpenFile(const std::filesystem::path& path);
 // "crash" is never replaced (closing a crashed title keeps it), and a title
 // launch resets any other reason to "shutdown".
 void SetExitReason(std::string_view reason);
+
+// Registers a callback that adds fields to the exit event. Providers run inside
+// Shutdown with telemetry locks held, so they must only fill the Event and must
+// not call any other telemetry function. Thread-safe; providers are never
+// removed. Register once per process (e.g. at kernel construction).
+void AddExitField(std::function<void(Event&)> provider);
 
 // Writes exit and the final state -> exited line synchronously, stops the
 // writer, closes the sinks and disables telemetry. No-op when not enabled.

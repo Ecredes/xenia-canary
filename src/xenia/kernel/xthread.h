@@ -408,6 +408,11 @@ class XThread : public XObject, public cpu::Thread {
   static bool IsInThread(XThread* other);
   static bool IsInThread();
   static XThread* GetCurrentThread();
+  // Like GetCurrentThread but returns null instead of asserting on a
+  // non-guest thread.
+  static XThread* TryGetCurrentThread();
+  // True on a thread running guest code (not a host thread).
+  static bool IsCurrentGuestThread();
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 
@@ -432,6 +437,7 @@ class XThread : public XObject, public cpu::Thread {
   X_STATUS Create();
   X_STATUS Exit(int exit_code);
   X_STATUS Terminate(int exit_code);
+  void OnTelemetryThreadEnd();
 
   virtual void Execute();
 
@@ -531,6 +537,8 @@ class XThread : public XObject, public cpu::Thread {
   bool guest_thread_ = false;
   bool main_thread_ = false;  // Entry-point thread
   bool running_ = false;
+  // True while this thread is counted in the telemetry guest_threads gauge.
+  std::atomic<bool> telemetry_counted_{false};
 
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this

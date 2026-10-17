@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
@@ -110,6 +111,10 @@ struct Globals {
 
   std::mutex first_mutex;
   std::unordered_set<std::string> first_seen;
+
+  // Leaf lock: only held to copy or append to exit_fields.
+  std::mutex exit_field_mutex;
+  std::vector<std::function<void(Event&)>> exit_fields;
 };
 
 Globals& G() {
@@ -929,6 +934,15 @@ bool OpenFile(const std::filesystem::path& path) {
   return true;
 }
 
+void AddExitField(std::function<void(Event&)> provider) {
+  if (!provider) {
+    return;
+  }
+  Globals& g = G();
+  std::lock_guard<std::mutex> lock(g.exit_field_mutex);
+  g.exit_fields.push_back(std::move(provider));
+}
+
 void SetExitReason(std::string_view reason) {
   Globals& g = G();
   std::lock_guard<std::mutex> lock(g.state_mutex);
@@ -954,12 +968,22 @@ void Shutdown() {
     std::lock_guard<std::mutex> state_lock(g.state_mutex);
     uint64_t vblank_total = vblank_.load(std::memory_order_relaxed);
     uint64_t swap_total = swap_.load(std::memory_order_relaxed);
+    Event exit_event("exit");
+    exit_event.Str("reason", g.exit_reason)
+        .UInt("vblank_total", vblank_total)
+        .UInt("swap_total", swap_total);
+    // Providers only fill the event; they must not call back into telemetry
+    // (the lifecycle and state locks are held).
+    std::vector<std::function<void(Event&)>> providers;
+    {
+      std::lock_guard<std::mutex> lock(g.exit_field_mutex);
+      providers = g.exit_fields;
+    }
+    for (auto& provider : providers) {
+      provider(exit_event);
+    }
     std::string exit_line =
-        Event("exit")
-            .Str("reason", g.exit_reason)
-            .UInt("vblank_total", vblank_total)
-            .UInt("swap_total", swap_total)
-            .Finish(vblank_total, swap_total, NowNs(), CurrentState());
+        exit_event.Finish(vblank_total, swap_total, NowNs(), CurrentState());
     std::string state_line;
     if (std::optional<Transition> transition = g.machine.Apply(Signal::kExit)) {
       current_state_.store(uint8_t(transition->to), std::memory_order_relaxed);
