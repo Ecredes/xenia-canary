@@ -9,6 +9,7 @@
 
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -154,6 +155,15 @@ void KeBugCheckEx_entry(dword_t code, dword_t param1, dword_t param2,
                   static_cast<uint32_t>(param4));
   XELOGE("{}", msg);
   fflush(stdout);
+
+  if (telemetry::enabled()) {
+    telemetry::Event event("crash");
+    event.Str("side", "guest")
+        .Str("code",
+             fmt::format("bugcheck_0x{:08X}", static_cast<uint32_t>(code)))
+        .Str("message", msg);
+    telemetry::ReportCrash(std::move(event));
+  }
 
   if (xe::debugging::IsDebuggerAttached()) {
     xe::debugging::Break();

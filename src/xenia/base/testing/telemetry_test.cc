@@ -342,4 +342,38 @@ TEST_CASE("telemetry: paused until every pause source resumes", "[telemetry]") {
   Shutdown();
 }
 
+TEST_CASE("telemetry: ReportCrash reports only the first crash",
+          "[telemetry]") {
+  using namespace xe::telemetry;
+  auto path = std::filesystem::temp_directory_path() /
+              "xe_telemetry_report_crash_test.jsonl";
+  REQUIRE(OpenFile(path));
+  Notify(Signal::kTitle);
+  REQUIRE(ReportCrash(Event("crash").Str("code", "first")));
+  REQUIRE(CurrentState() == State::kCrashed);
+  REQUIRE_FALSE(ReportCrash(Event("crash").Str("code", "second")));
+  // Closing the crashed title does not replace the reason.
+  SetExitReason("title_exit");
+  Shutdown();
+
+  std::ifstream in(path);
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);) {
+    lines.push_back(line);
+  }
+  size_t crashes = 0;
+  for (const std::string& line : lines) {
+    crashes += line.find(R"("type":"crash")") != std::string::npos;
+  }
+  REQUIRE(crashes == 1);
+  REQUIRE(lines.size() >= 2);
+  REQUIRE(lines[lines.size() - 2].find(R"("reason":"crash")") !=
+          std::string::npos);
+
+  // A new session can report again.
+  REQUIRE(OpenFile(path));
+  REQUIRE(ReportCrash(Event("crash")));
+  Shutdown();
+}
+
 }  // namespace xe::base::test

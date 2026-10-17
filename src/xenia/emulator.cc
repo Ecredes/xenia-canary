@@ -1432,6 +1432,44 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   auto guest_function = code_cache->LookupFunction(ex->pc());
   assert_not_null(guest_function);
 
+  // Report the crash before the dump and Pause(), which can block, so the line
+  // survives. Only the first crash is reported (ReportCrash). The faulting code
+  // is guest code, so this never runs inside telemetry (host code) and cannot
+  // re-enter its locks.
+  if (telemetry::enabled()) {
+    const char* code_name = "unknown";
+    std::string message = "Exception";
+    if (ex->code() == Exception::Code::kAccessViolation) {
+      code_name = "access_violation";
+      const char* op = "unknown";
+      if (ex->access_violation_operation() ==
+          Exception::AccessViolationOperation::kRead) {
+        op = "read";
+      } else if (ex->access_violation_operation() ==
+                 Exception::AccessViolationOperation::kWrite) {
+        op = "write";
+      }
+      message = fmt::format("Access Violation: {} at 0x{:016X}", op,
+                            ex->fault_address());
+    } else if (ex->code() == Exception::Code::kIllegalInstruction) {
+      code_name = "illegal_instruction";
+      message = "Illegal Instruction";
+    }
+    telemetry::Event event("crash");
+    event.Str("side", "guest").Str("code", code_name);
+    event.Hex("guest_pc",
+              guest_function->MapMachineCodeToGuestAddress(ex->pc()));
+    if (ex->code() == Exception::Code::kAccessViolation) {
+      event.Hex("address", ex->fault_address(), 16);
+    }
+    event.UInt("thread", current_thread->thread_id());
+    if (auto module = kernel_state_->GetExecutableModule()) {
+      event.Str("module", module->name());
+    }
+    event.Str("message", message);
+    telemetry::ReportCrash(std::move(event));
+  }
+
   auto context = current_thread->thread_state()->context();
 
   std::string crash_msg;
