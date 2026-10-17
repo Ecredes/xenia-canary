@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <chrono>
+#include <ctime>
 #include <ranges>
 
 #include "xenia/emulator.h"
@@ -31,6 +33,8 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
+#include "xenia/base/telemetry.h"
+#include "xenia/base/utf8.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
@@ -61,6 +65,8 @@
 #include "xenia/vfs/devices/null_device.h"
 #include "xenia/vfs/devices/xcontent_container_device.h"
 #include "xenia/vfs/virtual_file_system.h"
+
+#include "version.h"
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
@@ -95,8 +101,129 @@ DEFINE_int32(priority_class, 0,
 
 DECLARE_int32(console_type);
 
+DECLARE_path(telemetry_file);
+DECLARE_int32(telemetry_window);
+
 namespace xe {
 using namespace xe::literals;
+
+namespace {
+
+// The current value of a cvar defined in another module, looked up by name so
+// this file does not depend on where (or whether) it is linked in.
+template <typename T>
+const T* FindCvarValue(const char* name) {
+  if (!cvar::ConfigVars) {
+    return nullptr;
+  }
+  auto it = cvar::ConfigVars->find(name);
+  if (it == cvar::ConfigVars->end()) {
+    return nullptr;
+  }
+  auto* var = dynamic_cast<cvar::CommandVar<T>*>(it->second);
+  return var ? var->current_value() : nullptr;
+}
+
+std::string JsonString(std::string_view value) {
+  std::string out;
+  telemetry::AppendJsonString(out, value);
+  return out;
+}
+
+// Builds a JSON object from already-encoded values.
+std::string JsonObject(
+    std::initializer_list<std::pair<std::string_view, std::string>> fields) {
+  std::string out = "{";
+  for (const auto& [key, value] : fields) {
+    if (out.size() > 1) {
+      out += ',';
+    }
+    telemetry::AppendJsonString(out, key);
+    out += ':';
+    out += value;
+  }
+  out += '}';
+  return out;
+}
+
+// The telemetry header. No host names, user names, serials or path-valued
+// cvars: telemetry files are meant to be shared.
+telemetry::Event SessionStartEvent() {
+#if defined(DEBUG) && _NO_DEBUG_HEAP == 1
+  const char* build_config = "debug";
+#elif defined(DEBUG)
+  const char* build_config = "checked";
+#else
+  const char* build_config = "release";
+#endif
+  std::string xenia = JsonObject({
+      {"branch", JsonString(XE_BUILD_BRANCH)},
+      {"commit", JsonString(XE_BUILD_COMMIT)},
+      {"commit_short", JsonString(XE_BUILD_COMMIT_SHORT)},
+      {"date", JsonString(XE_BUILD_DATE)},
+      {"config", JsonString(build_config)},
+  });
+
+  telemetry::HostInfo host_info = telemetry::QueryHostInfo();
+  std::string host = JsonObject({
+      {"os", JsonString(host_info.os)},
+      {"os_version", JsonString(host_info.os_version)},
+      {"arch", JsonString(host_info.arch)},
+      {"cpu", JsonString(host_info.cpu)},
+      {"cpu_cores", fmt::format("{}", host_info.cpu_cores)},
+      {"cpu_threads", fmt::format("{}", host_info.cpu_threads)},
+      {"ram_mb", fmt::format("{}", host_info.ram_mb)},
+  });
+
+  std::string cvars_json = "{";
+  auto add_cvar = [&cvars_json](std::string_view key, std::string value) {
+    if (cvars_json.size() > 1) {
+      cvars_json += ',';
+    }
+    telemetry::AppendJsonString(cvars_json, key);
+    cvars_json += ':';
+    cvars_json += value;
+  };
+  if (auto gpu = FindCvarValue<std::string>("gpu")) {
+    add_cvar("gpu", JsonString(*gpu));
+  }
+  if (auto vsync = FindCvarValue<bool>("vsync")) {
+    add_cvar("vsync", *vsync ? "true" : "false");
+  }
+  if (auto limit = FindCvarValue<uint64_t>("framerate_limit")) {
+    add_cvar("framerate_limit", fmt::format("{}", *limit));
+  }
+  if (auto scale_x = FindCvarValue<int32_t>("draw_resolution_scale_x")) {
+    add_cvar("draw_resolution_scale_x", fmt::format("{}", *scale_x));
+  }
+  if (auto scale_y = FindCvarValue<int32_t>("draw_resolution_scale_y")) {
+    add_cvar("draw_resolution_scale_y", fmt::format("{}", *scale_y));
+  }
+  add_cvar("telemetry_window", fmt::format("{}", cvars::telemetry_window));
+  cvars_json += '}';
+
+  std::time_t now =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  std::tm utc = {};
+#if XE_PLATFORM_WIN32
+  gmtime_s(&utc, &now);
+#else
+  gmtime_r(&now, &utc);
+#endif
+  std::string wall_time = fmt::format(
+      "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", utc.tm_year + 1900,
+      utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec);
+
+  telemetry::Event event("session_start");
+  event.Int("format", 1)
+      .Raw("xenia", xenia)
+      .Raw("host", host)
+      .Raw("cvars", cvars_json)
+      .Str("wall_time", wall_time);
+  return event;
+}
+
+}  // namespace
 
 Emulator::GameConfigLoadCallback::GameConfigLoadCallback(Emulator& emulator)
     : emulator_(emulator) {
@@ -167,6 +294,9 @@ Emulator::Emulator(const std::filesystem::path& command_line,
 }
 
 Emulator::~Emulator() {
+  // Write the telemetry exit lines while every system is still alive.
+  telemetry::Shutdown();
+
   // Note that we delete things in the reverse order they were initialized.
 
   // Give the systems time to shutdown before we delete them.
@@ -205,6 +335,11 @@ X_STATUS Emulator::Setup(
 
   display_window_ = display_window;
   imgui_drawer_ = imgui_drawer;
+
+  if (!cvars::telemetry_file.empty() &&
+      telemetry::OpenFile(cvars::telemetry_file)) {
+    telemetry::Emit(SessionStartEvent());
+  }
 
   // Initialize clock.
   // 360 uses a 50MHz clock.
@@ -362,6 +497,7 @@ X_STATUS Emulator::TerminateTitle() {
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  telemetry::SetExitReason("title_exit");
   kernel_state_->TerminateTitle();
   title_id_ = std::nullopt;
   title_name_ = "";
@@ -1834,6 +1970,23 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     return X_STATUS_UNSUCCESSFUL;
   }
   main_thread_ = main_thread;
+
+  if (telemetry::enabled()) {
+    telemetry::Event title_event("title");
+    title_event.Str("title_id", fmt::format("{:08X}", title_id_.value()));
+    if (info) {
+      title_event.Hex("media_id", info->media_id)
+          .Str("version", title_version_)
+          .Str("disc", fmt::format("{}/{}", info->disc_number,
+                                   info->disc_count));
+    } else {
+      title_event.Str("version", title_version_);
+    }
+    title_event.Str("module", utf8::find_name_from_guest_path(module->path()));
+    telemetry::Emit(std::move(title_event));
+  }
+  telemetry::Notify(telemetry::Signal::kTitle);
+
   on_launch(title_id_.value(), title_name_);
 
   // Plugins must be loaded after calling LaunchModule() and

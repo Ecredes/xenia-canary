@@ -16,6 +16,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
 #include "xenia/base/utf8.h"
 #include "xenia/config.h"
@@ -432,6 +433,7 @@ void GraphicsSystem::MarkVblank() {
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
   vblank_count_.fetch_add(1, std::memory_order_relaxed);
+  telemetry::OnVblank(vblank_count(), swap_count());
 
   // TODO(benvanik): we shouldn't need to do the dispatch here, but there's
   //     something wrong and the CP will block waiting for code that
@@ -498,10 +500,19 @@ void GraphicsSystem::BeginTracing() {
 
 void GraphicsSystem::EndTracing() { command_processor_->EndTracing(); }
 
+void GraphicsSystem::MarkSwap() {
+  swap_count_.fetch_add(1, std::memory_order_relaxed);
+  // Checked here so the disabled path does not read the clock every frame.
+  if (telemetry::enabled()) {
+    telemetry::OnSwap(swap_count(), telemetry::NowNs());
+  }
+}
+
 void GraphicsSystem::Pause() {
   paused_ = true;
 
   command_processor_->Pause();
+  telemetry::OnPause(telemetry::PauseSource::kEmulator, true);
 }
 
 void GraphicsSystem::Resume() {
@@ -509,6 +520,7 @@ void GraphicsSystem::Resume() {
   vblank_deadline_reset_ = true;
 
   command_processor_->Resume();
+  telemetry::OnPause(telemetry::PauseSource::kEmulator, false);
 }
 
 bool GraphicsSystem::Save(ByteStream* stream) {
