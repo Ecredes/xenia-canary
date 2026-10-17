@@ -1,0 +1,177 @@
+{
+ "results": [
+  {
+   "source": {
+    "path": "/scratch/third_party/FFmpeg",
+    "type": "unknown"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "",
+      "version": "",
+      "ecosystem": "GIT",
+      "commit": "c1263a3dd9d0fffbdf7ca65a8642bb8216fa9891"
+     },
+     "groups": [
+      {
+       "ids": [
+        "CVE-2026-107675"
+       ],
+       "aliases": [
+        "CVE-2026-107675"
+       ],
+       "max_severity": "6.0"
+      },
+      {
+       "ids": [
+        "CVE-2026-107676"
+       ],
+       "aliases": [
+        "CVE-2026-107676"
+       ],
+       "max_severity": "4.8"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "CVE-2026-107675",
+       "summary": "FFmpeg through 9.0.2 Missing SSH Host Key Verification in sftp Protocol"
+      },
+      {
+       "id": "CVE-2026-107676",
+       "summary": "FFmpeg through 9.0.2 Uninitialized Memory Disclosure via HDR10+ Metadata Serializer"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "source": {
+    "path": "/scratch/third_party/SPIRV-Tools/tools/sva/yarn.lock",
+    "type": "lockfile"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "ajv",
+      "version": "6.12.6",
+      "ecosystem": "npm"
+     },
+     "groups": [
+      {
+       "ids": [
+        "GHSA-2g4f-4pwh-qvx6"
+       ],
+       "aliases": [
+        "CVE-2025-69873",
+        "GHSA-2g4f-4pwh-qvx6"
+       ],
+       "max_severity": "5.5"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "GHSA-2g4f-4pwh-qvx6",
+       "summary": "ajv has ReDoS when using `$data` option",
+       "aliases": [
+        "CVE-2025-69873"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "source": {
+    "path": "/scratch/third_party/libusb",
+    "type": "unknown"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "",
+      "version": "",
+      "ecosystem": "GIT",
+      "commit": "a61afe5f75d969c4561a1d0ad753aa23cee6329a"
+     },
+     "groups": [
+      {
+       "ids": [
+        "CVE-2026-23679"
+       ],
+       "aliases": [
+        "CVE-2026-23679",
+        "PYSEC-2026-3978"
+       ],
+       "max_severity": "6.9"
+      },
+      {
+       "ids": [
+        "CVE-2026-47104"
+       ],
+       "aliases": [
+        "CVE-2026-47104",
+        "PYSEC-2026-3979"
+       ],
+       "max_severity": "5.1"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "CVE-2026-23679",
+       "summary": "libusb < 1.0.30 NULL Pointer Dereference in parse_interface()",
+       "aliases": [
+        "PYSEC-2026-3978"
+       ]
+      },
+      {
+       "id": "CVE-2026-47104",
+       "summary": "libusb < 1.0.30 Out-of-Bounds Read in parse_iad_array()",
+       "aliases": [
+        "PYSEC-2026-3979"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "source": {
+    "path": "/scratch/third_party/snappy/third_party/benchmark",
+    "type": "unknown"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "",
+      "version": "",
+      "ecosystem": "GIT",
+      "commit": "c3caa5f0221aeaf6ace45b37a608a236272a796c"
+     },
+     "groups": [
+      {
+       "ids": [
+        "CVE-2025-15536"
+       ],
+       "aliases": [
+        "CVE-2025-15536",
+        "GHSA-5pr6-crvp-2j9f"
+       ],
+       "max_severity": "1.9"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "CVE-2025-15536",
+       "summary": "BYVoid OpenCC MaxMatchSegmentation.cpp MaxMatchSegmentation heap-based overflow",
+       "aliases": [
+        "GHSA-5pr6-crvp-2j9f"
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

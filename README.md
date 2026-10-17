@@ -109,6 +109,53 @@ Known difference from Codacy:
   passed that commit, so it must run cppcheck differently there. Treat
   `unusedStructMember` on class members as a hint and check with grep.
 
+## Dependency and workflow audit
+
+A whole-repo check, separate from the per-branch fork check:
+
+```powershell
+..\xenia-canary-tooling\audit.ps1                                # at HEAD
+..\xenia-canary-tooling\audit.ps1 -Ref upstream/canary_experimental
+```
+
+Same report format and exit codes. It checks out the commit in the scratch
+clone, including the submodules the Linux build skips (shallow, not
+recursive), then runs:
+
+| Tool | Checks | Reported at |
+|---|---|---|
+| osv-scanner 2.6.0 | known vulnerabilities (OSV database) in the top-level `third_party` submodules | the submodule's `[submodule ...]` line in `.gitmodules` |
+| zizmor 1.30.1 (`--offline`) | GitHub Actions problems: unpinned actions, template injection, permissions, inherited secrets | the workflow line |
+
+Reading the osv results:
+- The submodule clones are shallow, so osv-scanner estimates the closest known
+  commit from file contents. Each message gives that `matched` commit and the
+  `pinned` one. When they differ, check whether the fix is already in the
+  pinned commit; rapidjson matched its 2016 v1.1.0 release though the pinned
+  commit already has the CVE-2024-38517 fix.
+- A CVE in a component xenia doesn't build is not reachable. Canary compiles a
+  small part of FFmpeg (see the FFmpeg section of `third_party/CMakeLists.txt`).
+- Developer lockfiles and nested submodules inside a submodule (yarn.lock,
+  requirements.txt, snappy's benchmark) are skipped and counted in a note.
+
+zizmor's online audits (known-vulnerable-actions, impostor-commit) need a
+GitHub token and are not run.
+
+Install (one time, in Ubuntu-24.04). Both are pinned to releases at least two
+weeks old when added:
+
+```bash
+v=v2.6.0; d=$(mktemp -d); cd "$d"
+curl -sSfLO "https://github.com/google/osv-scanner/releases/download/$v/osv-scanner_linux_amd64"
+curl -sSfLO "https://github.com/google/osv-scanner/releases/download/$v/osv-scanner_SHA256SUMS"
+grep ' osv-scanner_linux_amd64$' osv-scanner_SHA256SUMS | sha256sum -c -
+install -m755 osv-scanner_linux_amd64 ~/.local/bin/osv-scanner
+pipx install zizmor==1.30.1
+```
+
+Run these in a WSL shell, not through `wsl -- bash -c "..."` from Windows,
+which expands `$`.
+
 ## Tests
 
 ```bash

@@ -1,0 +1,387 @@
+[
+ {
+  "ident": "unpinned-uses",
+  "desc": "unpinned action reference",
+  "url": "https://docs.zizmor.sh/audits/#unpinned-uses",
+  "determinations": {
+   "confidence": "High",
+   "severity": "High",
+   "persona": "Regular"
+  },
+  "ignored": false,
+  "locations": [
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Check_commit_message.yml"
+      }
+     },
+     "annotation": "this step",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "commit-message"
+       },
+       {
+        "Key": "steps"
+       },
+       {
+        "Index": 0
+       }
+      ]
+     },
+     "feature_kind": "Normal",
+     "kind": "Hidden"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 10,
+       "column": 8
+      },
+      "end_point": {
+       "row": 13,
+       "column": 24
+      },
+      "offset_span": {
+       "start": 121,
+       "end": 219
+      }
+     },
+     "feature": "name: Checkout repository\n        uses: actions/checkout@v6\n        with:\n          fetch-depth: 0",
+     "comments": []
+    }
+   },
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Check_commit_message.yml"
+      }
+     },
+     "annotation": "action is not pinned to a hash (required by blanket policy)",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "commit-message"
+       },
+       {
+        "Key": "steps"
+       },
+       {
+        "Index": 0
+       },
+       {
+        "Key": "uses"
+       }
+      ]
+     },
+     "feature_kind": {
+      "Subfeature": {
+       "after": 0,
+       "fragment": {
+        "Raw": "actions/checkout@v6"
+       }
+      }
+     },
+     "kind": "Primary"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 11,
+       "column": 14
+      },
+      "end_point": {
+       "row": 11,
+       "column": 33
+      },
+      "offset_span": {
+       "start": 161,
+       "end": 180
+      }
+     },
+     "feature": "actions/checkout@v6",
+     "comments": []
+    }
+   }
+  ]
+ },
+ {
+  "ident": "secrets-inherit",
+  "desc": "secrets unconditionally inherited by called workflow",
+  "url": "https://docs.zizmor.sh/audits/#secrets-inherit",
+  "determinations": {
+   "confidence": "High",
+   "severity": "Medium",
+   "persona": "Regular"
+  },
+  "ignored": false,
+  "locations": [
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Orchestrator.yml"
+      }
+     },
+     "annotation": "this reusable workflow",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "release"
+       },
+       {
+        "Key": "uses"
+       }
+      ]
+     },
+     "feature_kind": {
+      "Subfeature": {
+       "after": 0,
+       "fragment": {
+        "Raw": "./.github/workflows/Create_release.yml"
+       }
+      }
+     },
+     "kind": "Primary"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 89,
+       "column": 10
+      },
+      "end_point": {
+       "row": 89,
+       "column": 48
+      },
+      "offset_span": {
+       "start": 2574,
+       "end": 2612
+      }
+     },
+     "feature": "./.github/workflows/Create_release.yml",
+     "comments": []
+    }
+   },
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Orchestrator.yml"
+      }
+     },
+     "annotation": "inherits all parent secrets",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "release"
+       },
+       {
+        "Key": "secrets"
+       }
+      ]
+     },
+     "feature_kind": "Normal",
+     "kind": "Related"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 92,
+       "column": 4
+      },
+      "end_point": {
+       "row": 92,
+       "column": 20
+      },
+      "offset_span": {
+       "start": 2656,
+       "end": 2672
+      }
+     },
+     "feature": "    secrets: inherit",
+     "comments": []
+    }
+   }
+  ]
+ },
+ {
+  "ident": "template-injection",
+  "desc": "code injection via template expansion",
+  "url": "https://docs.zizmor.sh/audits/#template-injection",
+  "determinations": {
+   "confidence": "High",
+   "severity": "High",
+   "persona": "Regular"
+  },
+  "ignored": false,
+  "locations": [
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Create_release.yml"
+      }
+     },
+     "annotation": "this step",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "release"
+       },
+       {
+        "Key": "steps"
+       },
+       {
+        "Index": 1
+       }
+      ]
+     },
+     "feature_kind": "Normal",
+     "kind": "Hidden"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 27,
+       "column": 8
+      },
+      "end_point": {
+       "row": 76,
+       "column": 29
+      },
+      "offset_span": {
+       "start": 556,
+       "end": 2122
+      }
+     },
+     "feature": "name: Build release notes\n        id: notes\n        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          REPO: ${{ github.repository }}\n        run: |-\n          FULL_SHA=\"${{ inputs.tag }}\"\n          SHORT_SHA=\"${FULL_SHA::7}\"\n          BRANCH=\"${{ inputs.branch }}\"\n          TAG_NAME=\"$SHORT_SHA\"\n          TITLE=\"${SHORT_SHA}_$BRANCH\"\n\n          echo \"tag_name=$TAG_NAME\" >> $GITHUB_OUTPUT\n          echo \"title=$TITLE\" >> $GITHUB_OUTPUT\n\n          PREV_TAG=$(gh release list \\\n            --repo \"$REPO\" \\\n            --limit 1 \\\n            --json tagName \\\n            --jq '.[0].tagName' 2>/dev/null || echo)\n\n          if [ -n \"$PREV_TAG\" ]; then\n            PREV_SHA=$(git rev-parse \"${PREV_TAG}^{}\" 2>/dev/null || \\\n                       git rev-parse \"${PREV_TAG}\" 2>/dev/null || echo)\n          fi\n\n          if [ -n \"$PREV_SHA\" ]; then\n            COMMITS=$(git log --format='- %s (`%h`)' --abbrev=7 \"${PREV_SHA}..$FULL_SHA\" --)\n            COMPARE_URL=\"https://github.com/${REPO}/compare/${PREV_TAG}...$TAG_NAME\"\n          else\n            COMMITS=$(git log --format='- %s (`%h`)' --abbrev=7 -1 \"$FULL_SHA\" --)\n          fi\n\n          # Assemble body\n          {\n            echo \"body<<RELEASE_BODY_EOF\"\n\n            if [ -n \"$COMMITS\" ]; then\n              echo \"### Changes\"\n              echo\n              echo \"$COMMITS\"\n            fi\n\n            if [ -n \"$COMPARE_URL\" ]; then\n              echo\n              echo \"**Full changelog**: $COMPARE_URL\"\n            fi\n\n            echo \"RELEASE_BODY_EOF\"\n          } >> $GITHUB_OUTPUT",
+     "comments": []
+    }
+   },
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Create_release.yml"
+      }
+     },
+     "annotation": "may expand into attacker-controllable code",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "release"
+       },
+       {
+        "Key": "steps"
+       },
+       {
+        "Index": 1
+       },
+       {
+        "Key": "run"
+       }
+      ]
+     },
+     "feature_kind": {
+      "Subfeature": {
+       "after": 11,
+       "fragment": {
+        "Raw": "inputs.tag"
+       }
+      }
+     },
+     "kind": "Primary"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 33,
+       "column": 24
+      },
+      "end_point": {
+       "row": 33,
+       "column": 34
+      },
+      "offset_span": {
+       "start": 742,
+       "end": 752
+      }
+     },
+     "feature": "|-\n          FULL_SHA=\"${{ inputs.tag }}\"\n          SHORT_SHA=\"${FULL_SHA::7}\"\n          BRANCH=\"${{ inputs.branch }}\"\n          TAG_NAME=\"$SHORT_SHA\"\n          TITLE=\"${SHORT_SHA}_$BRANCH\"\n\n          echo \"tag_name=$TAG_NAME\" >> $GITHUB_OUTPUT\n          echo \"title=$TITLE\" >> $GITHUB_OUTPUT\n\n          PREV_TAG=$(gh release list \\\n            --repo \"$REPO\" \\\n            --limit 1 \\\n            --json tagName \\\n            --jq '.[0].tagName' 2>/dev/null || echo)\n\n          if [ -n \"$PREV_TAG\" ]; then\n            PREV_SHA=$(git rev-parse \"${PREV_TAG}^{}\" 2>/dev/null || \\\n                       git rev-parse \"${PREV_TAG}\" 2>/dev/null || echo)\n          fi\n\n          if [ -n \"$PREV_SHA\" ]; then\n            COMMITS=$(git log --format='- %s (`%h`)' --abbrev=7 \"${PREV_SHA}..$FULL_SHA\" --)\n            COMPARE_URL=\"https://github.com/${REPO}/compare/${PREV_TAG}...$TAG_NAME\"\n          else\n            COMMITS=$(git log --format='- %s (`%h`)' --abbrev=7 -1 \"$FULL_SHA\" --)\n          fi\n\n          # Assemble body\n          {\n            echo \"body<<RELEASE_BODY_EOF\"\n\n            if [ -n \"$COMMITS\" ]; then\n              echo \"### Changes\"\n              echo\n              echo \"$COMMITS\"\n            fi\n\n            if [ -n \"$COMPARE_URL\" ]; then\n              echo\n              echo \"**Full changelog**: $COMPARE_URL\"\n            fi\n\n            echo \"RELEASE_BODY_EOF\"\n          } >> $GITHUB_OUTPUT",
+     "comments": []
+    }
+   },
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": ".github/workflows/Create_release.yml"
+      }
+     },
+     "annotation": "this run block",
+     "route": {
+      "route": [
+       {
+        "Key": "jobs"
+       },
+       {
+        "Key": "release"
+       },
+       {
+        "Key": "steps"
+       },
+       {
+        "Index": 1
+       },
+       {
+        "Key": "run"
+       }
+      ]
+     },
+     "feature_kind": "KeyOnly",
+     "kind": "Related"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 32,
+       "column": 8
+      },
+      "end_point": {
+       "row": 32,
+       "column": 11
+      },
+      "offset_span": {
+       "start": 710,
+       "end": 713
+      }
+     },
+     "feature": "run",
+     "comments": []
+    }
+   }
+  ]
+ }
+]
