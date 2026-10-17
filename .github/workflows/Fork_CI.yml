@@ -1,0 +1,118 @@
+name: Fork CI
+
+# Fork-only (Ecredes/xenia-canary); never propose upstream.
+#
+# Upstream's Orchestrator runs from each pushed branch's own workflow files, so
+# it can only use a compiler cache if the branch carries CI changes. This
+# workflow lives on the fork's default branch instead. workflow_run always runs
+# the default branch's copy, so it runs for every push to any branch: it cancels
+# that push's Orchestrator run and lints and builds the same commit with ccache.
+# Runs started this way use the default branch's cache scope, so every branch
+# shares one compiler cache.
+
+on:
+  workflow_run:
+    workflows: [Orchestrator]
+    types: [requested]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or commit to build'
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  statuses: write
+
+concurrency:
+  group: fork-ci-${{ github.event.workflow_run.head_branch || inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: Setup
+    if: |-
+      github.repository == 'Ecredes/xenia-canary' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      INPUT_REF: ${{ inputs.ref }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Cancel the Orchestrator run
+        if: ${{ github.event_name == 'workflow_run' }}
+        run: gh run cancel "$RUN_ID" -R "$REPO" || true
+
+      - name: Resolve commit
+        id: resolve
+        run: |-
+          if [ -n "$HEAD_SHA" ]; then
+            sha="$HEAD_SHA"
+          else
+            sha=$(gh api "repos/$REPO/commits/$INPUT_REF" -q .sha)
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          gh api "repos/$REPO/statuses/$sha" -f state=pending -f context="Fork CI" \
+            -f description="Building" -f target_url="$RUN_URL" > /dev/null
+
+  lint:
+    name: Lint
+    needs: setup
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
+      - name: Setup
+        run: |-
+          UBUNTU_BASE=$(lsb_release -cs)
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-20 main"
+          sudo apt-get -y update
+          sudo apt-get -y install clang-format-20
+      - name: Lint
+        run: ./xenia-build.py lint --all
+
+  build-windows:
+    name: Windows (x86-64)
+    needs: [setup, lint]
+    uses: ./.github/workflows/Fork_Windows_x86.yml
+    with:
+      ref: ${{ needs.setup.outputs.sha }}
+
+  build-linux:
+    name: Linux (x86-64)
+    needs: [setup, lint]
+    uses: ./.github/workflows/Fork_Linux_x86.yml
+    with:
+      ref: ${{ needs.setup.outputs.sha }}
+
+  report:
+    name: Report
+    needs: [setup, lint, build-windows, build-linux]
+    if: ${{ always() && needs.setup.result == 'success' }}
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ needs.setup.outputs.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RESULTS: ${{ needs.lint.result }} ${{ needs.build-windows.result }} ${{ needs.build-linux.result }}
+    steps:
+      - name: Set commit status
+        run: |-
+          case " $RESULTS " in
+            *" failure "*) state=failure; description="Failed" ;;
+            *" cancelled "*) state=error; description="Cancelled" ;;
+            *) state=success; description="Lint and builds passed" ;;
+          esac
+          gh api "repos/$REPO/statuses/$SHA" -f state=$state -f context="Fork CI" \
+            -f description="$description" -f target_url="$RUN_URL" > /dev/null
