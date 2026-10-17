@@ -1135,6 +1135,10 @@ class Shader {
                                   uint32_t exec_cf_index);
 };
 
+// Writes a shader_failed telemetry event for a shader that failed to
+// translate, once per shader hash. No-op when telemetry is disabled.
+void ReportShaderFailed(const Shader& shader);
+
 }  // namespace gpu
 }  // namespace xe
 

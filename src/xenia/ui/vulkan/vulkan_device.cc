@@ -12,6 +12,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/telemetry.h"
 
 #include <algorithm>
 #include <cstring>
@@ -917,6 +918,35 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (memory_type_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
       device->memory_types_.host_cached |= memory_type_bit;
     }
+  }
+
+  if (xe::telemetry::enabled() && xe::telemetry::FirstTime("gpu", "")) {
+    uint64_t vram_bytes = 0;
+    for (uint32_t heap_index = 0;
+         heap_index < memory_properties.memoryHeapCount; ++heap_index) {
+      const VkMemoryHeap& heap = memory_properties.memoryHeaps[heap_index];
+      if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+        vram_bytes = std::max<uint64_t>(vram_bytes, heap.size);
+      }
+    }
+    std::string driver;
+    if (ext_1_2_KHR_driver_properties) {
+      driver = properties_1_2_KHR_driver_properties.driverName;
+      if (properties_1_2_KHR_driver_properties.driverInfo[0]) {
+        driver += ' ';
+        driver += properties_1_2_KHR_driver_properties.driverInfo;
+      }
+    } else {
+      driver = fmt::format("0x{:X}", properties.driverVersion);
+    }
+    xe::telemetry::Event gpu_event("gpu");
+    gpu_event.Str("backend", "vulkan")
+        .Str("adapter", properties.deviceName)
+        .Hex("vendor_id", properties.vendorID, 4)
+        .Hex("device_id", properties.deviceID, 4)
+        .Str("driver", driver)
+        .UInt("vram_mb", vram_bytes >> 20);
+    xe::telemetry::Emit(std::move(gpu_event));
   }
 
   return device;

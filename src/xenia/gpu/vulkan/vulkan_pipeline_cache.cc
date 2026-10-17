@@ -20,6 +20,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -991,9 +992,11 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(
   if (!translator.TranslateAnalyzedShader(translation)) {
     XELOGE("Shader {:016X} translation failed; marking as ignored",
            shader.ucode_data_hash());
+    ReportShaderFailed(shader);
     return false;
   }
   if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
+    ReportShaderFailed(shader);
     return false;
   }
 
@@ -1060,6 +1063,7 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(
         shader.GetSamplerBindingsAfterTranslation().size());
   }
 
+  xe::telemetry::Count(xe::telemetry::Counter::kShaderCompiles);
   return true;
 }
 
@@ -3250,6 +3254,10 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           is_tessellated, static_cast<int>(result));
     }
     return false;
+  }
+  if (!creating_placeholder) {
+    // Placeholders are cheap stand-ins; only the real pipelines are counted.
+    xe::telemetry::Count(xe::telemetry::Counter::kPipelineCompiles);
   }
 
   // Store the new pipeline, handling placeholder hot-swap.

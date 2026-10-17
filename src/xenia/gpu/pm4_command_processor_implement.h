@@ -5,6 +5,23 @@
 #endif
 
 using namespace xe::gpu::xenos;
+
+// Reports a command stream error once per (kind, dedup_key), or per (kind,
+// detail) when dedup_key is empty. Varying counts kept only in the detail do
+// not produce unbounded distinct lines.
+static inline void ReportGpuError(const char* kind, const std::string& detail,
+                                  const std::string& dedup_key = {}) {
+  if (!xe::telemetry::enabled() ||
+      !xe::telemetry::FirstTime(
+          "gpu_error",
+          std::string(kind) + "|" + (dedup_key.empty() ? detail : dedup_key))) {
+    return;
+  }
+  xe::telemetry::Event event("gpu_error");
+  event.Str("kind", kind).Str("detail", detail);
+  xe::telemetry::Emit(std::move(event));
+}
+
 void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
                                               uint32_t count) XE_RESTRICT {
   SCOPE_profile_cpu_f("gpu");
@@ -28,6 +45,7 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
       } else {
         // Return up a level if we encounter a bad packet.
         XELOGE("**** INDIRECT RINGBUFFER: Failed to execute packet.");
+        ReportGpuError("ringbuffer_execute_failed", "indirect");
         assert_always();
         break;
       }
@@ -314,10 +332,19 @@ bool COMMAND_PROCESSOR::ExecutePacket() {
 }
 XE_NOINLINE
 XE_COLD
-bool COMMAND_PROCESSOR::ExecutePacketType0_CountOverflow(uint32_t count) {
+bool COMMAND_PROCESSOR::ExecutePacketType0_CountOverflow(uint32_t packet,
+                                                         uint32_t count) {
   XELOGE("ExecutePacketType0 overflow (read count {:08X}, packet count {:08X})",
          COMMAND_PROCESSOR::GetCurrentRingReadCount(),
          count * sizeof(uint32_t));
+  // Type 0 has no opcode: the low 15 bits are the base register index.
+  const uint32_t base_index = packet & 0x7FFF;
+  ReportGpuError(
+      "packet_overflow_type0",
+      fmt::format("reg=0x{:04X} read={:08X} packet={:08X}", base_index,
+                  COMMAND_PROCESSOR::GetCurrentRingReadCount(),
+                  count * sizeof(uint32_t)),
+      fmt::format("0x{:04X}", base_index));
   return false;
 }
 /*
@@ -350,7 +377,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType0(uint32_t packet) XE_RESTRICT {
     trace_writer_.WritePacketEnd();
     return true;
   } else {
-    return COMMAND_PROCESSOR::ExecutePacketType0_CountOverflow(count);
+    return COMMAND_PROCESSOR::ExecutePacketType0_CountOverflow(packet, count);
   }
 }
 XE_NOINLINE
@@ -382,10 +409,18 @@ uint32_t COMMAND_PROCESSOR::GetCurrentRingReadCount() {
 }
 XE_NOINLINE
 XE_COLD
-bool COMMAND_PROCESSOR::ExecutePacketType3_CountOverflow(uint32_t count) {
+bool COMMAND_PROCESSOR::ExecutePacketType3_CountOverflow(uint32_t packet,
+                                                         uint32_t count) {
   XELOGE("ExecutePacketType3 overflow (read count {:08X}, packet count {:08X})",
          COMMAND_PROCESSOR::GetCurrentRingReadCount(),
          count * sizeof(uint32_t));
+  const uint32_t opcode = (packet >> 8) & 0x7F;
+  ReportGpuError(
+      "packet_overflow_type3",
+      fmt::format("opcode=0x{:02X} read={:08X} packet={:08X}", opcode,
+                  COMMAND_PROCESSOR::GetCurrentRingReadCount(),
+                  count * sizeof(uint32_t)),
+      fmt::format("0x{:02X}", opcode));
   return false;
 }
 XE_NOINLINE
@@ -616,7 +651,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
                     reader_.capacity());
     return result;
   } else {
-    return COMMAND_PROCESSOR::ExecutePacketType3_CountOverflow(count);
+    return COMMAND_PROCESSOR::ExecutePacketType3_CountOverflow(packet, count);
   }
 }
 
@@ -625,6 +660,7 @@ XE_COLD
 bool COMMAND_PROCESSOR::HitUnimplementedOpcode(uint32_t opcode,
                                                uint32_t count) XE_RESTRICT {
   XELOGGPU("Unimplemented GPU OPCODE: 0x{:02X}\t\tCOUNT: {}\n", opcode, count);
+  ReportGpuError("unknown_opcode", fmt::format("0x{:02X}", opcode));
   assert_always();
   reader_.AdvanceRead(count * sizeof(uint32_t));
   trace_writer_.WritePacketEnd();
@@ -1437,6 +1473,7 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
     if (!COMMAND_PROCESSOR::ExecutePacket()) {
       // This probably should be fatal - but we're going to continue anyways.
       XELOGE("**** PRIMARY RINGBUFFER: Failed to execute packet.");
+      ReportGpuError("ringbuffer_execute_failed", "primary");
       assert_always();
       break;
     }
@@ -1462,6 +1499,7 @@ void COMMAND_PROCESSOR::ExecutePacket(uint32_t ptr, uint32_t count) {
   do {
     if (!COMMAND_PROCESSOR::ExecutePacket()) {
       XELOGE("**** ExecutePacket: Failed to execute packet.");
+      ReportGpuError("ringbuffer_execute_failed", "packet");
       assert_always();
       break;
     }

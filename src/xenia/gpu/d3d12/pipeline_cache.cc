@@ -25,6 +25,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
@@ -946,6 +947,7 @@ bool PipelineCache::TranslateAnalyzedShader(
   if (!translator.TranslateAnalyzedShader(translation)) {
     XELOGE("Shader {:016X} translation failed; marking as ignored",
            shader.ucode_data_hash());
+    ReportShaderFailed(shader);
     return false;
   }
 
@@ -1129,7 +1131,12 @@ bool PipelineCache::TranslateAnalyzedShader(
                          : "d3d12");
   }
 
-  return translation.is_valid();
+  if (!translation.is_valid()) {
+    ReportShaderFailed(shader);
+    return false;
+  }
+  xe::telemetry::Count(xe::telemetry::Counter::kShaderCompiles);
+  return true;
 }
 
 void PipelineCache::TranslateShadersForStorage(
@@ -3329,6 +3336,7 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         runtime_description.vertex_shader->shader().ucode_data_hash());
   }
   state->SetName(name.c_str());
+  xe::telemetry::Count(xe::telemetry::Counter::kPipelineCompiles);
   return state;
 }
 

@@ -14,6 +14,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
@@ -318,6 +319,26 @@ bool D3D12Provider::Initialize() {
       XELOGD3D("DXGI adapter: {} (vendor 0x{:04X}, device 0x{:04X})",
                adapter_name_mb, adapter_desc.VendorId, adapter_desc.DeviceId);
     }
+  }
+
+  if (xe::telemetry::enabled() && xe::telemetry::FirstTime("gpu", "")) {
+    xe::telemetry::Event gpu_event("gpu");
+    gpu_event.Str("backend", "d3d12")
+        .Str("adapter", adapter_description_)
+        .Hex("vendor_id", adapter_desc.VendorId, 4)
+        .Hex("device_id", adapter_desc.DeviceId, 4);
+    LARGE_INTEGER umd_version;
+    if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice),
+                                                 &umd_version))) {
+      gpu_event.Str(
+          "driver",
+          fmt::format("{}.{}.{}.{}", HIWORD(umd_version.HighPart),
+                      LOWORD(umd_version.HighPart), HIWORD(umd_version.LowPart),
+                      LOWORD(umd_version.LowPart)));
+    }
+    gpu_event.UInt("vram_mb",
+                   uint64_t(adapter_desc.DedicatedVideoMemory) >> 20);
+    xe::telemetry::Emit(std::move(gpu_event));
   }
 
   // Create the Direct3D 12 device.

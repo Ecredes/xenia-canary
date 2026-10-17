@@ -100,9 +100,9 @@ uint32_t GetCurrentRingReadCount();
 
 XE_NOINLINE
 XE_COLD
-bool ExecutePacketType3_CountOverflow(uint32_t count);
+bool ExecutePacketType3_CountOverflow(uint32_t packet, uint32_t count);
 XE_NOINLINE
 XE_COLD
-bool ExecutePacketType0_CountOverflow(uint32_t count);
+bool ExecutePacketType0_CountOverflow(uint32_t packet, uint32_t count);
 
 #undef PM4_OVERRIDE

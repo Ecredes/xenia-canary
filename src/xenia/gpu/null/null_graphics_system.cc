@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/null/null_graphics_system.h"
 
+#include "xenia/base/telemetry.h"
 #include "xenia/gpu/null//null_command_processor.h"
 #if !XE_PLATFORM_MAC
 #include "xenia/ui/vulkan/vulkan_provider.h"
@@ -27,6 +28,13 @@ X_STATUS NullGraphicsSystem::Setup(cpu::Processor* processor,
                                    kernel::KernelState* kernel_state,
                                    ui::WindowedAppContext* app_context,
                                    bool with_presentation) {
+  // Reported first so the Vulkan device created below for the UI does not
+  // claim the one-time gpu event.
+  if (xe::telemetry::enabled() && xe::telemetry::FirstTime("gpu", "")) {
+    xe::telemetry::Event gpu_event("gpu");
+    gpu_event.Str("backend", "null");
+    xe::telemetry::Emit(std::move(gpu_event));
+  }
 #if XE_PLATFORM_MAC
   provider_ = nullptr;
 #else
