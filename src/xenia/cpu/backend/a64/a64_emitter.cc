@@ -15,6 +15,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 #include "xenia/cpu/backend/a64/a64_function.h"
@@ -49,6 +50,13 @@ extern uint64_t ResolveFunction(void* raw_context, uint64_t target_address);
 
 static uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
+  if (xe::telemetry::enabled() &&
+      xe::telemetry::FirstTime("extern",
+                               fmt::format("{:08X}", function->address()))) {
+    xe::telemetry::Emit(xe::telemetry::Event("extern_undefined_call")
+                            .Hex("address", function->address(), 8)
+                            .Str("name", function->name()));
+  }
   XELOGE("undefined extern call to {:08X} {}", function->address(),
          function->name());
   return 0;

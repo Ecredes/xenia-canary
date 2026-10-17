@@ -20,6 +20,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/label.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -185,6 +186,13 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
           "Unimplemented instr {:08X} {:08X} {} - report the game to Xenia "
           "developers; to skip, disable break_on_unimplemented_instructions",
           address, code, disasm_info.name);
+      if (xe::telemetry::enabled() &&
+          xe::telemetry::FirstTime("unimpl", fmt::format("{:08X}", address))) {
+        xe::telemetry::Emit(xe::telemetry::Event("unimplemented_instruction")
+                                .Hex("address", address, 8)
+                                .Hex("opcode", code, 8)
+                                .Str("name", disasm_info.name));
+      }
       Comment("UNIMPLEMENTED!");
       if (cvars::break_on_unimplemented_instructions) {
         DebugBreak();

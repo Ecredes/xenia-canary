@@ -107,6 +107,9 @@ reports.
 | `state` | the emulator state changes | `from`, `to`, `reason` (see above). The envelope's `state` is already `to` |
 | `title` | a title launches (including a launch from another title) | `title_id` (hex string), `media_id` (hex string), `version`, `disc` (`number/count`), `module` (executable file name). `media_id` and `disc` are omitted when the executable has no execution info |
 | `export_first_call` | the first call of a kernel export selected by `telemetry_exports` | `library` (`xboxkrnl`, `xam`, `xbdm`), `ordinal`, `name`, `tag` (`stub`, `sketchy` or `implemented`; stub wins over sketchy), `caller` (hex guest address of the call site), `thread` (guest thread id). At most one per export per session |
+| `import_missing` | a title's import table names a kernel export Xenia does not implement: an unknown ordinal, a known function with no implementation, or a known variable with no value. Written when the module is loaded, which is before the `title` line (state `starting`) | `module` (the importing module), `library` (the import library, e.g. `xboxkrnl.exe`), `ordinal`, `name` (the export name when known, else a generated `__<library>_<ordinal in hex>` name). At most one per module, library and ordinal |
+| `extern_undefined_call` | a guest call reaches a function with no implementation behind it (usually a missing import) | `address` (hex guest address), `name`. At most one per address. Written at run time, on the calling thread. With `ignore_undefined_externs=false` Xenia then stops with a fatal error: this line is flushed first, and the file ends with exit reason `shutdown` and no `crash` line |
+| `unimplemented_instruction` | the JIT meets a PowerPC instruction Xenia does not implement | `address` (hex), `opcode` (hex instruction word), `name` (disassembly mnemonic). At most one per address. Written at JIT translation time, which can be before the instruction ever runs, or without it running at all |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
 | `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
@@ -167,10 +170,6 @@ The format is growing. These events are planned and not written yet:
 
 - `gpu`: the graphics backend and adapter.
 - `input_first_poll`: the first controller poll per user index.
-- `import_missing`, `extern_undefined_call`: missing kernel functions the
-  title uses.
-- `unimplemented_instruction`: the first unimplemented guest instruction per
-  address.
 - `file_open_failed`, `file_open`: guest file opens.
 - `xam_ui`: a system UI is shown.
 - `shader_failed`: a shader that failed to translate or compile.
