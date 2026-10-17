@@ -8,6 +8,7 @@
  */
 
 #include "xenia/base/logging.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input.h"
 #include "xenia/hid/input_system.h"
@@ -15,6 +16,9 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/xbox.h"
+
+#include <atomic>
+#include <string>
 
 DECLARE_bool(allow_mic_initialization);
 
@@ -30,6 +34,31 @@ using xe::hid::X_INPUT_STATE;
 using xe::hid::X_INPUT_VIBRATION;
 using xe::hid::X_USER_DEVICE_CLASS;
 using xe::hid::X_USER_DEVICE_TYPE;
+
+// Telemetry counts guest polls only. Host code also calls
+// InputSystem::GetState (the gamepad hotkey thread polls every user every
+// 75 ms from startup, and the ImGui drawer polls while dialogs are open), so
+// counting there made input_polls and input_first_poll fire before the title
+// read the controller at all.
+static void ReportGuestPoll(uint32_t user_index, X_RESULT result) {
+  if (!xe::telemetry::enabled()) {
+    return;
+  }
+  xe::telemetry::Count(xe::telemetry::Counter::kInputPolls);
+  // Lock-free pre-filter so later polls neither format nor take a lock.
+  static std::atomic<uint32_t> seen_mask{0};
+  if (user_index < 32) {
+    const uint32_t bit = 1u << user_index;
+    if (seen_mask.fetch_or(bit, std::memory_order_relaxed) & bit) {
+      return;
+    }
+  }
+  if (xe::telemetry::FirstTime("poll", std::to_string(user_index))) {
+    xe::telemetry::Emit(xe::telemetry::Event("input_first_poll")
+                            .UInt("user", user_index)
+                            .Bool("connected", result == X_ERROR_SUCCESS));
+  }
+}
 
 dword_result_t XAutomationpUnbindController_entry(dword_t user_index) {
   if (user_index >= XUserMaxUserCount) {
@@ -122,9 +151,11 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
     X_INPUT_STATE discarded_state = {};
     auto input_system = kernel_state()->emulator()->input_system();
     auto lock = input_system->lock();
-    return input_system->GetState(
+    X_RESULT result = input_system->GetState(
         user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
         &discarded_state);
+    ReportGuestPoll(user_index, result);
+    return result;
   }
 
   // Games call this with a NULL state ptr, probably as a query.
@@ -145,6 +176,7 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
         user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
         input_state);
   }
+  ReportGuestPoll(user_index, result);
 
   if (input_state && result == X_ERROR_SUCCESS) {
     if (auto patch = kernel_state()->xmp_volume_patch()) {

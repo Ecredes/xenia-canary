@@ -8,11 +8,8 @@
  */
 
 #include "xenia/base/logging.h"
-#include "xenia/base/telemetry.h"
 
 #include "xenia/hid/input_system.h"
-
-#include <atomic>
 
 #include "xenia/base/profiling.h"
 #include "xenia/hid/hid_flags.h"
@@ -115,46 +112,18 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
-// Reports the first poll of each user index, with whether any driver answered.
-static void ReportFirstPoll(bool telemetry_enabled, uint32_t user_index,
-                            bool connected) {
-  if (!telemetry_enabled) {
-    return;
-  }
-  // Lock-free pre-filter so later polls neither format nor take a lock.
-  static std::atomic<uint32_t> seen_mask{0};
-  if (user_index < 32) {
-    const uint32_t bit = 1u << user_index;
-    if (seen_mask.fetch_or(bit, std::memory_order_relaxed) & bit) {
-      return;
-    }
-  }
-  if (xe::telemetry::FirstTime("poll", std::to_string(user_index))) {
-    xe::telemetry::Emit(xe::telemetry::Event("input_first_poll")
-                            .UInt("user", user_index)
-                            .Bool("connected", connected));
-  }
-}
-
 X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
                                X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
 
-  const bool telemetry_enabled = xe::telemetry::enabled();
-  if (telemetry_enabled) {
-    xe::telemetry::Count(xe::telemetry::Counter::kInputPolls);
-  }
-
   std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
   if (filtered_drivers.empty()) {
-    ReportFirstPoll(telemetry_enabled, user_index, false);
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   for (auto& driver : filtered_drivers) {
     X_RESULT result = driver->GetState(user_index, out_state);
     if (result == X_ERROR_SUCCESS) {
-      ReportFirstPoll(telemetry_enabled, user_index, true);
       UpdateUsedSlot(driver, user_index, true);
       AdjustDeadzoneLevels(user_index, &out_state->gamepad);
 
@@ -164,7 +133,6 @@ X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
       return result;
     }
   }
-  ReportFirstPoll(telemetry_enabled, user_index, false);
   UpdateUsedSlot(nullptr, user_index, false);
   return X_ERROR_DEVICE_NOT_CONNECTED;
 }

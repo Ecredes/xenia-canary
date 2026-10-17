@@ -116,7 +116,7 @@ reports.
 | `unimplemented_instruction` | the JIT meets a PowerPC instruction Xenia does not implement | `address` (hex), `opcode` (hex instruction word), `name` (disassembly mnemonic). At most one per address. Written at JIT translation time, which can be before the instruction ever runs, or without it running at all |
 | `file_open_failed` | a guest file open fails (including a path rejected as invalid) | `path` (the guest path as given, before any host translation), `status` (hex NTSTATUS), `disposition` (the guest creation disposition, unsigned). At most one per path |
 | `file_open` | a guest file open succeeds; only when `telemetry_file_opens` is `all` | `path`. At most one per path |
-| `input_first_poll` | the first controller state poll for a user index | `user` (index), `connected` (bool: whether any input driver returned a state for that poll). At most one per user; later polls, connected or not, only count towards `input_polls` |
+| `input_first_poll` | the first guest controller state poll (`XamInputGetState`) for a user index; host polls (hotkeys, ImGui) are not counted | `user` (index), `connected` (bool: whether any input driver returned a state for that poll). At most one per user; later polls, connected or not, only count towards `input_polls` |
 | `xam_ui` | a guest call to a kernel export that shows system UI (a `XamShow*` export in the UI category), on every call | `ui` (the export name, e.g. `XamShowMessageBoxUI`), `user` (the call's first argument as an unsigned integer; for most of these exports the user index) |
 | `gpu` | once per process, when the graphics backend settles on its adapter, before the first `frame_stats` | `backend` (`d3d12`, `vulkan`, `null`), then for `d3d12` and `vulkan`: `adapter` (adapter name), `vendor_id`, `device_id` (hex strings, 4 digits), `driver` (D3D12: user-mode driver version `a.b.c.d`, omitted if the query fails; Vulkan: `driverName driverInfo` when the driver properties extension is present, else the raw `driverVersion` as hex), `vram_mb` (dedicated video memory; Vulkan: the largest device-local heap). With `--gpu=null` only `backend` is written |
 | `shader_failed` | a shader failed to translate | `hash` (hex, 16 digits, the guest microcode hash), `stage` (`vertex`, `pixel`), `reason` (`translation`). At most one per hash |
@@ -141,7 +141,7 @@ example `10.0.26200`, or the kernel release on Linux), `arch` (`x86_64`,
 | `swap_ms` | swap-to-swap intervals in this window, ms, 2 decimals. An interval belongs to the window of its later swap. The first swap after start or a pause has no interval |
 | `shader_compiles`, `pipeline_compiles` | guest shaders translated and host pipelines created in this window, on any thread (Vulkan placeholder pipelines are not counted) |
 | `file_read_bytes` | guest file bytes read in this window |
-| `input_polls` | guest controller polls in this window |
+| `input_polls` | guest controller polls (`XamInputGetState`) in this window |
 | `guest_threads` | guest threads alive now (threads running guest code; emulator-internal host threads are not counted) |
 | `blocked_threads` | guest threads inside a kernel wait now |
 | `sleeping_threads` | guest threads inside a delay (sleep) now |
