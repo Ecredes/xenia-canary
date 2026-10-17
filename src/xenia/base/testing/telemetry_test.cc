@@ -52,6 +52,18 @@ TEST_CASE("telemetry: Event envelope order", "[telemetry]") {
           R"("title_id":"4D5307FF","media_id":"0x1234ABCD"})");
 }
 
+TEST_CASE("telemetry: guest path with quotes stays valid JSON",
+          "[telemetry]") {
+  auto line = xe::telemetry::Event("file_open_failed")
+                  .Str("path", "game:\\dir\\\"x\".bin")
+                  .Finish(0, 0, 1, xe::telemetry::State::kLoading);
+  const std::string expected =
+      "{\"type\":\"file_open_failed\",\"vblank\":0,\"swap\":0,\"ns\":1,"
+      "\"state\":\"loading\","
+      "\"path\":\"game:\\\\dir\\\\\\\"x\\\".bin\"}";
+  REQUIRE(line == expected);
+}
+
 TEST_CASE("telemetry: FrameWindow intervals and windows", "[telemetry]") {
   xe::telemetry::FrameWindow w(3);
   w.OnSwap(1'000'000);  // first swap: no interval
