@@ -18,7 +18,10 @@ function Fail([string]$message) {
   exit 2
 }
 
-$repo = git rev-parse --show-toplevel
+# The shared git dir, not the work tree: in a linked worktree, .git is a file
+# holding a Windows path that WSL git can't follow. Every worktree's branches
+# are under its refs/heads, and the commit is passed by SHA.
+$repo = git rev-parse --path-format=absolute --git-common-dir
 if ($LASTEXITCODE -or -not $repo) { Fail 'Run this from inside the xenia-canary repo.' }
 $commit = git rev-parse --verify "$Ref^{commit}"
 if ($LASTEXITCODE -or -not $commit) { Fail "Could not resolve $Ref." }

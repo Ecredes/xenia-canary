@@ -22,7 +22,10 @@ function Fail([string]$message) {
 
 if ($AllLines -and $Full) { Fail '-AllLines and -Full are mutually exclusive.' }
 
-$repo = git rev-parse --show-toplevel
+# The shared git dir, not the work tree: in a linked worktree, .git is a file
+# holding a Windows path that WSL git can't follow. Every worktree's branches
+# are under its refs/heads, and the commit is passed by SHA.
+$repo = git rev-parse --path-format=absolute --git-common-dir
 if ($LASTEXITCODE -or -not $repo) { Fail 'Run this from inside the xenia-canary repo.' }
 $commit = git rev-parse --verify HEAD
 if ($LASTEXITCODE -or -not $commit) { Fail 'Could not resolve HEAD (no commits yet?).' }
