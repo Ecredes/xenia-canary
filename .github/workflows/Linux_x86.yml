@@ -21,60 +21,78 @@ jobs:
     name: Build
     runs-on: ${{ inputs.runs-on }}
 
+    env:
+      # Pinned downloads, checked against these SHA-256 sums. When updating,
+      # take the Vulkan SDK sum from
+      # https://sdk.lunarg.com/sdk/sha/<version>/linux/vulkansdk-linux-x86_64-<version>.tar.xz.txt
+      # and the linuxdeploy sum from the release asset's digest on GitHub.
+      VULKAN_SDK_VERSION: 1.4.363.0
+      VULKAN_SDK_SHA256: 197962f5cbf80baf2775a03336a01cee7c8745686c65aaa70d3f751ade4d7e43
+      LINUXDEPLOY_VERSION: 1-alpha-20251107-1
+      LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk-linux
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/vulkan-sdk
-          key: ${{ runner.os }}-vulkan-sdk-latest
+          key: ${{ runner.os }}-vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}
 
       - name: Cache linuxdeploy tools
         id: cache-linuxdeploy
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/linuxdeploy
-          key: ${{ runner.os }}-linuxdeploy-tools
+          key: ${{ runner.os }}-linuxdeploy-${{ env.LINUXDEPLOY_VERSION }}
 
       - name: Setup build environment
+        env:
+          LLVM_VERSION: ${{ inputs.llvm_version }}
+          UBUNTU_BASE: ${{ inputs.ubuntu_base }}
+          LINUXDEPLOY_CACHE_HIT: ${{ steps.cache-linuxdeploy.outputs.cache-hit }}
         run: |-
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-          sudo apt-add-repository "deb http://apt.llvm.org/${{ inputs.ubuntu_base }}/ llvm-toolchain-${{ inputs.ubuntu_base }}-${{ inputs.llvm_version }} main"
+          sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-${LLVM_VERSION} main"
           sudo apt-get -y update
-          sudo apt-get -y install mesa-vulkan-drivers valgrind libc++-dev libc++abi-dev libgtk-3-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-${{ inputs.llvm_version }} lld-${{ inputs.llvm_version }} spirv-tools libfuse2
+          sudo apt-get -y install mesa-vulkan-drivers valgrind libc++-dev libc++abi-dev libgtk-3-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-${LLVM_VERSION} lld-${LLVM_VERSION} spirv-tools libfuse2
 
           # Pin LLVM tools to the correct version so system ar/ranlib/lld
           # don't use the older LLVM 17 gold plugin with clang-20 LTO bitcode
-          sudo update-alternatives --install /usr/bin/clang      clang      /usr/bin/clang-${{ inputs.llvm_version }}      200
-          sudo update-alternatives --install /usr/bin/clang++    clang++    /usr/bin/clang++-${{ inputs.llvm_version }}    200
-          sudo update-alternatives --install /usr/bin/lld        lld        /usr/bin/lld-${{ inputs.llvm_version }}        200
-          sudo update-alternatives --install /usr/bin/ld.lld     ld.lld     /usr/bin/ld.lld-${{ inputs.llvm_version }}     200
-          sudo update-alternatives --install /usr/bin/llvm-ar    llvm-ar    /usr/bin/llvm-ar-${{ inputs.llvm_version }}    200
-          sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-${{ inputs.llvm_version }} 200
-          sudo update-alternatives --install /usr/bin/llvm-nm    llvm-nm    /usr/bin/llvm-nm-${{ inputs.llvm_version }}    200
+          sudo update-alternatives --install /usr/bin/clang      clang      /usr/bin/clang-${LLVM_VERSION}      200
+          sudo update-alternatives --install /usr/bin/clang++    clang++    /usr/bin/clang++-${LLVM_VERSION}    200
+          sudo update-alternatives --install /usr/bin/lld        lld        /usr/bin/lld-${LLVM_VERSION}        200
+          sudo update-alternatives --install /usr/bin/ld.lld     ld.lld     /usr/bin/ld.lld-${LLVM_VERSION}     200
+          sudo update-alternatives --install /usr/bin/llvm-ar    llvm-ar    /usr/bin/llvm-ar-${LLVM_VERSION}    200
+          sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-${LLVM_VERSION} 200
+          sudo update-alternatives --install /usr/bin/llvm-nm    llvm-nm    /usr/bin/llvm-nm-${LLVM_VERSION}    200
 
           # Download linuxdeploy tools if not cached
-          if [ "${{ steps.cache-linuxdeploy.outputs.cache-hit }}" != "true" ]; then
+          if [ "$LINUXDEPLOY_CACHE_HIT" != "true" ]; then
             mkdir -p ~/linuxdeploy
-            wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O ~/linuxdeploy/linuxdeploy
+            wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage" -O ~/linuxdeploy/linuxdeploy
+            echo "${LINUXDEPLOY_SHA256}  ${HOME}/linuxdeploy/linuxdeploy" | sha256sum -c -
             chmod +x ~/linuxdeploy/linuxdeploy
           fi
           echo "${HOME}/linuxdeploy" >> $GITHUB_PATH
 
       - name: Install Vulkan SDK
+        env:
+          VULKAN_SDK_CACHE_HIT: ${{ steps.cache-vulkan-sdk-linux.outputs.cache-hit }}
         run: |-
-          if [ "${{ steps.cache-vulkan-sdk-linux.outputs.cache-hit }}" != "true" ]; then
-            wget -qO vulkan-sdk.tar.xz https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz
+          if [ "$VULKAN_SDK_CACHE_HIT" != "true" ]; then
+            wget -qO vulkan-sdk.tar.xz "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+            echo "${VULKAN_SDK_SHA256}  vulkan-sdk.tar.xz" | sha256sum -c -
             mkdir -p ~/vulkan-sdk
             tar -xf vulkan-sdk.tar.xz -C ~/vulkan-sdk
           fi
 
-          VULKAN_SDK_VERSION=$(ls ~/vulkan-sdk)
           echo "VULKAN_SDK=${HOME}/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64" >> $GITHUB_ENV
           echo "${HOME}/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64/bin" >> $GITHUB_PATH
 
@@ -137,7 +155,7 @@ jobs:
 
       - name: Upload Xenia Canary artifact
         if: ${{ steps.prepare_artifacts.outcome == 'success' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ steps.prepare_artifacts.outputs.path }}
           if-no-files-found: error

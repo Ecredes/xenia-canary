@@ -26,15 +26,19 @@ jobs:
     outputs:
       ubuntu_base: ${{ steps.setup.outputs.ubuntu_base }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Setup
         id: setup
+        env:
+          LLVM_VERSION: ${{ inputs.llvm_version }}
         run: |-
           UBUNTU_BASE=$(lsb_release -cs)
           echo "ubuntu_base=$UBUNTU_BASE" >> $GITHUB_OUTPUT
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-          sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-${{ inputs.llvm_version }} main"
+          sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-${LLVM_VERSION} main"
           sudo apt-get -y update
-          sudo apt-get -y install clang-format-${{ inputs.llvm_version }}
+          sudo apt-get -y install clang-format-${LLVM_VERSION}
       - name: Lint
         run: ./xenia-build.py lint --all

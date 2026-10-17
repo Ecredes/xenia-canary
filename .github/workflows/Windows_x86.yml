@@ -10,30 +10,46 @@ jobs:
 
     env:
       POWERSHELL_TELEMETRY_OPTOUT: 1
+      # Pinned download, checked against this SHA-256 sum. When updating, take
+      # the sum from
+      # https://sdk.lunarg.com/sdk/sha/<version>/windows/vulkansdk-windows-X64-<version>.exe.txt
+      VULKAN_SDK_VERSION: 1.4.363.0
+      VULKAN_SDK_SHA256: 94a82d378f7a5e3e54c9db7d2fb7016af136e14ac0a18dbf0f2f67a36352d141
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: C:\VulkanSDK
-          key: ${{ runner.os }}-vulkan-sdk-${{ hashFiles('**/vulkan-sdk.exe') }}
-          restore-keys: ${{ runner.os }}-vulkan-sdk-
+          key: ${{ runner.os }}-vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}
 
       - name: Install Vulkan SDK with spirv-tools
         run: |-
-          if (Test-Path "C:\VulkanSDK") {
+          $sdkPath = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          if (Test-Path $sdkPath) {
             echo "Vulkan SDK found in cache."
           } else {
-            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
-            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+            $installer = "vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/$installer" -OutFile $installer
+            $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
+            if ($hash -ne $env:VULKAN_SDK_SHA256) {
+              echo "::error::$installer SHA-256 is $hash, expected $env:VULKAN_SDK_SHA256"
+              exit 1
+            }
+            Start-Process -FilePath $installer -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+            if (-not (Test-Path $sdkPath)) {
+              echo "::error::Vulkan SDK was not installed to $sdkPath"
+              exit 1
+            }
           }
-          $env:VULKAN_SDK = "C:\VulkanSDK\$(Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name)"
+          $env:VULKAN_SDK = $sdkPath
           $env:PATH += "${env:VULKAN_SDK}\Bin"
           echo "VULKAN_SDK=$env:VULKAN_SDK" >> $env:GITHUB_ENV
           echo "${env:VULKAN_SDK}\Bin" >> $env:GITHUB_PATH
@@ -83,7 +99,7 @@ jobs:
 
       - name: Upload Xenia Canary artifact
         if: ${{ steps.prepare_artifacts.outcome == 'success' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ steps.prepare_artifacts.outputs.path }}
           if-no-files-found: error
