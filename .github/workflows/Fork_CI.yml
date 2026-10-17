@@ -31,10 +31,12 @@ permissions:
   contents: read
   statuses: write
 
-# Keyed on the triggering event too: a pull_request Orchestrator run starts
-# this workflow only to skip it, and must not cancel the branch's push build.
+# One group per branch, so a newer push or dispatch cancels the older build and
+# the commit status always comes from the newest run. A pull_request
+# Orchestrator run starts this workflow only to skip it, so it gets a group of
+# its own and can't cancel the branch's build.
 concurrency:
-  group: fork-ci-${{ github.event.workflow_run.event || 'dispatch' }}-${{ github.event.workflow_run.head_branch || inputs.ref }}
+  group: fork-ci-${{ github.event.workflow_run.event == 'pull_request' && github.run_id || github.event.workflow_run.head_branch || inputs.ref }}
   cancel-in-progress: true
 
 jobs:
