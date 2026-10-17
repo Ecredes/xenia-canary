@@ -118,6 +118,9 @@ reports.
 | `file_open` | a guest file open succeeds; only when `telemetry_file_opens` is `all` | `path`. At most one per path |
 | `input_first_poll` | the first controller state poll for a user index | `user` (index), `connected` (bool: whether any input driver returned a state for that poll). At most one per user; later polls, connected or not, only count towards `input_polls` |
 | `xam_ui` | a guest call to a kernel export that shows system UI (a `XamShow*` export in the UI category), on every call | `ui` (the export name, e.g. `XamShowMessageBoxUI`), `user` (the call's first argument as an unsigned integer; for most of these exports the user index) |
+| `gpu` | once per process, when the graphics backend settles on its adapter, before the first `frame_stats` | `backend` (`d3d12`, `vulkan`, `null`), then for `d3d12` and `vulkan`: `adapter` (adapter name), `vendor_id`, `device_id` (hex strings, 4 digits), `driver` (D3D12: user-mode driver version `a.b.c.d`, omitted if the query fails; Vulkan: `driverName driverInfo` when the driver properties extension is present, else the raw `driverVersion` as hex), `vram_mb` (dedicated video memory; Vulkan: the largest device-local heap). With `--gpu=null` only `backend` is written |
+| `shader_failed` | a shader failed to translate | `hash` (hex, 16 digits, the guest microcode hash), `stage` (`vertex`, `pixel`), `reason` (`translation`). At most one per hash |
+| `gpu_error` | the GPU command processor met a malformed command stream | `kind` (`packet_overflow_type0`, `packet_overflow_type3`, `ringbuffer_execute_failed`, `unknown_opcode`), `detail` (for overflows, `reg=` the base register index (type 0) or `opcode=` the opcode (type 3), then `read=` and `packet=` byte counts, all in hex; `primary`, `indirect` or `packet` for ring buffer failures; the opcode in hex for `unknown_opcode`). At most one per kind and detail, except the overflow kinds, which are written at most once per register (type 0) or opcode (type 3), with the counts of the first occurrence |
 | `frame_stats` | every `telemetry_window` vblanks | see below |
 | `exit` | telemetry closing, followed by `state` → `exited` | `reason` (`shutdown`, `title_exit`, `crash`), `vblank_total`, `swap_total`, `export_calls` (object mapping `library::name` to the number of calls in the session, for every export called at least once) |
 
@@ -133,7 +136,7 @@ example `10.0.26200`, or the kernel release on Linux), `arch` (`x86_64`,
 | `window_vblanks` | vblanks in this window (`telemetry_window`) |
 | `swaps` | swaps in this window |
 | `swap_ms` | swap-to-swap intervals in this window, ms, 2 decimals. An interval belongs to the window of its later swap. The first swap after start or a pause has no interval |
-| `shader_compiles`, `pipeline_compiles` | compiled in this window |
+| `shader_compiles`, `pipeline_compiles` | guest shaders translated and host pipelines created in this window, on any thread (Vulkan placeholder pipelines are not counted) |
 | `file_read_bytes` | guest file bytes read in this window |
 | `input_polls` | guest controller polls in this window |
 | `guest_threads` | guest threads alive now (threads running guest code; emulator-internal host threads are not counted) |
@@ -176,8 +179,5 @@ this on Windows.
 
 The format is growing. These events are planned and not written yet:
 
-- `gpu`: the graphics backend and adapter.
-- `shader_failed`: a shader that failed to translate or compile.
 - `xma_error`, `audio_client`: audio decoding and host audio driver events.
-- `gpu_error`: command stream errors.
 - `crash`: guest crash details, followed by `state` → `crashed`.

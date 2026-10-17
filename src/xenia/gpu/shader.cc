@@ -16,6 +16,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/string.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/gpu/ucode.h"
 
 namespace xe {
@@ -162,6 +163,23 @@ std::pair<std::filesystem::path, std::filesystem::path> Shader::DumpUcode(
 Shader::Translation* Shader::CreateTranslationInstance(uint64_t modification) {
   // Default implementation for simple cases like ucode disassembly.
   return new Translation(*this, modification);
+}
+
+void ReportShaderFailed(const Shader& shader) {
+  if (!xe::telemetry::enabled()) {
+    return;
+  }
+  const uint64_t hash = shader.ucode_data_hash();
+  if (!xe::telemetry::FirstTime("shader_failed",
+                                fmt::format("{:016X}", hash))) {
+    return;
+  }
+  xe::telemetry::Event event("shader_failed");
+  event.Hex("hash", hash, 16)
+      .Str("stage",
+           shader.type() == xenos::ShaderType::kVertex ? "vertex" : "pixel")
+      .Str("reason", "translation");
+  xe::telemetry::Emit(std::move(event));
 }
 
 }  //  namespace gpu
