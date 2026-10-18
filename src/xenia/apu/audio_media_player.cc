@@ -8,11 +8,16 @@
  */
 
 #include "xenia/apu/audio_media_player.h"
+
+#include <cmath>
+#include <limits>
+
 #include "xenia/apu/audio_driver.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/apu/pacing_audio_driver.h"
 #include "xenia/apu/xma_context.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/telemetry.h"
 
 extern "C" {
 #if XE_COMPILER_MSVC
@@ -552,6 +557,20 @@ void AudioMediaPlayer::ProcessAudioBuffer(std::vector<float>* buffer) {
                                           callback_, args, xe::countof(args));
     }*/
 
+    if (xe::telemetry::enabled()) {
+      // XMP music reaches its own driver without passing through
+      // AudioSystem::SubmitFrame, so it needs its own peak report. These are
+      // host-endian floats from FFmpeg (no byte swap, unlike guest frames),
+      // scaled by the playback volume so a muted playlist still reads silent.
+      float peak = 0.0f;
+      for (uint32_t i = 0; i < xe::apu::AudioDriver::kFrameSamplesMax; ++i) {
+        const float a = std::fabs((*buffer)[i]);
+        if (a > peak && a <= std::numeric_limits<float>::max()) {
+          peak = a;
+        }
+      }
+      xe::telemetry::ObservePeak(peak * volume_.load());
+    }
     driver_->SubmitFrame(buffer->data());
     buffer->erase(buffer->begin(),
                   buffer->begin() + xe::apu::AudioDriver::kFrameSamplesMax);
