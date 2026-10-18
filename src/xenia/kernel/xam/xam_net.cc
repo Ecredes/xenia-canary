@@ -362,20 +362,57 @@ dword_result_t NetDll_WSARecvFrom_entry(
     dword_t buffer_count, lpdword_t num_bytes_recv, lpdword_t flags_ptr,
     pointer_t<XSOCKADDR_IN> from_addr, pointer_t<XWSAOVERLAPPED> overlapped_ptr,
     lpvoid_t completion_routine_ptr) {
-  if (overlapped_ptr) {
-    // auto evt = kernel_state()->object_table()->LookupObject<XEvent>(
-    //    overlapped_ptr->event_handle);
-
-    // if (evt) {
-    //  //evt->Set(0, false);
-    //}
+  auto xsocket = kernel_state()->object_table()->LookupObject<XSocket>(socket);
+  if (!xsocket) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+    return -1;
   }
 
-  // we're not going to be receiving packets any time soon
-  // return error so we don't wait on that - Cancerous
-  return -1;
+  // Like NetDll_WSASendTo: one combined host buffer, scattered afterwards.
+  uint32_t total_len = 0;
+  for (uint32_t i = 0; i < buffer_count; i++) {
+    total_len += buffers_ptr[i].len;
+  }
+  std::vector<uint8_t> combined(total_len);
+  N_XSOCKADDR_IN native_from;
+  uint32_t native_from_len = sizeof(XSOCKADDR_IN);
+  int ret = xsocket->RecvFrom(combined.data(), total_len,
+                              flags_ptr ? uint32_t(*flags_ptr) : 0,
+                              &native_from, &native_from_len);
+  if (ret < 0) {
+    // TODO(Ecredes): Overlapped requests complete immediately or fail; they
+    // are never left pending.
+    XThread::SetLastError(xsocket->GetLastWSAError());
+    return -1;
+  }
+
+  uint32_t offset = 0;
+  for (uint32_t i = 0; i < buffer_count && offset < uint32_t(ret); i++) {
+    uint32_t chunk = std::min<uint32_t>(buffers_ptr[i].len, ret - offset);
+    std::memcpy(kernel_memory()->TranslateVirtual(buffers_ptr[i].buf_ptr),
+                combined.data() + offset, chunk);
+    offset += chunk;
+  }
+  if (num_bytes_recv) {
+    *num_bytes_recv = uint32_t(ret);
+  }
+  if (from_addr) {
+    from_addr->sin_family = native_from.sin_family;
+    from_addr->sin_port = native_from.sin_port;
+    from_addr->sin_addr = native_from.sin_addr;
+    std::memset(from_addr->x_sin_zero, 0, sizeof(from_addr->x_sin_zero));
+  }
+  if (overlapped_ptr) {
+    overlapped_ptr->internal = X_STATUS_SUCCESS;
+    overlapped_ptr->internal_high = uint32_t(ret);
+    if (overlapped_ptr->event_handle) {
+      xboxkrnl::xeNtSetEvent(overlapped_ptr->event_handle, nullptr);
+    }
+  }
+  return 0;
 }
-DECLARE_XAM_EXPORT2(NetDll_WSARecvFrom, kNetworking, kStub, kHighFrequency);
+DECLARE_XAM_EXPORT2(NetDll_WSARecvFrom, kNetworking, kImplemented,
+                    kHighFrequency);
 
 // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
 // is the unencrypted game data.
