@@ -156,6 +156,45 @@ pipx install zizmor==1.30.1
 Run these in a WSL shell, not through `wsl -- bash -c "..."` from Windows,
 which expands `$`.
 
+## A/B test builds
+
+Builds a fix branch and its upstream base side by side, each with
+`testing/telemetry` merged in, so an A/B run in game-mcp gets the same live
+signals (state, fps, problems with vblank stamps) on both sides
+(Ecredes/xenia-canary#31). From the xenia-canary repo, in PowerShell:
+
+```powershell
+..\xenia-canary-tooling\ab-build.ps1 gpu/vulkan-edram-compute-modified     # prepare, check, build both
+..\xenia-canary-tooling\ab-build.ps1 <fix> -NoBuild                        # prepare and check only
+..\xenia-canary-tooling\ab-build.ps1 <fix> -Reuse                          # after resolving a merge conflict
+..\xenia-canary-tooling\ab-build.ps1 <fix> -Clean                          # remove the pair
+```
+
+1. The base is `git merge-base <fix> upstream/canary_experimental` (or `-Base`).
+2. Worktrees `.claude/worktrees/ab-<name>-{base,fix}` on local branches
+   `ab/<name>/{base,fix}`, each with a `--no-ff` merge of the telemetry branch
+   (`-Telemetry`, default `origin/testing/telemetry`), with `rerere` on so a
+   conflict resolved on one side resolves the same way on the other.
+3. Isolation check: the diff between the two A/B branches must equal the fix's
+   own diff (hunk positions ignored, since telemetry can shift them). If
+   telemetry edits the fix's hunks, an A/B difference can't be attributed to
+   the fix alone; exit 1 unless `-AllowOverlap`.
+4. `xb setup` and `xb build --config=release --target=xenia-app` in each,
+   with identical options (the second side mostly hits ccache), then checks
+   that each exe has `--telemetry_file`.
+
+It prints both exe paths for `game_launch(plugin="xenia", exe=..., path=...)`;
+game-mcp turns telemetry on by itself. The `ab/*` branches are throwaway:
+never push them, and never use them for a PR (the PR is the plain fix
+branch). Native input needs `hid/remote-input` in the merge too, which
+conflicts with telemetry until #23 lands; use keyboard or ViGEm meanwhile.
+
+| Exit | Meaning |
+|---|---|
+| 0 | pair ready (or `-NoBuild` and the check passed) |
+| 1 | telemetry overlaps the fix's diff |
+| 2 | broken (merge conflict, build failure, git error) |
+
 ## Tests
 
 ```bash
