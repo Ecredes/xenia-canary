@@ -601,21 +601,34 @@ DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToString, kNetworking, kStub);
 
 // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
 // subsequent socket calls (like a handle to a XNet address)
+// TODO(Ecredes): No XNet security layer: the XNADDR's own IP is the handle,
+// which is enough for peers on this console (loopback).
 dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> xn_addr,
                                                lpvoid_t xid, lpvoid_t in_addr) {
-  return 1;
+  if (!xn_addr || !in_addr) {
+    return uint32_t(X_WSAError::X_WSAEFAULT);
+  }
+  std::memcpy(in_addr, &xn_addr->ina, sizeof(xn_addr->ina));
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kSketchy);
 
-// Does the reverse of the above.
-// FIXME: Arguments may not be correct.
-dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, lpvoid_t in_addr,
+// Does the reverse of the above. The IN_ADDR is passed by value.
+dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
                                                pointer_t<XNADDR> xn_addr,
                                                lpvoid_t xid) {
-  return 1;
+  if (xn_addr) {
+    NetDll_XNetGetTitleXnAddr_entry(caller, xn_addr);
+    xn_addr->ina.s_addr = xe::byte_swap(uint32_t(in_addr));
+  }
+  if (xid) {
+    // Matches the key NetDll_XNetCreateKey hands out.
+    kernel_memory()->Fill(xid.guest_address(), 8, 0xBE);
+  }
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kSketchy);
 
 // https://www.google.com/patents/WO2008112448A1?cl=en
 // Reserves a port for use by system link
