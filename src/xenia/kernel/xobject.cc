@@ -442,6 +442,13 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     result = kernel_state->object_table()
                  ->LookupObject<XObject>(handle, true)
                  .release();
+    // Handles are recycled, so a stale stash can name another object.
+    uint32_t guest_ptr = kernel_state->memory()->HostToGuestVirtual(native_ptr);
+    if (result &&
+        static_cast<const XObject*>(result)->guest_object() != guest_ptr) {
+      result->Release();
+      result = nullptr;
+    }
     if (result) {
       // The only place the guest hands us a raw dispatch header, so the only
       // place a direct write to it can be picked up.
