@@ -640,6 +640,25 @@ dword_result_t FscSetCacheElementCount_entry(dword_t unk_0, dword_t unk_1) {
 }
 DECLARE_XBOXKRNL_EXPORT1(FscSetCacheElementCount, kFileSystem, kStub);
 
+// TODO(Ecredes): Titles build a cache partition on these. Failing cleanly
+// makes them skip the cache and read from disc.
+dword_result_t StfsCreateDevice_entry(lpvoid_t create_params,
+                                      dword_t create_params_size) {
+  return X_STATUS_NOT_SUPPORTED;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsCreateDevice, kFileSystem, kStub);
+
+dword_result_t StfsControlDevice_entry(dword_t device_handle,
+                                       dword_t control_code, lpvoid_t buffer) {
+  return X_STATUS_NOT_SUPPORTED;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsControlDevice, kFileSystem, kStub);
+
+dword_result_t IoDismountVolumeByFileHandle_entry(dword_t file_handle) {
+  return X_STATUS_NOT_SUPPORTED;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByFileHandle, kFileSystem, kStub);
+
 struct X_DRIVE_GEOMETRY {
   xe::be<uint32_t> sector_count;
   xe::be<uint32_t> sector_size;
