@@ -1688,8 +1688,10 @@ void D3D12CommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
 
   for (auto& pair : readback_buffers_) {
-    ui::d3d12::util::ReleaseAndNull(pair.second.buffers[0]);
-    ui::d3d12::util::ReleaseAndNull(pair.second.buffers[1]);
+    for (ReadbackBuffer& rb : pair.second.uses) {
+      ui::d3d12::util::ReleaseAndNull(rb.buffers[0]);
+      ui::d3d12::util::ReleaseAndNull(rb.buffers[1]);
+    }
   }
   readback_buffers_.clear();
 
@@ -3434,10 +3436,9 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   uint64_t resolve_key =
       MakeReadbackResolveKey(written_address, written_length);
-  ReadbackBuffer& rb = readback_buffers_[resolve_key];
-  rb.last_used_frame = frame_current_;
+  ReadbackBuffer& rb = readback_buffers_[resolve_key].Use(frame_current_);
 
-  uint32_t write_index = rb.current_index;
+  uint32_t write_index = rb.latest_index == 0 ? 1 : 0;
   uint32_t size = AlignReadbackBufferSize(readback_length);
 
   // Allocate/resize write buffer if needed
@@ -3463,13 +3464,15 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
 
+  // Fast mode reads the copy made by the previous use of this buffer pair,
+  // falling back to the current one with a sync if there's none.
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
-  uint32_t read_index = readback_mode == ReadbackResolveMode::kFast
-                            ? 1 - write_index
-                            : write_index;
-  bool read_cache_miss = readback_mode == ReadbackResolveMode::kFast &&
-                         (rb.buffers[read_index] == nullptr ||
-                          readback_length > rb.sizes[read_index]);
+  uint32_t read_index = write_index;
+  if (readback_mode == ReadbackResolveMode::kFast &&
+      rb.latest_index != UINT32_MAX &&
+      readback_length <= rb.sizes[rb.latest_index]) {
+    read_index = rb.latest_index;
+  }
 
   if (is_scaled) {
     // Scaled path: downscale on the GPU, then copy the 1x data to the
@@ -3582,16 +3585,18 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
         readback_length);
   }
 
-  if (readback_mode != ReadbackResolveMode::kFast) {
+  rb.submissions[write_index] = GetCurrentSubmission();
+  rb.latest_index = write_index;
+
+  if (read_index == write_index) {
     // Wait for GPU to finish (accurate but slow)
     if (!AwaitAllQueueOperationsCompletion()) {
       return true;
     }
-  } else if (read_cache_miss) {
-    // Delayed sync, but the previous buffer doesn't exist - use the current
-    // buffer with a sync as a fallback.
-    read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
+  } else if (rb.submissions[read_index] > GetCompletedSubmission()) {
+    // The previous copy may still be in flight.
+    CheckSubmissionCompletion(rb.submissions[read_index]);
+    if (rb.submissions[read_index] > GetCompletedSubmission()) {
       return true;
     }
   }
@@ -3790,11 +3795,6 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
 
-    // Swap all readback buffers for delayed sync (one frame behind)
-    for (auto& pair : readback_buffers_) {
-      pair.second.current_index = 1 - pair.second.current_index;
-    }
-
     // Evict old readback buffers only when map gets too large to prevent
     // unbounded memory growth. Don't do this every frame as it's expensive.
     if (readback_buffers_.size() > kMaxReadbackBuffers) {
@@ -3804,12 +3804,14 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
         if (frame_current_ > kReadbackBufferEvictionAgeFrames &&
             it->second.last_used_frame <
                 frame_current_ - kReadbackBufferEvictionAgeFrames) {
-          // Release both buffers
-          if (it->second.buffers[0] != nullptr) {
-            it->second.buffers[0]->Release();
-          }
-          if (it->second.buffers[1] != nullptr) {
-            it->second.buffers[1]->Release();
+          // Release both buffers of each use
+          for (ReadbackBuffer& rb : it->second.uses) {
+            if (rb.buffers[0] != nullptr) {
+              rb.buffers[0]->Release();
+            }
+            if (rb.buffers[1] != nullptr) {
+              rb.buffers[1]->Release();
+            }
           }
           it = readback_buffers_.erase(it);
         } else {

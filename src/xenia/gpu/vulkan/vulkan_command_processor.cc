@@ -1252,14 +1252,16 @@ void VulkanCommandProcessor::ShutdownContext() {
 
   // Clean up all readback buffers.
   for (auto& pair : readback_buffers_) {
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[1]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[1]);
+    for (ReadbackBuffer& rb : pair.second.uses) {
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                             rb.buffers[0]);
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                             rb.memories[0]);
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                             rb.buffers[1]);
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                             rb.memories[1]);
+    }
   }
   readback_buffers_.clear();
 
@@ -3303,10 +3305,9 @@ bool VulkanCommandProcessor::IssueCopy() {
 
     uint64_t resolve_key =
         MakeReadbackResolveKey(written_address, written_length);
-    ReadbackBuffer& rb = readback_buffers_[resolve_key];
-    rb.last_used_frame = frame_current_;
+    ReadbackBuffer& rb = readback_buffers_[resolve_key].Use(frame_current_);
 
-    uint32_t write_index = rb.current_index;
+    uint32_t write_index = rb.latest_index == 0 ? 1 : 0;
     uint32_t size = AlignReadbackBufferSize(readback_length);
 
     // Allocate/resize write buffer if needed
@@ -3377,12 +3378,14 @@ bool VulkanCommandProcessor::IssueCopy() {
       rb.sizes[write_index] = size;
     }
 
-    uint32_t read_index = readback_mode == ReadbackResolveMode::kFast
-                              ? 1 - write_index
-                              : write_index;
-    bool read_cache_miss = readback_mode == ReadbackResolveMode::kFast &&
-                           (rb.buffers[read_index] == VK_NULL_HANDLE ||
-                            readback_length > rb.sizes[read_index]);
+    // Fast mode reads the copy made by the previous use of this buffer pair,
+    // falling back to the current one with a sync if there's none.
+    uint32_t read_index = write_index;
+    if (readback_mode == ReadbackResolveMode::kFast &&
+        rb.latest_index != UINT32_MAX &&
+        readback_length <= rb.sizes[rb.latest_index]) {
+      read_index = rb.latest_index;
+    }
 
     if (is_scaled) {
       // Scaled path: downscale on the GPU, then copy the 1x data to the
@@ -3578,7 +3581,10 @@ bool VulkanCommandProcessor::IssueCopy() {
           shared_memory_->buffer(), rb.buffers[write_index], 1, &copy_region);
     }
 
-    if (readback_mode != ReadbackResolveMode::kFast) {
+    rb.submissions[write_index] = GetCurrentSubmission();
+    rb.latest_index = write_index;
+
+    if (read_index == write_index) {
       // Wait for GPU to finish (accurate but slow)
       if (!AwaitAllQueueOperationsCompletion()) {
         XELOGE(
@@ -3586,14 +3592,10 @@ bool VulkanCommandProcessor::IssueCopy() {
             "resolve readback");
         return true;
       }
-    } else if (read_cache_miss) {
-      // Delayed sync, but the previous buffer doesn't exist - use the current
-      // buffer with a sync as a fallback.
-      read_index = write_index;
-      if (!AwaitAllQueueOperationsCompletion()) {
-        XELOGE(
-            "VulkanCommandProcessor: Failed to complete queue operations for "
-            "resolve readback fallback");
+    } else if (rb.submissions[read_index] > GetCompletedSubmission()) {
+      // The previous copy may still be in flight.
+      CheckSubmissionCompletionAndDeviceLoss(rb.submissions[read_index]);
+      if (rb.submissions[read_index] > GetCompletedSubmission()) {
         return true;
       }
     }
@@ -4395,11 +4397,6 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
 
-    // Swap all readback buffers for delayed sync (one frame behind)
-    for (auto& pair : readback_buffers_) {
-      pair.second.current_index = 1 - pair.second.current_index;
-    }
-
     // Evict old readback buffers only when map gets too large to prevent
     // unbounded memory growth. Don't do this every frame as it's expensive.
     if (readback_buffers_.size() > kMaxReadbackBuffers) {
@@ -4414,15 +4411,17 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
         if (frame_current_ > kReadbackBufferEvictionAgeFrames &&
             it->second.last_used_frame <
                 frame_current_ - kReadbackBufferEvictionAgeFrames) {
-          // Release both buffers and memories
-          ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                                 it->second.buffers[0]);
-          ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                                 it->second.memories[0]);
-          ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                                 it->second.buffers[1]);
-          ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                                 it->second.memories[1]);
+          // Release both buffers and memories of each use
+          for (ReadbackBuffer& rb : it->second.uses) {
+            ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                                   rb.buffers[0]);
+            ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                                   rb.memories[0]);
+            ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                                   rb.buffers[1]);
+            ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                                   rb.memories[1]);
+          }
           it = readback_buffers_.erase(it);
         } else {
           ++it;

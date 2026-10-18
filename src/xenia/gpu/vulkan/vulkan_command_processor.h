@@ -856,11 +856,14 @@ class VulkanCommandProcessor final : public CommandProcessor {
     VkBuffer buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     uint32_t sizes[2] = {0, 0};
-    uint32_t current_index = 0;
-    uint64_t last_used_frame = 0;
+    // The submission that copied the resolve to each buffer.
+    uint64_t submissions[2] = {0, 0};
+    // The buffer with the latest copy, UINT32_MAX before the first one.
+    uint32_t latest_index = UINT32_MAX;
   };
-  // Map: (written_address << 32 | written_length) -> ReadbackBuffer
-  std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
+  // Map: (written_address << 32 | written_length) -> ReadbackResolve
+  std::unordered_map<uint64_t, ReadbackResolve<ReadbackBuffer>>
+      readback_buffers_;
 
   // Simple single buffer for memexport (always syncs, no double-buffering)
   VkBuffer memexport_readback_buffer_ = VK_NULL_HANDLE;

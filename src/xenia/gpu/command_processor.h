@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_COMMAND_PROCESSOR_H_
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <functional>
@@ -224,6 +225,31 @@ class CommandProcessor {
                                                 uint32_t length) {
     return (uint64_t(address) << 32) | uint64_t(length);
   }
+
+  static constexpr uint32_t kMaxReadbackResolveUsesPerFrame = 8;
+
+  // Readback buffers of the resolves to one guest range. Games may resolve to
+  // a range several times per frame, or only every other frame, so the fast
+  // mode pairs a resolve with the previous one in the same order in a frame.
+  template <typename Buffer>
+  struct ReadbackResolve {
+    std::vector<Buffer> uses;
+    uint32_t uses_in_frame = 0;
+    uint64_t last_used_frame = 0;
+
+    Buffer& Use(uint64_t frame) {
+      if (last_used_frame != frame) {
+        last_used_frame = frame;
+        uses_in_frame = 0;
+      }
+      uint32_t use_index =
+          std::min(uses_in_frame++, kMaxReadbackResolveUsesPerFrame - 1);
+      if (use_index >= uses.size()) {
+        uses.resize(use_index + 1);
+      }
+      return uses[use_index];
+    }
+  };
 
   void WorkerThreadMain();
   virtual bool SetupContext() = 0;

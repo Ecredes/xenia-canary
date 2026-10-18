@@ -783,11 +783,14 @@ class D3D12CommandProcessor final : public CommandProcessor {
   struct ReadbackBuffer {
     ID3D12Resource* buffers[2] = {nullptr, nullptr};
     uint32_t sizes[2] = {0, 0};
-    uint32_t current_index = 0;
-    uint64_t last_used_frame = 0;
+    // The submission that copied the resolve to each buffer.
+    uint64_t submissions[2] = {0, 0};
+    // The buffer with the latest copy, UINT32_MAX before the first one.
+    uint32_t latest_index = UINT32_MAX;
   };
-  // Map: (written_address << 32 | written_length) -> ReadbackBuffer
-  std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
+  // Map: (written_address << 32 | written_length) -> ReadbackResolve
+  std::unordered_map<uint64_t, ReadbackResolve<ReadbackBuffer>>
+      readback_buffers_;
 
   // Simple single buffer for memexport (always syncs, no double-buffering)
   ID3D12Resource* memexport_readback_buffer_ = nullptr;
