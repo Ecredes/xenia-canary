@@ -289,7 +289,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
   if (from) {
     from->sin_family = nfrom.sin_family;
     from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
-    from->sin_port = nfrom.sin_port;
+    from->sin_port = ntohs(nfrom.sin_port);
     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
   }
 
@@ -320,9 +320,10 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
 
   sockaddr_in nto;
   if (to) {
-    nto.sin_addr.s_addr = to->sin_addr;
+    // xe::be converts to host order; sockaddr_in wants network order.
+    nto.sin_addr.s_addr = htonl(to->sin_addr);
     nto.sin_family = to->sin_family;
-    nto.sin_port = to->sin_port;
+    nto.sin_port = htons(to->sin_port);
   }
 
   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
