@@ -200,3 +200,11 @@ conflicts with telemetry until #23 lands; use keyboard or ViGEm meanwhile.
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/Users/Adam/AGENTS/xenia-canary-tooling && python3 -m unittest discover -s tests -t ."
 ```
+
+## Debugging game compatibility
+
+`docs/compat-debugging.md` is the workflow for turning a compat finding into
+an upstream fix: verified routes, stall classification, Ghidra on the
+caller, edge comparison, minimal fixes. Ghidra scripts are in `re/ghidra`
+(`FixSaveRestGpr`, `DecompileAt`, `DecompileCallers`); `re/tools` has an
+XDVDFS extractor and Capstone helpers.
