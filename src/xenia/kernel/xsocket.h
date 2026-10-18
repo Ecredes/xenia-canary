@@ -18,6 +18,8 @@
 
 namespace xe {
 namespace kernel {
+
+class XEvent;
 enum class X_WSAError : uint32_t {
   X_WSA_INVALID_PARAMETER = 0x0057,
   X_WSAEFAULT = 0x271E,
@@ -130,6 +132,19 @@ class XSocket : public XObject {
              uint32_t to_len);
 
   uint32_t GetLastWSAError() const;
+
+  // WSAEventSelect network events.
+  enum NetworkEvent : uint32_t {
+    kFdRead = 0x01,
+    kFdWrite = 0x02,
+    kFdAccept = 0x08,
+    kFdConnect = 0x10,
+    kFdClose = 0x20,
+  };
+
+  // Signals |event| when one of |network_events| happens, and makes the
+  // socket non-blocking. A null event or zero mask clears the selection.
+  int EventSelect(object_ref<XEvent> event, uint32_t network_events);
 
   struct packet {
     // These values are in network byte order.

@@ -486,6 +486,32 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
 DECLARE_XAM_EXPORT2(NetDll_WSAWaitForMultipleEvents, kNetworking, kImplemented,
                     kBlocking);
 
+dword_result_t NetDll_WSAEventSelect_entry(dword_t caller,
+                                           dword_t socket_handle,
+                                           dword_t event_handle,
+                                           dword_t network_events) {
+  auto socket =
+      kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
+  if (!socket) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+    return -1;
+  }
+  object_ref<XEvent> event;
+  if (event_handle) {
+    event = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
+    if (!event) {
+      XThread::SetLastError(uint32_t(X_WSAError::X_WSA_INVALID_PARAMETER));
+      return -1;
+    }
+  }
+  if (socket->EventSelect(std::move(event), network_events) < 0) {
+    XThread::SetLastError(socket->GetLastWSAError());
+    return -1;
+  }
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_WSAEventSelect, kNetworking, kImplemented);
+
 dword_result_t NetDll_WSACreateEvent_entry() {
   XEvent* ev = new XEvent(kernel_state());
   ev->Initialize(true, false);

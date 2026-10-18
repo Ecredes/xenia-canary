@@ -9,12 +9,18 @@
 
 #include "src/xenia/kernel/xsocket.h"
 
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
+#include "xenia/kernel/xevent.h"
 
 #ifdef XE_PLATFORM_WIN32
 // clang-format off
@@ -27,6 +33,7 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -57,6 +64,167 @@ const std::map<uint32_t, uint32_t> supported_levels = {{0xFFFF, SOL_SOCKET},
 const std::map<uint32_t, uint32_t> supported_controls = {
     {0x8004667E, FIONBIO}, {0x4004667F, FIONREAD}};
 
+namespace {
+
+#ifdef XE_PLATFORM_WIN32
+using NativeSocket = SOCKET;
+int PollSockets(pollfd* fds, size_t count, int timeout_ms) {
+  return WSAPoll(fds, ULONG(count), timeout_ms);
+}
+#else
+using NativeSocket = int;
+int PollSockets(pollfd* fds, size_t count, int timeout_ms) {
+  return poll(fds, nfds_t(count), timeout_ms);
+}
+#endif
+
+// Backs WSAEventSelect with one poll thread. Like Winsock, a network event
+// fires once, then stays disarmed until the guest's next call for it (a
+// receive for FD_READ, an accept for FD_ACCEPT, a send that fails for
+// FD_WRITE).
+class SocketEventWatcher {
+ public:
+  static SocketEventWatcher& Get() {
+    static SocketEventWatcher watcher;
+    return watcher;
+  }
+
+  void Select(XSocket* socket, object_ref<XEvent> event, uint32_t events) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!event || !events) {
+      selections_.erase(socket);
+      return;
+    }
+    selections_[socket] = {std::move(event), events, events};
+    if (!thread_.joinable()) {
+      thread_ = std::thread([this]() { Run(); });
+    }
+    cv_.notify_one();
+  }
+
+  void Rearm(XSocket* socket, uint32_t events) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = selections_.find(socket);
+    if (it == selections_.end()) {
+      return;
+    }
+    it->second.armed |= events & it->second.events;
+    cv_.notify_one();
+  }
+
+  void Remove(XSocket* socket) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    selections_.erase(socket);
+  }
+
+  ~SocketEventWatcher() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+      selections_.clear();
+    }
+    cv_.notify_one();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+ private:
+  struct Selection {
+    object_ref<XEvent> event;
+    uint32_t events;
+    uint32_t armed;
+  };
+
+  static int16_t PollEvents(uint32_t armed) {
+    int16_t events = 0;
+    if (armed & (XSocket::kFdRead | XSocket::kFdAccept | XSocket::kFdClose)) {
+      events |= POLLIN;
+    }
+    if (armed & (XSocket::kFdWrite | XSocket::kFdConnect)) {
+      events |= POLLOUT;
+    }
+    return events;
+  }
+
+  bool HasArmed() const {
+    for (const auto& [socket, selection] : selections_) {
+      if (PollEvents(selection.armed)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void Run() {
+    std::vector<pollfd> fds;
+    std::vector<XSocket*> sockets;
+    std::vector<object_ref<XEvent>> to_signal;
+    while (true) {
+      fds.clear();
+      sockets.clear();
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this]() { return stop_ || HasArmed(); });
+        if (stop_) {
+          return;
+        }
+        for (const auto& [socket, selection] : selections_) {
+          int16_t events = PollEvents(selection.armed);
+          if (events) {
+            fds.push_back({NativeSocket(socket->native_handle()), events, 0});
+            sockets.push_back(socket);
+          }
+        }
+      }
+      // A short timeout picks up new selections and re-arms.
+      if (PollSockets(fds.data(), fds.size(), 10) <= 0) {
+        continue;
+      }
+      to_signal.clear();
+      std::unique_lock<std::mutex> lock(mutex_);
+      for (size_t i = 0; i < fds.size(); ++i) {
+        auto it = selections_.find(sockets[i]);
+        if (!fds[i].revents || it == selections_.end()) {
+          continue;
+        }
+        Selection& selection = it->second;
+        uint32_t fired = 0;
+        if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+          fired |= selection.armed & (XSocket::kFdRead | XSocket::kFdAccept);
+        }
+        if (fds[i].revents & (POLLHUP | POLLERR)) {
+          fired |= selection.armed & XSocket::kFdClose;
+        }
+        if (fds[i].revents & POLLOUT) {
+          fired |= selection.armed & (XSocket::kFdWrite | XSocket::kFdConnect);
+        }
+        if (fds[i].revents & POLLNVAL) {
+          selection.armed = 0;
+        }
+        if (fired) {
+          selection.armed &= ~fired;
+          to_signal.push_back(selection.event);
+        }
+      }
+      // Signal outside the lock: a guest thread may close a socket (and
+      // take the lock) while holding locks XEvent::Set needs.
+      lock.unlock();
+      for (auto& event : to_signal) {
+        event->Set(0, false);
+      }
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::unordered_map<XSocket*, Selection> selections_;
+  std::thread thread_;
+  bool stop_ = false;
+};
+
+}  // namespace
+
 XSocket::XSocket(KernelState* kernel_state)
     : XObject(kernel_state, kObjectType) {}
 
@@ -84,6 +252,8 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
+  SocketEventWatcher::Get().Remove(this);
+
 #if XE_PLATFORM_WIN32
   int ret = closesocket(native_handle_);
 #else
@@ -231,6 +401,7 @@ X_STATUS XSocket::Listen(int backlog) {
 object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   sockaddr n_sockaddr;
   socklen_t n_name_len = sizeof(sockaddr);
+  SocketEventWatcher::Get().Rearm(this, kFdAccept);
   uintptr_t ret = accept(native_handle_, &n_sockaddr, &n_name_len);
   if (ret == -1) {
     std::memset(name, 0, *name_len);
@@ -254,6 +425,7 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
 int XSocket::Shutdown(int how) { return shutdown(native_handle_, how); }
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+  SocketEventWatcher::Get().Rearm(this, kFdRead | kFdClose);
   return recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
 }
 
@@ -282,6 +454,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
   }
   */
 
+  SocketEventWatcher::Get().Rearm(this, kFdRead);
   sockaddr_in nfrom;
   socklen_t nfromlen = sizeof(sockaddr_in);
   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len,
@@ -301,8 +474,13 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
 }
 
 int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
-  return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len,
-              flags);
+  int ret = static_cast<int>(send(static_cast<NativeSocket>(native_handle_),
+                                  reinterpret_cast<const char*>(buf), buf_len,
+                                  static_cast<int>(flags)));
+  if (ret < 0) {
+    SocketEventWatcher::Get().Rearm(this, kFdWrite);
+  }
+  return ret;
 }
 
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
@@ -326,8 +504,14 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
     nto.sin_port = htons(to->sin_port);
   }
 
-  return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
-                to ? (sockaddr*)&nto : nullptr, to_len);
+  int ret = static_cast<int>(
+      sendto(static_cast<NativeSocket>(native_handle_),
+             reinterpret_cast<char*>(buf), buf_len, static_cast<int>(flags),
+             to ? reinterpret_cast<sockaddr*>(&nto) : nullptr, to_len));
+  if (ret < 0) {
+    SocketEventWatcher::Get().Rearm(this, kFdWrite);
+  }
+  return ret;
 }
 
 bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,
@@ -356,6 +540,21 @@ X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
 
   std::memcpy(buf, &sa, *buf_len);
   return X_STATUS_SUCCESS;
+}
+
+int XSocket::EventSelect(object_ref<XEvent> event, uint32_t network_events) {
+#ifdef XE_PLATFORM_WIN32
+  u_long non_blocking = 1;
+  int ret = ioctlsocket(native_handle_, FIONBIO, &non_blocking);
+#else
+  int non_blocking = 1;
+  int ret = ioctl(static_cast<int>(native_handle_), FIONBIO, &non_blocking);
+#endif
+  if (ret < 0) {
+    return -1;
+  }
+  SocketEventWatcher::Get().Select(this, std::move(event), network_events);
+  return 0;
 }
 
 uint32_t XSocket::GetLastWSAError() const {
