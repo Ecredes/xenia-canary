@@ -84,11 +84,17 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
+  // closesocket closes, then the destructor runs this again; by then the
+  // descriptor number may belong to something else.
+  if (native_handle_ == uint64_t(-1)) {
+    return X_STATUS_SUCCESS;
+  }
 #if XE_PLATFORM_WIN32
   int ret = closesocket(native_handle_);
 #else
   int ret = close(native_handle_);
 #endif
+  native_handle_ = uint64_t(-1);
 
   if (ret != 0) {
     return X_STATUS_UNSUCCESSFUL;
