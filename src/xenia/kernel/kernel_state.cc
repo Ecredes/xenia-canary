@@ -398,6 +398,13 @@ object_ref<XModule> KernelState::GetModule(const std::string_view name,
     }
   }
 
+  // Import resolution passes bare names; resolving those as paths only fails.
+  for (auto user_module : user_modules_) {
+    if (user_module->Matches(name)) {
+      return retain_object(user_module.get());
+    }
+  }
+
   auto path(name);
 
   // Resolve the path to an absolute path.
