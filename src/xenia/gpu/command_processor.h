@@ -418,9 +418,12 @@ class CommandProcessor {
   void PumpPendingRetire();
   // Guest writeback.
   void WriteZPDReport(uint32_t report_address, const XenosZPDReport& value) {
+    constexpr uint32_t kSize = sizeof(xenos::xe_gpu_depth_sample_counts);
+    memory_->PrepareHostWrite(report_address, kSize);
     value.WriteTo(
         memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(
             report_address));
+    memory_->FinishHostWrite(report_address, kSize);
   }
   void ResetZPDState() {
     zpd_mode_ = GetZPDMode();

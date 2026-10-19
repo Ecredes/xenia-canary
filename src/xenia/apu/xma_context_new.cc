@@ -126,6 +126,7 @@ bool XmaContextNew::Work() {
     return true;
   }
 
+  GuestBuffersScope guest_buffers(*this, data);
   RingBuffer output_rb = PrepareOutputRingBuffer(&data);
 
   if (data.IsConsumeOnlyContext()) {

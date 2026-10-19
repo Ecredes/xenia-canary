@@ -79,6 +79,7 @@ bool XmaContextFake::Work() {
     return true;
   }
 
+  GuestBuffersScope guest_buffers(*this, data);
   RingBuffer output_rb = PrepareOutputRingBuffer(&data);
 
   const int32_t minimum_subframe_decode_count =

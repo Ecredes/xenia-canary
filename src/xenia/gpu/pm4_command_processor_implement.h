@@ -739,6 +739,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   bool matched = false;
 
   do {
+    if (is_memory) {
+      memory_->PrepareHostRead(poll_reg_addr & ~uint32_t(0x3), 4);
+    }
     uint32_t value = value_ref;
     if (is_memory) {
       trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr & ~uint32_t(0x3)),
@@ -819,7 +822,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_REG_TO_MEM(
   auto endianness = static_cast<xenos::Endian>(mem_addr & 0x3);
   mem_addr &= ~0x3;
   reg_val = GpuSwap(reg_val, endianness);
+  memory_->PrepareHostWrite(mem_addr, 4);
   xe::store(memory_->TranslatePhysical(mem_addr), reg_val);
+  memory_->FinishHostWrite(mem_addr, 4);
   trace_writer_.WriteMemoryWrite(CpuToGpu(mem_addr), 4);
 
   return true;
@@ -834,7 +839,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_MEM_WRITE(
     auto endianness = static_cast<xenos::Endian>(write_addr & 0x3);
     auto addr = write_addr & ~0x3;
     write_data = GpuSwap(write_data, endianness);
+    memory_->PrepareHostWrite(addr, 4);
     xe::store(memory_->TranslatePhysical(addr), write_data);
+    memory_->FinishHostWrite(addr, 4);
     trace_writer_.WriteMemoryWrite(CpuToGpu(addr), 4);
     write_addr += 4;
   }
@@ -857,6 +864,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_COND_WRITE(
     auto endianness = static_cast<xenos::Endian>(poll_reg_addr & 0x3);
     poll_reg_addr &= ~0x3;
     trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr), 4);
+    memory_->PrepareHostRead(poll_reg_addr, 4);
     value = xe::load<uint32_t>(memory_->TranslatePhysical(poll_reg_addr));
     value = GpuSwap(value, endianness);
   } else {
@@ -873,7 +881,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_COND_WRITE(
       auto endianness = static_cast<xenos::Endian>(write_reg_addr & 0x3);
       write_reg_addr &= ~0x3;
       write_data = GpuSwap(write_data, endianness);
+      memory_->PrepareHostWrite(write_reg_addr, 4);
       xe::store(memory_->TranslatePhysical(write_reg_addr), write_data);
+      memory_->FinishHostWrite(write_reg_addr, 4);
       trace_writer_.WriteMemoryWrite(CpuToGpu(write_reg_addr), 4);
     } else {
       // Register.
@@ -935,7 +945,15 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_SHD(
           memory_->TranslateVirtual(0x7F000000 + writeback_offset);
     }
   }
+  bool physical_destination =
+      write_destination == memory_->TranslatePhysical(address);
+  if (physical_destination) {
+    memory_->PrepareHostWrite(address, 4);
+  }
   xe::store(write_destination, data_value);
+  if (physical_destination) {
+    memory_->FinishHostWrite(address, 4);
+  }
   trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
   return true;
 }
@@ -968,9 +986,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_EXT(
 
   uint16_t* destination = (uint16_t*)memory_->TranslatePhysical(address);
 
+  memory_->PrepareHostWrite(address, sizeof(extents));
   for (unsigned i = 0; i < 6; ++i) {
     destination[i] = extents[i];
   }
+  memory_->FinishHostWrite(address, sizeof(extents));
 
   trace_writer_.WriteMemoryWrite(CpuToGpu(address), sizeof(extents));
   return true;
@@ -1230,6 +1250,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_LOAD_ALU_CONSTANT(
   size_dwords &= 0xFFF;
   uint32_t type = (offset_type >> 16) & 0xFF;
 
+  memory_->PrepareHostRead(address, size_dwords * 4);
   auto xlat_address = (uint32_t*)memory_->TranslatePhysical(address);
 
   switch (type) {

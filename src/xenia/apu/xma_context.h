@@ -245,6 +245,22 @@ class XmaContext {
   }
 
  protected:
+  // Declares the guest buffers one Work() pass reads and writes, finishing
+  // the output write on every return path.
+  class GuestBuffersScope {
+   public:
+    GuestBuffersScope(XmaContext& context, const XMA_CONTEXT_DATA& data)
+        : context_(context), data_(data) {
+      context_.PrepareGuestBuffers(data_);
+    }
+    ~GuestBuffersScope() { context_.FinishGuestBuffers(data_); }
+
+   private:
+    XmaContext& context_;
+    XMA_CONTEXT_DATA data_;
+  };
+  void PrepareGuestBuffers(const XMA_CONTEXT_DATA& data);
+  void FinishGuestBuffers(const XMA_CONTEXT_DATA& data);
   static void DumpRaw(AVFrame* frame, int id);
   // Convert sample format and swap bytes
   static void ConvertFrame(const uint8_t** samples, bool is_two_channel,

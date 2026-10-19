@@ -584,6 +584,20 @@ class Memory {
       uint32_t length, bool is_write, bool unwatch_exact_range,
       bool unprotect = true);
 
+  // Host code (the GPU command processor, the kernel, the APU) declares its
+  // accesses to guest physical memory instead of relying on page faults.
+  void PrepareHostRead(uint32_t physical_address, uint32_t length);
+  void PrepareHostWrite(uint32_t physical_address, uint32_t length);
+  // Notifies the invalidation callbacks of a range host code wrote.
+  void FinishHostWrite(uint32_t physical_address, uint32_t length);
+  // For host APIs that bypass the page fault handler, such as system calls:
+  // a guest buffer within one physical view is prepared and translated through
+  // the physical mapping, which is never protected. Other buffers are
+  // translated virtually, and a null guest address gives nullptr.
+  uint8_t* PrepareHostBuffer(uint32_t guest_address, uint32_t length,
+                             bool is_write);
+  void FinishHostBufferWrite(uint32_t guest_address, uint32_t length);
+
   // Allocates virtual memory from the 'system' heap.
   // System memory is kept separate from game memory but is still accessible
   // using normal guest virtual addresses. Kernel structures and other internal
@@ -626,6 +640,10 @@ class Memory {
  private:
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
+
+  // Physical address of a buffer within one physical view, or UINT32_MAX.
+  uint32_t GetHostBufferPhysicalAddress(uint32_t guest_address,
+                                        uint32_t length) const;
 
   static uint32_t HostToGuestVirtualThunk(const void* context,
                                           const void* host_address);

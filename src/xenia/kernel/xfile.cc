@@ -164,12 +164,17 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
                 memory::PageAccess::kReadWrite) {
           result = X_STATUS_ACCESS_VIOLATION;
         } else {
+          uint32_t buffer_physical_address =
+              buffer_physical_heap ? buffer_physical_heap->GetPhysicalAddress(
+                                         buffer_guest_address)
+                                   : 0;
+          if (buffer_physical_heap) {
+            memory()->PrepareHostWrite(buffer_physical_address, buffer_length);
+          }
           result = file_->ReadSync(
               std::span<uint8_t>(
                   buffer_physical_heap
-                      ? memory()->TranslatePhysical(
-                            buffer_physical_heap->GetPhysicalAddress(
-                                buffer_guest_address))
+                      ? memory()->TranslatePhysical(buffer_physical_address)
                       : memory()->TranslateVirtual(buffer_guest_address),
                   buffer_length),
               size_t(byte_offset), &bytes_read);
@@ -179,9 +184,7 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
           }
           if (XSUCCEEDED(result)) {
             if (buffer_physical_heap) {
-              buffer_physical_heap->TriggerCallbacks(
-                  xe::global_critical_region::AcquireDirect(),
-                  buffer_guest_address, buffer_length, true, true);
+              memory()->FinishHostWrite(buffer_physical_address, buffer_length);
             }
 
             if (byte_offset) {
@@ -307,7 +310,8 @@ X_STATUS XFile::Write(uint32_t buffer_guest_address, uint32_t buffer_length,
 
   size_t bytes_written = 0;
   X_STATUS result = file_->WriteSync(
-      std::span<uint8_t>(memory()->TranslateVirtual(buffer_guest_address),
+      std::span<uint8_t>(memory()->PrepareHostBuffer(buffer_guest_address,
+                                                     buffer_length, false),
                          buffer_length),
       size_t(byte_offset), &bytes_written);
   if (out_pending && !is_synchronous_) {

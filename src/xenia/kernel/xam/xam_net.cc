@@ -1068,7 +1068,13 @@ dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Recv(buf_ptr, buf_len, flags);
+  int ret = socket->Recv(kernel_memory()->PrepareHostBuffer(
+                             buf_ptr.guest_address(), buf_len, true),
+                         buf_len, flags);
+  if (ret > 0) {
+    kernel_memory()->FinishHostBufferWrite(buf_ptr.guest_address(), ret);
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_recv, kNetworking, kImplemented);
 
@@ -1089,8 +1095,13 @@ dword_result_t NetDll_recvfrom_entry(dword_t caller, dword_t socket_handle,
     native_from = *from_ptr;
   }
   uint32_t native_fromlen = fromlen_ptr ? fromlen_ptr.value() : 0;
-  int ret = socket->RecvFrom(buf_ptr, buf_len, flags, &native_from,
+  int ret = socket->RecvFrom(kernel_memory()->PrepareHostBuffer(
+                                 buf_ptr.guest_address(), buf_len, true),
+                             buf_len, flags, &native_from,
                              fromlen_ptr ? &native_fromlen : 0);
+  if (ret > 0) {
+    kernel_memory()->FinishHostBufferWrite(buf_ptr.guest_address(), ret);
+  }
 
   if (from_ptr) {
     from_ptr->sin_family = native_from.sin_family;
@@ -1120,7 +1131,9 @@ dword_result_t NetDll_send_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Send(buf_ptr, buf_len, flags);
+  return socket->Send(kernel_memory()->PrepareHostBuffer(
+                          buf_ptr.guest_address(), buf_len, false),
+                      buf_len, flags);
 }
 DECLARE_XAM_EXPORT1(NetDll_send, kNetworking, kImplemented);
 
@@ -1137,7 +1150,9 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
   }
 
   N_XSOCKADDR_IN native_to(to_ptr);
-  int ret = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  int ret = socket->SendTo(kernel_memory()->PrepareHostBuffer(
+                               buf_ptr.guest_address(), buf_len, false),
+                           buf_len, flags, &native_to, to_len);
   return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_sendto, kNetworking, kImplemented);

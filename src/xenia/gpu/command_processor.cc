@@ -604,7 +604,9 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
       // Enabled - write to address.
       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
+      memory_->PrepareHostWrite(mem_addr, 4);
       xe::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
+      memory_->FinishHostWrite(mem_addr, 4);
     }
   } else {
     switch (index) {
@@ -1064,6 +1066,8 @@ void CommandProcessor::QueueZPDReport(uint32_t report_address) {
   if (zpd_mode_ == ZPDMode::kStrict) {
     // See EVENT_WRITE_ZPD for additional information on the pending sentinel.
     const uint32_t kPendingSentinel = xe::byte_swap(0xFFFFFEEDu);
+    memory_->PrepareHostRead(report_address,
+                             sizeof(xenos::xe_gpu_depth_sample_counts));
     const auto* guest =
         memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(
             report_address);

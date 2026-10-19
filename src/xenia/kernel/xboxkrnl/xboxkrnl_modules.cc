@@ -299,10 +299,14 @@ dword_result_t XexLoadImageHeaders_entry(pointer_t<X_ANSI_STRING> path,
   }
   size_t bytes_read = 0;
 
-  X_STATUS result_status = vfs_file->ReadSync(
-      std::span<uint8_t>(reinterpret_cast<uint8_t*>(header.host_address()),
-                         2048),
-      0, &bytes_read);
+  Memory* memory = current_kernel->memory();
+  uint8_t* buffer =
+      memory->PrepareHostBuffer(header.guest_address(), buffer_size, true);
+  X_STATUS result_status =
+      vfs_file->ReadSync(std::span<uint8_t>(buffer, 2048), 0, &bytes_read);
+  if (result_status >= 0) {
+    memory->FinishHostBufferWrite(header.guest_address(), 2048);
+  }
 
   if (result_status < 0) {
     vfs_file->Destroy();
@@ -323,11 +327,11 @@ dword_result_t XexLoadImageHeaders_entry(pointer_t<X_ANSI_STRING> path,
       result_status = X_STATUS_SUCCESS;
     } else {
       result_status = vfs_file->ReadSync(
-          std::span<uint8_t>(
-              reinterpret_cast<uint8_t*>(header.host_address() + 2048),
-              header_size - 2048),
-          2048, &bytes_read);
+          std::span<uint8_t>(buffer + 2048, header_size - 2048), 2048,
+          &bytes_read);
       if (result_status >= X_STATUS_SUCCESS) {
+        memory->FinishHostBufferWrite(header.guest_address() + 2048,
+                                      header_size - 2048);
         result_status = X_STATUS_SUCCESS;
       }
     }

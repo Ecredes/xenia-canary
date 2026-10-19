@@ -709,6 +709,69 @@ void Memory::EnablePhysicalMemoryAccessCallbacks(
                                          enable_data_providers);
 }
 
+void Memory::PrepareHostRead(uint32_t physical_address, uint32_t length) {}
+
+void Memory::PrepareHostWrite(uint32_t physical_address, uint32_t length) {}
+
+void Memory::FinishHostWrite(uint32_t physical_address, uint32_t length) {
+  if (!length) {
+    return;
+  }
+  // Watches are per view, so notify through every view of the range.
+  for (PhysicalHeap* heap : {&heaps_.vA0000000, &heaps_.vC0000000,
+                             &heaps_.vE0000000, &heaps_.v7F000000}) {
+    uint32_t view_physical_base = heap->GetPhysicalAddress(heap->heap_base());
+    if (physical_address < view_physical_base ||
+        physical_address - view_physical_base >= heap->heap_size()) {
+      continue;
+    }
+    heap->TriggerCallbacks(
+        global_critical_region_.Acquire(),
+        heap->heap_base() + (physical_address - view_physical_base), length,
+        true, true);
+  }
+}
+
+uint32_t Memory::GetHostBufferPhysicalAddress(uint32_t guest_address,
+                                              uint32_t length) const {
+  if (!length || UINT32_MAX - guest_address < length - 1) {
+    return UINT32_MAX;
+  }
+  const BaseHeap* heap = LookupHeap(guest_address);
+  if (!heap || heap->heap_type() != HeapType::kGuestPhysical ||
+      LookupHeap(guest_address + length - 1) != heap) {
+    return UINT32_MAX;
+  }
+  return static_cast<const PhysicalHeap*>(heap)->GetPhysicalAddress(
+      guest_address);
+}
+
+uint8_t* Memory::PrepareHostBuffer(uint32_t guest_address, uint32_t length,
+                                   bool is_write) {
+  if (!guest_address) {
+    return nullptr;
+  }
+  uint32_t physical_address =
+      GetHostBufferPhysicalAddress(guest_address, length);
+  if (physical_address == UINT32_MAX) {
+    return TranslateVirtual(guest_address);
+  }
+  if (is_write) {
+    PrepareHostWrite(physical_address, length);
+  } else {
+    PrepareHostRead(physical_address, length);
+  }
+  return TranslatePhysical(physical_address);
+}
+
+void Memory::FinishHostBufferWrite(uint32_t guest_address, uint32_t length) {
+  uint32_t physical_address =
+      GetHostBufferPhysicalAddress(guest_address, length);
+  if (physical_address != UINT32_MAX) {
+    FinishHostWrite(physical_address, length);
+  }
+}
+
 uint32_t Memory::SystemHeapAlloc(uint32_t size, uint32_t alignment,
                                  uint32_t system_heap_flags) {
   // TODO(benvanik): lightweight pool.

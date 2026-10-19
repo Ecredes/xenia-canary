@@ -100,7 +100,10 @@ bool XmaContextMaster::Work() {
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
-  Decode(&data);
+  {
+    GuestBuffersScope guest_buffers(*this, data);
+    Decode(&data);
+  }
   data.Store(context_ptr);
   return true;
 }

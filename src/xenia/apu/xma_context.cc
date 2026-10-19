@@ -18,6 +18,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
+#include "xenia/memory.h"
 
 extern "C" {
 #if XE_COMPILER_MSVC
@@ -41,6 +42,32 @@ XmaContext::XmaContext()
           xe::threading::Event::CreateAutoResetEvent(false)) {}
 
 XmaContext::~XmaContext() {}
+
+void XmaContext::PrepareGuestBuffers(const XMA_CONTEXT_DATA& data) {
+  if (data.input_buffer_0_valid) {
+    memory_->PrepareHostRead(
+        data.input_buffer_0_ptr,
+        data.input_buffer_0_packet_count * kBytesPerPacket);
+  }
+  if (data.input_buffer_1_valid) {
+    memory_->PrepareHostRead(
+        data.input_buffer_1_ptr,
+        data.input_buffer_1_packet_count * kBytesPerPacket);
+  }
+  if (data.output_buffer_valid) {
+    memory_->PrepareHostWrite(
+        data.output_buffer_ptr,
+        data.output_buffer_block_count * kOutputBytesPerBlock);
+  }
+}
+
+void XmaContext::FinishGuestBuffers(const XMA_CONTEXT_DATA& data) {
+  if (data.output_buffer_valid) {
+    memory_->FinishHostWrite(
+        data.output_buffer_ptr,
+        data.output_buffer_block_count * kOutputBytesPerBlock);
+  }
+}
 
 void XmaContext::DumpRaw(AVFrame* frame, int id) {
   FILE* outfile =
