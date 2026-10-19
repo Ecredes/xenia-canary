@@ -168,6 +168,22 @@ bool VulkanCommandProcessor::SetupContext() {
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  if (vulkan_device->properties().timelineSemaphore) {
+    VkSemaphoreTypeCreateInfo semaphore_type_info = {
+        VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    semaphore_type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo semaphore_info = {
+        VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    semaphore_info.pNext = &semaphore_type_info;
+    if (dfn.vkCreateSemaphore(device, &semaphore_info, nullptr,
+                              &submission_timeline_) == VK_SUCCESS) {
+      memory_->SetGpuPullSource(&pull_source_);
+    } else {
+      XELOGW("Failed to create the Vulkan submission timeline semaphore");
+      submission_timeline_ = VK_NULL_HANDLE;
+    }
+  }
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
 
@@ -1202,6 +1218,9 @@ bool VulkanCommandProcessor::SetupContext() {
 void VulkanCommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
 
+  // Before the readback buffers holding pending data are destroyed.
+  memory_->SetGpuPullSource(nullptr);
+
   ShutdownQueryResources();
   host_query_pool_.reset();
 
@@ -1249,6 +1268,9 @@ void VulkanCommandProcessor::ShutdownContext() {
                                          gamma_ramp_buffer_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                          gamma_ramp_buffer_memory_);
+
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroySemaphore, device,
+                                         submission_timeline_);
 
   // Clean up all readback buffers.
   for (auto& pair : readback_buffers_) {
@@ -3179,6 +3201,10 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   // CPU readback resolve path (if not disabled).
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+  if (readback_mode == ReadbackResolveMode::kLazy &&
+      submission_timeline_ == VK_NULL_HANDLE) {
+    readback_mode = ReadbackResolveMode::kFull;
+  }
   if (readback_mode == ReadbackResolveMode::kDisabled || !written_length) {
     return true;
   }
@@ -3308,6 +3334,9 @@ bool VulkanCommandProcessor::IssueCopy() {
 
     uint32_t write_index = rb.current_index;
     uint32_t size = AlignReadbackBufferSize(readback_length);
+    if (rb.memories[write_index] != VK_NULL_HANDLE) {
+      memory_->FlushGpuBuffer(uint64_t(rb.memories[write_index]));
+    }
 
     // Allocate/resize write buffer if needed
     if (size > rb.sizes[write_index]) {
@@ -3578,6 +3607,25 @@ bool VulkanCommandProcessor::IssueCopy() {
           shared_memory_->buffer(), rb.buffers[write_index], 1, &copy_region);
     }
 
+    if (readback_mode == ReadbackResolveMode::kLazy) {
+      // A readback skipped above or a failed submission records nothing: the
+      // range keeps its older pending data, as eager readback keeps the older
+      // readback in guest memory.
+      uint64_t submission = GetCurrentSubmission();
+      // Submitted now, so a pull only ever waits for submitted work, whose
+      // timeline value is signaled.
+      if (!EndSubmission(false)) {
+        return true;
+      }
+      memory_->RecordGpuWrite({written_address, readback_length,
+                               uint64_t(rb.memories[write_index]), 0,
+                               submission});
+      // The next resolve of this range goes to the other buffer, whose data
+      // this one has just superseded, so reusing it never waits for the GPU.
+      rb.current_index = 1 - write_index;
+      return true;
+    }
+
     if (readback_mode != ReadbackResolveMode::kFast) {
       // Wait for GPU to finish (accurate but slow)
       if (!AwaitAllQueueOperationsCompletion()) {
@@ -3600,6 +3648,9 @@ bool VulkanCommandProcessor::IssueCopy() {
 
     if (rb.buffers[read_index] != VK_NULL_HANDLE &&
         readback_length <= rb.sizes[read_index]) {
+      // Data still pending from lazy readback before a mode switch: a pull of
+      // it would map this memory too, and it can't be mapped twice.
+      memory_->FlushGpuBuffer(uint64_t(rb.memories[read_index]));
       void* mapped_data;
       if (dfn.vkMapMemory(device, rb.memories[read_index], 0, readback_length,
                           0, &mapped_data) == VK_SUCCESS) {
@@ -3616,6 +3667,42 @@ bool VulkanCommandProcessor::IssueCopy() {
   }
 
   return true;
+}
+
+void VulkanCommandProcessor::PullSource::AwaitFence(coherence::Fence fence) {
+  const ui::vulkan::VulkanDevice* vulkan_device =
+      command_processor_.GetVulkanDevice();
+  VkSemaphoreWaitInfo wait_info = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+  wait_info.semaphoreCount = 1;
+  wait_info.pSemaphores = &command_processor_.submission_timeline_;
+  wait_info.pValues = &fence;
+  // Returns VK_ERROR_DEVICE_LOST rather than waiting on a lost device.
+  vulkan_device->functions().vkWaitSemaphores(vulkan_device->device(),
+                                              &wait_info, UINT64_MAX);
+}
+
+const uint8_t* VulkanCommandProcessor::PullSource::MapForRead(uint64_t buffer) {
+  const ui::vulkan::VulkanDevice* vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  VkDeviceMemory memory = VkDeviceMemory(buffer);
+  void* mapping;
+  if (dfn.vkMapMemory(vulkan_device->device(), memory, 0, VK_WHOLE_SIZE, 0,
+                      &mapping) != VK_SUCCESS) {
+    return nullptr;
+  }
+  VkMappedMemoryRange range = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+  range.memory = memory;
+  range.size = VK_WHOLE_SIZE;
+  dfn.vkInvalidateMappedMemoryRanges(vulkan_device->device(), 1, &range);
+  return static_cast<const uint8_t*>(mapping);
+}
+
+void VulkanCommandProcessor::PullSource::Unmap(uint64_t buffer) {
+  const ui::vulkan::VulkanDevice* vulkan_device =
+      command_processor_.GetVulkanDevice();
+  vulkan_device->functions().vkUnmapMemory(vulkan_device->device(),
+                                           VkDeviceMemory(buffer));
 }
 
 VkBuffer VulkanCommandProcessor::RequestReadbackBuffer(uint32_t size) {
@@ -4395,9 +4482,12 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
 
-    // Swap all readback buffers for delayed sync (one frame behind)
-    for (auto& pair : readback_buffers_) {
-      pair.second.current_index = 1 - pair.second.current_index;
+    // Swap all readback buffers for delayed sync (one frame behind). Lazy
+    // readback swaps them per resolve instead.
+    if (GetReadbackResolveMode() != ReadbackResolveMode::kLazy) {
+      for (auto& pair : readback_buffers_) {
+        pair.second.current_index = 1 - pair.second.current_index;
+      }
     }
 
     // Evict old readback buffers only when map gets too large to prevent
@@ -4415,6 +4505,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
             it->second.last_used_frame <
                 frame_current_ - kReadbackBufferEvictionAgeFrames) {
           // Release both buffers and memories
+          for (VkDeviceMemory memory : it->second.memories) {
+            if (memory != VK_NULL_HANDLE) {
+              memory_->FlushGpuBuffer(uint64_t(memory));
+            }
+          }
           ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
                                                  it->second.buffers[0]);
           ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
@@ -4671,6 +4766,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     }
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffer.buffer;
+    VkTimelineSemaphoreSubmitInfo timeline_submit_info = {
+        VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    if (submission_timeline_ != VK_NULL_HANDLE) {
+      timeline_submit_info.signalSemaphoreValueCount = 1;
+      timeline_submit_info.pSignalSemaphoreValues = &submission_index;
+      submit_info.pNext = &timeline_submit_info;
+      submit_info.signalSemaphoreCount = 1;
+      submit_info.pSignalSemaphores = &submission_timeline_;
+    }
     const VkResult submit_result = completion_timeline_.AcquireFenceAndSubmit(
         vulkan_device->queue_family_graphics_compute(), 0, 1, &submit_info);
     if (submit_result != VK_SUCCESS) {

@@ -130,6 +130,10 @@ class VulkanDevice {
 
     bool hostQueryReset = false;
 
+    // Vulkan 1.2 core (VK_KHR_timeline_semaphore is not used before 1.2)
+
+    bool timelineSemaphore = false;
+
     // VK_KHR_portability_subset (#164)
 
     bool constantAlphaColorBlendFactors = false;
@@ -234,6 +238,8 @@ class VulkanDevice {
 #include "xenia/ui/vulkan/functions/device_1_1_khr_bind_memory2.inc"
     // VK_EXT_host_query_reset (promoted to 1.2)
 #include "xenia/ui/vulkan/functions/device_1_2_ext_host_query_reset.inc"
+    // VK_KHR_timeline_semaphore (#129, promoted to 1.2)
+#include "xenia/ui/vulkan/functions/device_1_2_khr_timeline_semaphore.inc"
     // VK_KHR_maintenance4 (#414, promoted to 1.3)
 #include "xenia/ui/vulkan/functions/device_1_3_khr_maintenance4.inc"
     // VK_EXT_conditional_rendering (#82)

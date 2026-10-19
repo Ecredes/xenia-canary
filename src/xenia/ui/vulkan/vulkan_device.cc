@@ -679,6 +679,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_FEATURE_2(features_1_2, uniformBufferStandardLayout);
       XE_UI_VULKAN_FEATURE_2(features_1_2, scalarBlockLayout);
       XE_UI_VULKAN_FEATURE_2(features_1_2, hostQueryReset);
+      XE_UI_VULKAN_FEATURE_2(features_1_2, timelineSemaphore);
     }
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {
@@ -831,6 +832,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   }
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
 #include "xenia/ui/vulkan/functions/device_1_2_ext_host_query_reset.inc"
+#include "xenia/ui/vulkan/functions/device_1_2_khr_timeline_semaphore.inc"
   }
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
 #include "xenia/ui/vulkan/functions/device_1_3_khr_maintenance4.inc"

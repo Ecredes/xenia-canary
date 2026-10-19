@@ -852,6 +852,25 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::vector<draw_util::MemExportRange> memexport_ranges_;
 
   // Per-resolve double-buffered readback for delayed sync
+  // Resolve output waiting in readback buffers for a CPU-side access. Needs
+  // the submission timeline semaphore; without it "lazy" acts as "full".
+  class PullSource final : public GpuPullSource {
+   public:
+    explicit PullSource(VulkanCommandProcessor& command_processor)
+        : command_processor_(command_processor) {}
+    // The fence is a submission number.
+    void AwaitFence(coherence::Fence fence) override;
+    // The buffer is the readback VkDeviceMemory.
+    const uint8_t* MapForRead(uint64_t buffer) override;
+    void Unmap(uint64_t buffer) override;
+
+   private:
+    VulkanCommandProcessor& command_processor_;
+  };
+  PullSource pull_source_{*this};
+  // Signaled to each submission's number, so any thread can wait for one.
+  VkSemaphore submission_timeline_ = VK_NULL_HANDLE;
+
   struct ReadbackBuffer {
     VkBuffer buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
