@@ -41,7 +41,8 @@ enum class GPUSetting { ClearMemoryPageState, ReadbackMemexport };
 enum class ReadbackResolveMode {
   kDisabled,  // No readback (none)
   kFast,      // Delayed sync, 1 frame behind (fast)
-  kFull       // Immediate sync with GPU stall (full)
+  kFull,      // Immediate sync with GPU stall (full)
+  kLazy       // Copied on the first CPU-side access (lazy)
 };
 
 // Occlusion queries - ZPD report mode.

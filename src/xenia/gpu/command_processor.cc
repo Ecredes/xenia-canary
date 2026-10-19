@@ -97,6 +97,7 @@ DEFINE_string(
     " fast: Read from previous frame (1 frame delay, no GPU stall, slight "
     "performance hit)\n"
     " full: Wait for GPU to finish (accurate but slow, GPU-CPU sync stall)\n"
+    " lazy: Copy into guest memory when the CPU first touches it (accurate)\n"
     " none: Disable readback completely (some games render better without it)",
     "GPU");
 
@@ -154,6 +155,8 @@ ReadbackResolveMode GetReadbackResolveMode() {
   const std::string& mode = cvars::readback_resolve;
   if (mode == "full") {
     return ReadbackResolveMode::kFull;
+  } else if (mode == "lazy") {
+    return ReadbackResolveMode::kLazy;
   } else if (mode == "none") {
     return ReadbackResolveMode::kDisabled;
   } else {

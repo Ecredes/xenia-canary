@@ -780,6 +780,21 @@ class D3D12CommandProcessor final : public CommandProcessor {
   bool scratch_buffer_used_ = false;
 
   // Per-resolve double-buffered readback for delayed sync
+  // Resolve output waiting in readback buffers for a CPU-side access.
+  class PullSource final : public GpuPullSource {
+   public:
+    explicit PullSource(D3D12CommandProcessor& command_processor)
+        : command_processor_(command_processor) {}
+    // The fence is a submission number.
+    void AwaitFence(coherence::Fence fence) override;
+    const uint8_t* MapForRead(uint64_t buffer) override;
+    void Unmap(uint64_t buffer) override;
+
+   private:
+    D3D12CommandProcessor& command_processor_;
+  };
+  PullSource pull_source_{*this};
+
   struct ReadbackBuffer {
     ID3D12Resource* buffers[2] = {nullptr, nullptr};
     uint32_t sizes[2] = {0, 0};

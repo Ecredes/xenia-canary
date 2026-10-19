@@ -790,6 +790,9 @@ bool D3D12CommandProcessor::SetupContext() {
     return false;
   }
 
+  // Only used once resolve output is registered, after setup.
+  memory_->SetGpuPullSource(&pull_source_);
+
   const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
   ID3D12CommandQueue* direct_queue = provider.GetDirectQueue();
@@ -1686,6 +1689,9 @@ bool D3D12CommandProcessor::SetupContext() {
 
 void D3D12CommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
+
+  // Before the readback buffers holding pending data are released.
+  memory_->SetGpuPullSource(nullptr);
 
   for (auto& pair : readback_buffers_) {
     ui::d3d12::util::ReleaseAndNull(pair.second.buffers[0]);
@@ -3439,6 +3445,9 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   uint32_t write_index = rb.current_index;
   uint32_t size = AlignReadbackBufferSize(readback_length);
+  if (rb.buffers[write_index]) {
+    memory_->FlushGpuBuffer(uint64_t(rb.buffers[write_index]));
+  }
 
   // Allocate/resize write buffer if needed
   if (size > rb.sizes[write_index]) {
@@ -3582,6 +3591,23 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
         readback_length);
   }
 
+  if (readback_mode == ReadbackResolveMode::kLazy) {
+    // A readback skipped above or a failed submission records nothing: the
+    // range keeps its older pending data, as eager readback keeps the older
+    // readback in guest memory.
+    uint64_t submission = GetCurrentSubmission();
+    // Submitted now, so a pull only ever waits for submitted work.
+    if (!EndSubmission(false)) {
+      return true;
+    }
+    memory_->RecordGpuWrite({written_address, readback_length,
+                             uint64_t(rb.buffers[write_index]), 0, submission});
+    // The next resolve of this range goes to the other buffer, whose data this
+    // one has just superseded, so reusing it never waits for the GPU.
+    rb.current_index = 1 - write_index;
+    return true;
+  }
+
   if (readback_mode != ReadbackResolveMode::kFast) {
     // Wait for GPU to finish (accurate but slow)
     if (!AwaitAllQueueOperationsCompletion()) {
@@ -3612,6 +3638,29 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
   return true;
+}
+
+void D3D12CommandProcessor::PullSource::AwaitFence(coherence::Fence fence) {
+  // Free-threaded; a removed device reports every value as completed.
+  ID3D12Fence* d3d12_fence =
+      command_processor_.completion_timeline_->GetFence();
+  if (d3d12_fence->GetCompletedValue() < fence) {
+    d3d12_fence->SetEventOnCompletion(fence, nullptr);
+  }
+}
+
+const uint8_t* D3D12CommandProcessor::PullSource::MapForRead(uint64_t buffer) {
+  void* mapping;
+  if (FAILED(reinterpret_cast<ID3D12Resource*>(buffer)->Map(0, nullptr,
+                                                            &mapping))) {
+    return nullptr;
+  }
+  return static_cast<const uint8_t*>(mapping);
+}
+
+void D3D12CommandProcessor::PullSource::Unmap(uint64_t buffer) {
+  D3D12_RANGE written_range = {};
+  reinterpret_cast<ID3D12Resource*>(buffer)->Unmap(0, &written_range);
 }
 
 void D3D12CommandProcessor::CheckSubmissionCompletion(
@@ -3790,9 +3839,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
 
-    // Swap all readback buffers for delayed sync (one frame behind)
-    for (auto& pair : readback_buffers_) {
-      pair.second.current_index = 1 - pair.second.current_index;
+    // Swap all readback buffers for delayed sync (one frame behind). Lazy
+    // readback swaps them per resolve instead.
+    if (GetReadbackResolveMode() != ReadbackResolveMode::kLazy) {
+      for (auto& pair : readback_buffers_) {
+        pair.second.current_index = 1 - pair.second.current_index;
+      }
     }
 
     // Evict old readback buffers only when map gets too large to prevent
@@ -3805,11 +3857,11 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
             it->second.last_used_frame <
                 frame_current_ - kReadbackBufferEvictionAgeFrames) {
           // Release both buffers
-          if (it->second.buffers[0] != nullptr) {
-            it->second.buffers[0]->Release();
-          }
-          if (it->second.buffers[1] != nullptr) {
-            it->second.buffers[1]->Release();
+          for (ID3D12Resource* buffer : it->second.buffers) {
+            if (buffer != nullptr) {
+              memory_->FlushGpuBuffer(uint64_t(buffer));
+              buffer->Release();
+            }
           }
           it = readback_buffers_.erase(it);
         } else {
