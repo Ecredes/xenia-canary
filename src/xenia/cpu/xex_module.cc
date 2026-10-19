@@ -535,7 +535,15 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length,
     return 0;
   }
 
-  memory()->LookupHeap(base_address_)->Reset();
+  // A DLL shares its heap with the running title, so only the title may clear
+  // it; a DLL instead releases its own image when a key attempt fails.
+  auto heap = memory()->LookupHeap(base_address_);
+  const bool is_dll = xex_header()->module_flags & XEX_MODULE_DLL_MODULE;
+  if (!is_dll) {
+    heap->Reset();
+  }
+  HeapAllocationInfo before;
+  heap->QueryRegionInfo(base_address_, &before);
 
   aes_decrypt_buffer(
       key, reinterpret_cast<const uint8_t*>(xex_security_info()->aes_key), 16,
@@ -557,16 +565,19 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length,
       return 2;
   }
 
-  if (result_code) {
-    return result_code;
+  if (!result_code && !is_patch() && !is_valid_executable()) {
+    // Not a patch and image doesn't have proper PE header, return 3
+    result_code = 3;
   }
 
-  if (is_patch() || is_valid_executable()) {
-    return 0;
+  if (result_code && is_dll && !before.state) {
+    HeapAllocationInfo after;
+    heap->QueryRegionInfo(base_address_, &after);
+    if (after.state && after.allocation_base == base_address_) {
+      heap->Release(base_address_);
+    }
   }
-
-  // Not a patch and image doesn't have proper PE header, return 3
-  return 3;
+  return result_code;
 }
 
 int XexModule::ReadImageUncompressed(const void* xex_addr, size_t xex_length) {
