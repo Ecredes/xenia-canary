@@ -10,7 +10,9 @@
 #ifndef XENIA_MEMORY_H_
 #define XENIA_MEMORY_H_
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,10 +20,12 @@
 #include <utility>
 #include <vector>
 
+#include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/mmio_handler.h"
 #include "xenia/guest_pointers.h"
+#include "xenia/memory_coherence.h"
 namespace xe {
 class ByteStream;
 }  // namespace xe
@@ -267,6 +271,18 @@ class VirtualHeap : public BaseHeap {
                   uint32_t heap_base, uint32_t heap_size, uint32_t page_size);
 };
 
+// Where data the GPU wrote waits until the CPU side touches it.
+class GpuPullSource {
+ public:
+  virtual ~GpuPullSource() = default;
+  // Blocks until the GPU passed the fence. Any thread. Returns early if the
+  // device is lost or shut down.
+  virtual void AwaitFence(coherence::Fence fence) = 0;
+  // nullptr on failure.
+  virtual const uint8_t* MapForRead(uint64_t buffer) = 0;
+  virtual void Unmap(uint64_t buffer) = 0;
+};
+
 // A heap for ranges of memory that are mapped to physical ranges.
 // Physical ranges are used by the audio and graphics subsystems representing
 // hardware wired directly to memory in the console.
@@ -305,9 +321,9 @@ class PhysicalHeap : public BaseHeap {
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
   template <bool enable_invalidation_notifications, bool enable_data_providers>
-  XE_NOINLINE void EnableAccessCallbacksInner(
-      const uint32_t system_page_first, const uint32_t system_page_last,
-      xe::memory::PageAccess protect_access) XE_RESTRICT;
+  XE_NOINLINE void EnableAccessCallbacksInner(const uint32_t system_page_first,
+                                              const uint32_t system_page_last)
+      XE_RESTRICT;
 
   // Returns true if any page in the range was watched. With
   // invalidate_unwatched the callbacks are raised even when no watch is armed
@@ -321,9 +337,41 @@ class PhysicalHeap : public BaseHeap {
 
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
+  // Sets the host protection of system pages from their guest protection,
+  // watches and GPU ownership.
+  void UpdateHostProtection(uint32_t system_page_first,
+                            uint32_t system_page_last);
+  // The same for the system pages of a physical range in this view.
+  void UpdateHostProtectionPhysical(uint32_t physical_address, uint32_t length);
+
   uint32_t SystemPagenumToGuestPagenum(uint32_t num) const {
     return ((num << system_page_shift_) - host_address_offset()) >>
            page_size_shift_;
+  }
+
+  // Whether any guest page in the system page is committed in this view. The
+  // rest of physical memory is mapped read-write on the host.
+  bool SystemPageGuestCommitted(uint32_t system_page_number) const {
+    uint32_t offset = host_address_offset();
+    uint32_t system_base = system_page_number << system_page_shift_;
+    uint32_t system_last = system_base + (system_page_size_ - 1);
+    if (system_last < offset) {
+      return false;
+    }
+    uint32_t first =
+        system_base > offset ? (system_base - offset) >> page_size_shift_ : 0;
+    uint32_t last = (system_last - offset) >> page_size_shift_;
+    for (uint32_t i = first; i <= last && i < page_table_.size(); ++i) {
+      if (page_table_[i].state & kMemoryAllocationCommit) {
+        return true;
+      }
+    }
+    return false;
+  }
+  uint32_t SystemPagePhysicalAddress(uint32_t system_page_number) const {
+    return xe::sat_sub(system_page_number << system_page_shift_,
+                       host_address_offset()) +
+           GetPhysicalAddress(heap_base_);
   }
 
   // The most permissive guest access of the guest pages a system page covers.
@@ -598,6 +646,16 @@ class Memory {
                              bool is_write);
   void FinishHostBufferWrite(uint32_t guest_address, uint32_t length);
 
+  // Data the GPU wrote, pulled into guest memory on the first CPU-side access.
+  // Without a source, pending data is dropped. Returns once no pull waits on
+  // the old source, which the GPU must let finish.
+  void SetGpuPullSource(GpuPullSource* source);
+  // Registers a GPU write and protects its pages in every view.
+  void RecordGpuWrite(const coherence::GpuWrite& write);
+  // Copies what is still pending from a buffer before it's reused or freed.
+  void FlushGpuBuffer(uint64_t buffer);
+  coherence::Stats coherence_stats() const;
+
   // Allocates virtual memory from the 'system' heap.
   // System memory is kept separate from game memory but is still accessible
   // using normal guest virtual addresses. Kernel structures and other internal
@@ -696,7 +754,31 @@ class Memory {
   friend class BaseHeap;
 
   friend class PhysicalHeap;
+  // Pulls GPU-owned data in the physical range, waiting for the GPU with the
+  // lock released. Returns whether anything in the range was GPU-owned.
+  bool PullGpuOwned(global_unique_lock_type& global_lock,
+                    uint32_t physical_address, uint32_t length);
+  // Waits with the lock released until the GPU passed pending_fence(), which
+  // is evaluated again after each wait, as other threads record meanwhile.
+  // Returns a fence at least as new as every one pending_fence() now covers.
+  coherence::Fence AwaitPendingGpuWrites(
+      global_unique_lock_type& global_lock,
+      const std::function<coherence::Fence()>& pending_fence);
+  // Never waits: the GPU must have passed passed_fence, which is at least as
+  // new as every copy's fence.
+  void ApplyCopies(const std::vector<coherence::Copy>& copies,
+                   coherence::Fence passed_fence);
+  void DiscardGpuOwned(uint32_t physical_address, uint32_t length);
+  bool IsGpuOwned(uint32_t physical_address, uint32_t length) const;
+  void UpdateHostProtection(uint32_t physical_address, uint32_t length);
+
   xe::global_critical_region global_critical_region_;
+  // Guarded by the global critical region.
+  coherence::Core coherence_core_;
+  GpuPullSource* gpu_pull_source_ = nullptr;
+  // Threads in GpuPullSource::AwaitFence, which may still use the old source
+  // after it's replaced.
+  std::atomic<uint32_t> gpu_pull_waiters_{0};
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
   std::vector<std::pair<PhysicalMemoryReadCallback, void*>*>

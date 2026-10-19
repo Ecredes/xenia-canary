@@ -157,12 +157,15 @@ std::vector<Copy> Core::TakeCopiesFromBuffer(uint64_t buffer) {
   return copies;
 }
 
-void Core::Discard(uint32_t physical_address, uint32_t length) {
+std::vector<Copy> Core::Discard(uint32_t physical_address, uint32_t length) {
+  std::vector<Copy> dropped;
   if (!length) {
-    return;
+    return dropped;
   }
-  stats_.bytes_discarded +=
-      Subtract(physical_address, physical_address + length, nullptr);
+  uint64_t end =
+      std::min<uint64_t>(uint64_t(physical_address) + length, UINT32_MAX);
+  stats_.bytes_discarded += Subtract(physical_address, uint32_t(end), &dropped);
+  return dropped;
 }
 
 bool Core::IsGpuOwned(uint32_t physical_page) const {

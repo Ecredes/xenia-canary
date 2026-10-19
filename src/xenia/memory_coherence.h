@@ -78,8 +78,8 @@ class Core {
   std::vector<Copy> TakeCopies(uint32_t physical_address, uint32_t length);
   // Removes and returns everything still pending from a buffer.
   std::vector<Copy> TakeCopiesFromBuffer(uint64_t buffer);
-  // Drops pending bytes in the range.
-  void Discard(uint32_t physical_address, uint32_t length);
+  // Drops pending bytes in the range, returning what it dropped.
+  std::vector<Copy> Discard(uint32_t physical_address, uint32_t length);
   bool IsGpuOwned(uint32_t physical_page) const;
   const Stats& stats() const { return stats_; }
 

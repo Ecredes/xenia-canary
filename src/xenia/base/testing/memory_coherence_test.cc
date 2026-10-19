@@ -103,6 +103,13 @@ TEST_CASE("Coherence: discard drops pending bytes", "[memory_coherence]") {
   REQUIRE(core.stats().bytes_discarded == 0x1000);
 }
 
+TEST_CASE("Coherence: discard returns what it dropped", "[memory_coherence]") {
+  Core core;
+  core.RecordGpuWrite({0x10000, 0x2000, 1, 0, 5});
+  REQUIRE(core.Discard(0x10800, 0x1000) ==
+          std::vector<Copy>{{1, 0x800, 0x10800, 0x1000, 5}});
+}
+
 TEST_CASE("Coherence: the fence is the newest overlapping one",
           "[memory_coherence]") {
   Core core;

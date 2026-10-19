@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include <random>
+#include <thread>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
@@ -709,10 +710,6 @@ void Memory::EnablePhysicalMemoryAccessCallbacks(
                                          enable_data_providers);
 }
 
-void Memory::PrepareHostRead(uint32_t physical_address, uint32_t length) {}
-
-void Memory::PrepareHostWrite(uint32_t physical_address, uint32_t length) {}
-
 void Memory::FinishHostWrite(uint32_t physical_address, uint32_t length) {
   if (!length) {
     return;
@@ -769,6 +766,146 @@ void Memory::FinishHostBufferWrite(uint32_t guest_address, uint32_t length) {
       GetHostBufferPhysicalAddress(guest_address, length);
   if (physical_address != UINT32_MAX) {
     FinishHostWrite(physical_address, length);
+  }
+}
+
+void Memory::PrepareHostRead(uint32_t physical_address, uint32_t length) {
+  auto global_lock = global_critical_region_.Acquire();
+  PullGpuOwned(global_lock, physical_address, length);
+}
+
+void Memory::PrepareHostWrite(uint32_t physical_address, uint32_t length) {
+  auto global_lock = global_critical_region_.Acquire();
+  PullGpuOwned(global_lock, physical_address, length);
+}
+
+void Memory::SetGpuPullSource(GpuPullSource* source) {
+  auto global_lock = global_critical_region_.Acquire();
+  if (!source) {
+    DiscardGpuOwned(0, UINT32_MAX);
+  }
+  gpu_pull_source_ = source;
+  global_lock.unlock();
+  // The old source may be destroyed after this returns.
+  while (gpu_pull_waiters_.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+}
+
+void Memory::RecordGpuWrite(const coherence::GpuWrite& write) {
+  if (!write.length) {
+    return;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  coherence_core_.RecordGpuWrite(write);
+  UpdateHostProtection(write.physical_address, write.length);
+}
+
+void Memory::FlushGpuBuffer(uint64_t buffer) {
+  auto global_lock = global_critical_region_.Acquire();
+  coherence::Fence passed_fence = AwaitPendingGpuWrites(
+      global_lock, [&] { return coherence_core_.FenceForBuffer(buffer); });
+  std::vector<coherence::Copy> copies =
+      coherence_core_.TakeCopiesFromBuffer(buffer);
+  if (copies.empty()) {
+    return;
+  }
+  ApplyCopies(copies, passed_fence);
+  for (const coherence::Copy& copy : copies) {
+    UpdateHostProtection(copy.physical_address, copy.length);
+  }
+}
+
+coherence::Stats Memory::coherence_stats() const {
+  auto global_lock = global_critical_region_.Acquire();
+  return coherence_core_.stats();
+}
+
+bool Memory::PullGpuOwned(global_unique_lock_type& global_lock,
+                          uint32_t physical_address, uint32_t length) {
+  if (!length || !IsGpuOwned(physical_address, length)) {
+    return false;
+  }
+  coherence::Fence passed_fence = AwaitPendingGpuWrites(global_lock, [&] {
+    return coherence_core_.FenceFor(physical_address, length);
+  });
+  std::vector<coherence::Copy> copies =
+      coherence_core_.TakeCopies(physical_address, length);
+  if (!copies.empty()) {
+    ApplyCopies(copies, passed_fence);
+    for (const coherence::Copy& copy : copies) {
+      UpdateHostProtection(copy.physical_address, copy.length);
+    }
+  }
+  return true;
+}
+
+coherence::Fence Memory::AwaitPendingGpuWrites(
+    global_unique_lock_type& global_lock,
+    const std::function<coherence::Fence()>& pending_fence) {
+  GpuPullSource* waited_source = nullptr;
+  coherence::Fence waited_fence = 0;
+  while (true) {
+    GpuPullSource* source = gpu_pull_source_;
+    coherence::Fence fence = pending_fence();
+    if (!source || fence <= (source == waited_source ? waited_fence : 0)) {
+      return fence;
+    }
+    // The GPU may need this lock to finish; other threads may pull meanwhile.
+    gpu_pull_waiters_.fetch_add(1, std::memory_order_relaxed);
+    global_lock.unlock();
+    source->AwaitFence(fence);
+    gpu_pull_waiters_.fetch_sub(1, std::memory_order_release);
+    global_lock.lock();
+    waited_source = source;
+    waited_fence = fence;
+  }
+}
+
+void Memory::ApplyCopies(const std::vector<coherence::Copy>& copies,
+                         coherence::Fence passed_fence) {
+  GpuPullSource* source = gpu_pull_source_;
+  if (!source) {
+    return;
+  }
+  for (const coherence::Copy& copy : copies) {
+    assert_true(copy.fence <= passed_fence);
+    const uint8_t* mapping = source->MapForRead(copy.buffer);
+    if (!mapping) {
+      continue;
+    }
+    std::memcpy(TranslatePhysical(copy.physical_address),
+                mapping + copy.buffer_offset, copy.length);
+    source->Unmap(copy.buffer);
+  }
+}
+
+void Memory::DiscardGpuOwned(uint32_t physical_address, uint32_t length) {
+  for (const coherence::Copy& copy :
+       coherence_core_.Discard(physical_address, length)) {
+    UpdateHostProtection(copy.physical_address, copy.length);
+  }
+}
+
+bool Memory::IsGpuOwned(uint32_t physical_address, uint32_t length) const {
+  if (!length) {
+    return false;
+  }
+  uint32_t page_last = uint32_t((uint64_t(physical_address) + length - 1) >>
+                                coherence::Core::kPageShift);
+  for (uint32_t page = physical_address >> coherence::Core::kPageShift;
+       page <= page_last; ++page) {
+    if (coherence_core_.IsGpuOwned(page)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void Memory::UpdateHostProtection(uint32_t physical_address, uint32_t length) {
+  for (PhysicalHeap* heap : {&heaps_.vA0000000, &heaps_.vC0000000,
+                             &heaps_.vE0000000, &heaps_.v7F000000}) {
+    heap->UpdateHostProtectionPhysical(physical_address, length);
   }
 }
 
@@ -2033,6 +2170,7 @@ bool PhysicalHeap::Decommit(uint32_t address, uint32_t size) {
   }
 
   // Not caring about the contents anymore.
+  memory_->DiscardGpuOwned(parent_address, size);
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
                    true);
 
@@ -2058,6 +2196,7 @@ bool PhysicalHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   // thus callback handlers will keep considering this range valid forever.
   uint32_t region_size;
   if (QuerySize(base_address, &region_size)) {
+    memory_->DiscardGpuOwned(parent_base_address, region_size);
     TriggerCallbacks(std::move(global_lock), base_address, region_size, true,
                      true, true, true);
   }
@@ -2124,117 +2263,145 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
 
   // Update callback flags for system pages and make their protection stricter
   // if needed.
-  xe::memory::PageAccess protect_access =
-      enable_data_providers ? xe::memory::PageAccess::kNoAccess
-                            : xe::memory::PageAccess::kReadOnly;
-
   auto global_lock = global_critical_region_.Acquire();
   if (enable_invalidation_notifications) {
     if (enable_data_providers) {
       EnableAccessCallbacksInner<true, true>(system_page_first,
-                                             system_page_last, protect_access);
+                                             system_page_last);
     } else {
       EnableAccessCallbacksInner<true, false>(system_page_first,
-                                              system_page_last, protect_access);
+                                              system_page_last);
     }
   } else {
-    EnableAccessCallbacksInner<false, true>(system_page_first, system_page_last,
-                                            protect_access);
+    EnableAccessCallbacksInner<false, true>(system_page_first,
+                                            system_page_last);
   }
+}
+
+void PhysicalHeap::UpdateHostProtectionPhysical(uint32_t physical_address,
+                                                uint32_t length) {
+  uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
+  if (physical_address < physical_address_offset) {
+    if (physical_address_offset - physical_address >= length) {
+      return;
+    }
+    length -= physical_address_offset - physical_address;
+    physical_address = physical_address_offset;
+  }
+  uint32_t heap_relative_address = physical_address - physical_address_offset;
+  if (heap_relative_address >= heap_size_) {
+    return;
+  }
+  length = std::min(length, heap_size_ - heap_relative_address);
+  if (!length) {
+    return;
+  }
+  uint32_t system_page_first =
+      (heap_relative_address + host_address_offset()) >> system_page_shift_;
+  uint32_t system_page_last =
+      std::min((heap_relative_address + length - 1 + host_address_offset()) >>
+                   system_page_shift_,
+               system_page_count_ - 1);
+  UpdateHostProtection(system_page_first, system_page_last);
+}
+
+void PhysicalHeap::UpdateHostProtection(uint32_t system_page_first,
+                                        uint32_t system_page_last) {
+  auto to_access = [](xe::memory::PageAccess page_access) {
+    switch (page_access) {
+      case xe::memory::PageAccess::kReadWrite:
+        return coherence::Access::kReadWrite;
+      case xe::memory::PageAccess::kReadOnly:
+        return coherence::Access::kReadOnly;
+      default:
+        return coherence::Access::kNoAccess;
+    }
+  };
+  auto to_page_access = [](coherence::Access host_access) {
+    switch (host_access) {
+      case coherence::Access::kReadWrite:
+        return xe::memory::PageAccess::kReadWrite;
+      case coherence::Access::kReadOnly:
+        return xe::memory::PageAccess::kReadOnly;
+      default:
+        return xe::memory::PageAccess::kNoAccess;
+    }
+  };
+  uint8_t* protect_base = membase_ + heap_base_;
+  uint32_t run_first = system_page_first;
+  coherence::Access run_access = coherence::Access::kNoAccess;
+  for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
+    uint64_t bit = uint64_t(1) << (i & 63);
+    const SystemPageFlagsBlock& flags = system_page_flags_[i >> 6];
+    coherence::PageView view{to_access(SystemPageGuestAccess(i)),
+                             SystemPageGuestCommitted(i),
+                             (flags.notify_on_invalidation & bit) != 0};
+    // A read watch keeps the page no-access like GPU ownership does.
+    bool no_access =
+        (flags.notify_on_read & bit) != 0 ||
+        memory_->IsGpuOwned(SystemPagePhysicalAddress(i), system_page_size_);
+    coherence::Access host_access =
+        coherence::EffectiveHostAccess(view, no_access);
+    if (i == system_page_first) {
+      run_access = host_access;
+    } else if (host_access != run_access) {
+      xe::memory::Protect(protect_base + (run_first << system_page_shift_),
+                          (i - run_first) << system_page_shift_,
+                          to_page_access(run_access));
+      run_first = i;
+      run_access = host_access;
+    }
+  }
+  xe::memory::Protect(protect_base + (run_first << system_page_shift_),
+                      (system_page_last + 1 - run_first) << system_page_shift_,
+                      to_page_access(run_access));
 }
 
 template <bool enable_invalidation_notifications, bool enable_data_providers>
 XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
-    const uint32_t system_page_first, const uint32_t system_page_last,
-    xe::memory::PageAccess protect_access) XE_RESTRICT {
-  uint8_t* protect_base = membase_ + heap_base_;
-  uint32_t protect_system_page_first = UINT32_MAX;
-
+    const uint32_t system_page_first,
+    const uint32_t system_page_last) XE_RESTRICT {
   SystemPageFlagsBlock* XE_RESTRICT sys_page_flags = system_page_flags_.data();
 
-  // chrispy: a lot of time is spent in this loop, and i think some of the work
-  // may be avoidable and repetitive profiling shows quite a bit of time spent
-  // in this loop, but very little spent actually calling Protect
-  uint32_t i = system_page_first;
-  for (; i <= system_page_last; ++i) {
-    // Check if need to enable callbacks for the page and raise its protection.
-    //
-    // If enabling invalidation notifications:
-    // - Page writable and not watched for changes yet - protect and enable
-    //   invalidation notifications.
-    // - Page seen as writable by the guest, but only needs data providers -
-    //   just set the bits to enable invalidation notifications (already has
-    //   even stricter protection than needed).
-    // - Page not writable as requested by the game - don't do anything (need
-    //   real access violations here).
-    // If enabling data providers:
-    // - Page accessible (either read/write or read-only) and didn't need data
-    //   providers initially - protect and enable data providers.
-    // - Otherwise - do nothing.
-    //
-    // It's safe not to await data provider completion here before protecting as
-    // this never makes protection lighter, so it can't interfere with page
-    // faults that await data providers.
-    //
-    // Enabling data providers doesn't need to be deferred - providers will be
-    // polled for the last time without releasing the lock.
+  // Set the callback flags of the system pages that need them, then protect
+  // the runs whose flags changed.
+  //
+  // - Invalidation notifications: pages the guest may write in this view.
+  //   Read-only and inaccessible pages need real access violations instead.
+  //   Views the page isn't committed in aren't watched: until every GPU write
+  //   is registered, a write there would drop GPU-only data from the GPU copy.
+  // - Data providers: pages the guest may access in this view.
+  uint32_t changed_first = UINT32_MAX;
+  for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
     SystemPageFlagsBlock& page_flags_block = sys_page_flags[i >> 6];
-
-#if XE_ARCH_AMD64 == 1
-    // x86 modulus shift
-    uint64_t page_flags_bit = uint64_t(1) << i;
-#else
     uint64_t page_flags_bit = uint64_t(1) << (i & 63);
-#endif
-
     xe::memory::PageAccess current_page_access = SystemPageGuestAccess(i);
-    bool protect_system_page = false;
-    // Don't do anything with inaccessible pages - don't protect, don't enable
-    // callbacks - because real access violations are needed there. And don't
-    // enable invalidation notifications for read-only pages for the same
-    // reason.
-    if (current_page_access != xe::memory::PageAccess::kNoAccess) {
-      if constexpr (enable_invalidation_notifications) {
-        if (current_page_access != xe::memory::PageAccess::kReadOnly &&
-            (page_flags_block.notify_on_invalidation & page_flags_bit) == 0) {
-          page_flags_block.notify_on_invalidation |= page_flags_bit;
-          // A read-watched page is already protected no-access, stricter than
-          // read-only, so don't loosen it here.
-          if ((page_flags_block.notify_on_read & page_flags_bit) == 0) {
-            protect_system_page = true;
-          }
-        }
-      }
-      if constexpr (enable_data_providers) {
-        // Read watches protect the page no-access, so an accessible page not
-        // yet read-watched needs protecting.
-        if ((page_flags_block.notify_on_read & page_flags_bit) == 0) {
-          protect_system_page = true;
-          page_flags_block.notify_on_read |= page_flags_bit;
-        }
+    bool changed = false;
+    if constexpr (enable_invalidation_notifications) {
+      if ((page_flags_block.notify_on_invalidation & page_flags_bit) == 0 &&
+          current_page_access == xe::memory::PageAccess::kReadWrite) {
+        page_flags_block.notify_on_invalidation |= page_flags_bit;
+        changed = true;
       }
     }
-    if (protect_system_page) {
-      if (protect_system_page_first == UINT32_MAX) {
-        protect_system_page_first = i;
+    if constexpr (enable_data_providers) {
+      if ((page_flags_block.notify_on_read & page_flags_bit) == 0 &&
+          current_page_access != xe::memory::PageAccess::kNoAccess) {
+        page_flags_block.notify_on_read |= page_flags_bit;
+        changed = true;
       }
-    } else {
-      if (protect_system_page_first != UINT32_MAX) {
-        xe::memory::Protect(
-            protect_base + (protect_system_page_first << system_page_shift_),
-            (i - protect_system_page_first) << system_page_shift_,
-            protect_access);
-        protect_system_page_first = UINT32_MAX;
+    }
+    if (changed) {
+      if (changed_first == UINT32_MAX) {
+        changed_first = i;
       }
+    } else if (changed_first != UINT32_MAX) {
+      UpdateHostProtection(changed_first, i - 1);
+      changed_first = UINT32_MAX;
     }
   }
-
-  if (protect_system_page_first != UINT32_MAX) {
-    xe::memory::Protect(
-        protect_base + (protect_system_page_first << system_page_shift_),
-        (system_page_last + 1 - protect_system_page_first)
-            << system_page_shift_,
-        protect_access);
+  if (changed_first != UINT32_MAX) {
+    UpdateHostProtection(changed_first, system_page_last);
   }
 }
 bool PhysicalHeap::TriggerCallbacks(
@@ -2267,6 +2434,10 @@ bool PhysicalHeap::TriggerCallbacks(
   uint32_t block_index_first = system_page_first >> 6;
   uint32_t block_index_last = system_page_last >> 6;
 
+  bool gpu_owned = memory_->PullGpuOwned(
+      global_lock_locked_once, SystemPagePhysicalAddress(system_page_first),
+      (system_page_last - system_page_first + 1) << system_page_shift_);
+
   // Read watches: the first read of a no-access-armed page notifies the read
   // callbacks, then the page is downgraded and unwatched so the access
   // proceeds. A write to such a page is handled by the write path below, which
@@ -2287,12 +2458,15 @@ bool PhysicalHeap::TriggerCallbacks(
       }
     }
     if (!any_read_watched) {
-      // No read watch here. If the guest mapping is accessible this is a race
-      // with another thread that cleared the watch, so retry. If it is
-      // no-access it is a genuine access violation, so propagate. Checked via
-      // the page table to stay signal safe.
-      return SystemPageGuestAccess(system_page_first) !=
-             xe::memory::PageAccess::kNoAccess;
+      // No read watch here. If the guest mapping is accessible, or the page
+      // was GPU-owned, this is a race with another thread that cleared the
+      // watch or pulled, so retry. A page not committed in this view is
+      // read-write on the host. Otherwise it's a genuine access violation, so
+      // propagate. Checked via the page table to stay signal safe.
+      return gpu_owned ||
+             SystemPageGuestAccess(system_page_first) !=
+                 xe::memory::PageAccess::kNoAccess ||
+             !SystemPageGuestCommitted(system_page_first);
     }
     uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
     uint32_t physical_address_start =
@@ -2309,30 +2483,7 @@ bool PhysicalHeap::TriggerCallbacks(
       read_callback->first(read_callback->second, physical_address_start,
                            physical_length);
     }
-    // Downgrade each read-watched page so the access proceeds. Keep it
-    // read-only if it also has a write watch, otherwise restore the guest
-    // protection. Then clear the read watch.
-    if (unprotect) {
-      uint8_t* protect_base = membase_ + heap_base_;
-      for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
-        uint64_t bit = uint64_t(1) << (i & 63);
-        SystemPageFlagsBlock& flags = system_page_flags_[i >> 6];
-        if (!(flags.notify_on_read & bit)) {
-          continue;
-        }
-        xe::memory::PageAccess guest_access = SystemPageGuestAccess(i);
-        xe::memory::PageAccess target;
-        if (guest_access == xe::memory::PageAccess::kNoAccess) {
-          target = xe::memory::PageAccess::kNoAccess;
-        } else if (flags.notify_on_invalidation & bit) {
-          target = xe::memory::PageAccess::kReadOnly;
-        } else {
-          target = guest_access;
-        }
-        xe::memory::Protect(protect_base + (i << system_page_shift_),
-                            system_page_size_, target);
-      }
-    }
+    // Clear the read watches so the access proceeds, keeping a write watch.
     for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
       uint64_t mask = 0;
       if (i == block_index_first) {
@@ -2342,6 +2493,9 @@ bool PhysicalHeap::TriggerCallbacks(
         mask |= ~((uint64_t(1) << ((system_page_last & 63) + 1)) - 1);
       }
       system_page_flags_[i].notify_on_read &= mask;
+    }
+    if (unprotect) {
+      UpdateHostProtection(system_page_first, system_page_last);
     }
     return true;
   }
@@ -2371,8 +2525,10 @@ bool PhysicalHeap::TriggerCallbacks(
     // MMIOHandler::ExceptionCallback. If the guest doesn't permit the write
     // either, retrying it faults forever, so report it unhandled and let the
     // violation surface.
-    return SystemPageGuestAccess(system_page_first) ==
-           xe::memory::PageAccess::kReadWrite;
+    return gpu_owned ||
+           SystemPageGuestAccess(system_page_first) ==
+               xe::memory::PageAccess::kReadWrite ||
+           !SystemPageGuestCommitted(system_page_first);
   }
 
   // Trigger callbacks.
@@ -2437,46 +2593,6 @@ bool PhysicalHeap::TriggerCallbacks(
     block_index_last = system_page_last >> 6;
   }
 
-  // Unprotect ranges that need unprotection.
-  if (unprotect) {
-    uint8_t* protect_base = membase_ + heap_base_;
-    uint32_t unprotect_system_page_first = UINT32_MAX;
-    for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
-      // Check if need to allow writing to this page. Read-watched pages are
-      // unprotected here too so a write to one doesn't re-fault.
-      bool unprotect_page =
-          ((system_page_flags_[i >> 6].notify_on_invalidation |
-            system_page_flags_[i >> 6].notify_on_read) &
-           (uint64_t(1) << (i & 63))) != 0;
-      if (unprotect_page) {
-        if (SystemPageGuestAccess(i) != xe::memory::PageAccess::kReadWrite) {
-          unprotect_page = false;
-        }
-      }
-      if (unprotect_page) {
-        if (unprotect_system_page_first == UINT32_MAX) {
-          unprotect_system_page_first = i;
-        }
-      } else {
-        if (unprotect_system_page_first != UINT32_MAX) {
-          xe::memory::Protect(
-              protect_base +
-                  (unprotect_system_page_first << system_page_shift_),
-              (i - unprotect_system_page_first) << system_page_shift_,
-              xe::memory::PageAccess::kReadWrite);
-          unprotect_system_page_first = UINT32_MAX;
-        }
-      }
-    }
-    if (unprotect_system_page_first != UINT32_MAX) {
-      xe::memory::Protect(
-          protect_base + (unprotect_system_page_first << system_page_shift_),
-          (system_page_last + 1 - unprotect_system_page_first)
-              << system_page_shift_,
-          xe::memory::PageAccess::kReadWrite);
-    }
-  }
-
   // Mark pages as not write-watched. Unprotected pages are readable and
   // writable now, so clear the read watch too.
   for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
@@ -2489,6 +2605,9 @@ bool PhysicalHeap::TriggerCallbacks(
     }
     system_page_flags_[i].notify_on_invalidation &= mask;
     system_page_flags_[i].notify_on_read &= mask;
+  }
+  if (unprotect) {
+    UpdateHostProtection(system_page_first, system_page_last);
   }
 
   return true;
