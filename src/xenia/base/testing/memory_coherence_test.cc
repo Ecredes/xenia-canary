@@ -110,6 +110,14 @@ TEST_CASE("Coherence: discard returns what it dropped", "[memory_coherence]") {
           std::vector<Copy>{{1, 0x800, 0x10800, 0x1000, 5}});
 }
 
+TEST_CASE("Coherence: a split keeps the pre-image aligned",
+          "[memory_coherence]") {
+  Core core;
+  core.RecordGpuWrite({0x10000, 0x2000, 1, 0x100, 5, 2, 0x300});
+  REQUIRE(core.TakeCopies(0x11000, 4) ==
+          std::vector<Copy>{{1, 0x1100, 0x11000, 0x1000, 5, 2, 0x1300}});
+}
+
 TEST_CASE("Coherence: the fence is the newest overlapping one",
           "[memory_coherence]") {
   Core core;

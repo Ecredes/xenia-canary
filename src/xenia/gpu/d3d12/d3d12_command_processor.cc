@@ -8,7 +8,9 @@
  */
 
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
+#include <algorithm>
 #include <cstring>
+#include <numeric>
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
@@ -1701,6 +1703,10 @@ void D3D12CommandProcessor::ShutdownContext() {
 
   ui::d3d12::util::ReleaseAndNull(memexport_readback_buffer_);
   memexport_readback_buffer_size_ = 0;
+  for (MemexportStaging& staging : memexport_staging_) {
+    staging.buffer->Release();
+  }
+  memexport_staging_.clear();
 
   ShutdownQueryResources();
   host_query_pool_.reset();
@@ -3047,6 +3053,32 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       return false;
     }
   }
+  // With lazy pulls, keep what the GPU has in the export ranges before the
+  // draw: a pull then copies only the bytes the draw changed.
+  ID3D12Resource* memexport_staging = nullptr;
+  uint32_t memexport_staging_half = 0;
+  if (!memexport_ranges_.empty() &&
+      GetReadbackResolveMode() == ReadbackResolveMode::kLazy) {
+    memexport_staging_half = std::accumulate(
+        memexport_ranges_.begin(), memexport_ranges_.end(), uint32_t(0),
+        [](uint32_t sum, const draw_util::MemExportRange& memexport_range) {
+          return sum + memexport_range.size_bytes;
+        });
+    memexport_staging = RequestMemexportStaging(memexport_staging_half * 2);
+    if (memexport_staging) {
+      shared_memory_->UseAsCopySource();
+      SubmitBarriers();
+      uint32_t staging_offset = 0;
+      for (const draw_util::MemExportRange& memexport_range :
+           memexport_ranges_) {
+        deferred_command_list_.D3DCopyBufferRegion(
+            memexport_staging, staging_offset, shared_memory_->GetBuffer(),
+            memexport_range.base_address_dwords << 2,
+            memexport_range.size_bytes);
+        staging_offset += memexport_range.size_bytes;
+      }
+    }
+  }
   // Primitive topology.
   D3D_PRIMITIVE_TOPOLOGY primitive_topology;
   if (primitive_processing_result.IsTessellated()) {
@@ -3238,8 +3270,41 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       shared_memory_->RangeWrittenByGpu(
           memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
     }
-    if (GetGPUSetting(GPUSetting::ReadbackMemexport)) {
-      // Read the exported data on the CPU.
+    if (memexport_staging) {
+      // Keep the exported data for the CPU to pull when it touches it, after
+      // the pre-image in the same buffer.
+      shared_memory_->UseAsCopySource();
+      SubmitBarriers();
+      uint32_t staging_offset = 0;
+      for (const draw_util::MemExportRange& memexport_range :
+           memexport_ranges_) {
+        deferred_command_list_.D3DCopyBufferRegion(
+            memexport_staging, memexport_staging_half + staging_offset,
+            shared_memory_->GetBuffer(),
+            memexport_range.base_address_dwords << 2,
+            memexport_range.size_bytes);
+        staging_offset += memexport_range.size_bytes;
+      }
+      uint64_t submission = GetCurrentSubmission();
+      // Submitted now, so a pull only ever waits for submitted work.
+      if (EndSubmission(false)) {
+        staging_offset = 0;
+        for (const draw_util::MemExportRange& memexport_range :
+             memexport_ranges_) {
+          coherence::GpuWrite write = {
+              memexport_range.base_address_dwords << 2,
+              memexport_range.size_bytes, uint64_t(memexport_staging),
+              memexport_staging_half + staging_offset, submission};
+          write.pre_buffer = uint64_t(memexport_staging);
+          write.pre_offset = staging_offset;
+          memory_->RecordGpuWrite(write);
+          staging_offset += memexport_range.size_bytes;
+        }
+      }
+    } else if (GetReadbackResolveMode() == ReadbackResolveMode::kLazy ||
+               GetGPUSetting(GPUSetting::ReadbackMemexport)) {
+      // Read the exported data on the CPU, also when lazy pulls had no staging
+      // buffer for it.
       uint32_t memexport_total_size = 0;
       for (const draw_util::MemExportRange& memexport_range :
            memexport_ranges_) {
@@ -3272,8 +3337,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                   reinterpret_cast<const uint8_t*>(readback_mapping);
               for (const draw_util::MemExportRange& memexport_range :
                    memexport_ranges_) {
-                std::memcpy(memory_->TranslatePhysical(
-                                memexport_range.base_address_dwords << 2),
+                uint32_t memexport_address = memexport_range.base_address_dwords
+                                             << 2;
+                // Older pending GPU data must not land on top of this later.
+                memory_->PrepareHostWrite(memexport_address,
+                                          memexport_range.size_bytes);
+                std::memcpy(memory_->TranslatePhysical(memexport_address),
                             readback_bytes, memexport_range.size_bytes);
                 readback_bytes += memexport_range.size_bytes;
               }
@@ -3638,6 +3707,57 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
   return true;
+}
+
+ID3D12Resource* D3D12CommandProcessor::RequestMemexportStaging(uint32_t size) {
+  // Beyond this many, the oldest is reused even if the GPU may still be on it.
+  constexpr size_t kMaxMemexportStaging = 64;
+  uint64_t completed_submission = GetCompletedSubmission();
+  auto free_staging =
+      std::find_if(memexport_staging_.begin(), memexport_staging_.end(),
+                   [&](const MemexportStaging& staging) {
+                     return staging.size >= size &&
+                            staging.submission <= completed_submission;
+                   });
+  MemexportStaging* reuse =
+      free_staging != memexport_staging_.end() ? &*free_staging : nullptr;
+  if (!reuse && memexport_staging_.size() >= kMaxMemexportStaging) {
+    reuse = &*std::min_element(
+        memexport_staging_.begin(), memexport_staging_.end(),
+        [](const MemexportStaging& a, const MemexportStaging& b) {
+          return a.submission < b.submission;
+        });
+  }
+  if (reuse) {
+    // Its pending bytes reach guest memory before the buffer is overwritten.
+    memory_->FlushGpuBuffer(uint64_t(reuse->buffer));
+    if (reuse->size >= size) {
+      reuse->submission = GetCurrentSubmission();
+      return reuse->buffer;
+    }
+  }
+  uint32_t buffer_size = AlignReadbackBufferSize(size);
+  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+  D3D12_RESOURCE_DESC buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(buffer_desc, buffer_size,
+                                          D3D12_RESOURCE_FLAG_NONE);
+  ID3D12Resource* buffer;
+  if (FAILED(provider.GetDevice()->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesReadback,
+          provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
+          D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
+    XELOGE("Failed to create a {} KB memexport staging buffer",
+           buffer_size >> 10);
+    return nullptr;
+  }
+  if (reuse) {
+    // The GPU may still be copying into the old one.
+    resources_for_deletion_.emplace_back(GetCurrentSubmission(), reuse->buffer);
+    *reuse = {buffer, buffer_size, GetCurrentSubmission()};
+  } else {
+    memexport_staging_.push_back({buffer, buffer_size, GetCurrentSubmission()});
+  }
+  return buffer;
 }
 
 void D3D12CommandProcessor::PullSource::AwaitFence(coherence::Fence fence) {

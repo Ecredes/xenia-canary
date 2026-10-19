@@ -504,6 +504,9 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Returns a buffer for reading GPU data back to the CPU. Assuming
   // synchronizing immediately after use. Always in COPY_DEST state.
   ID3D12Resource* RequestReadbackBuffer(uint32_t size);
+  // A readback buffer for one draw's memexport output, reused once the GPU is
+  // done with its previous copy.
+  ID3D12Resource* RequestMemexportStaging(uint32_t size);
 
   void WriteGammaRampSRV(bool is_pwl, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
   void WriteZPDCounterRawUAVDescriptor(
@@ -803,6 +806,13 @@ class D3D12CommandProcessor final : public CommandProcessor {
   };
   // Map: (written_address << 32 | written_length) -> ReadbackBuffer
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
+
+  struct MemexportStaging {
+    ID3D12Resource* buffer = nullptr;
+    uint32_t size = 0;
+    uint64_t submission = 0;
+  };
+  std::vector<MemexportStaging> memexport_staging_;
 
   // Simple single buffer for memexport (always syncs, no double-buffering)
   ID3D12Resource* memexport_readback_buffer_ = nullptr;

@@ -24,12 +24,17 @@ namespace coherence {
 // A backend's GPU timeline value; 0 means nothing to wait for.
 using Fence = uint64_t;
 
+// With a pre-image (pre_buffer != 0) - what the GPU had there before the write
+// - only the bytes that differ from it are copied, so a conservative range
+// doesn't carry stale bytes over newer CPU writes.
 struct GpuWrite {
   uint32_t physical_address;
   uint32_t length;
   uint64_t buffer;
   uint32_t buffer_offset;
   Fence fence;
+  uint64_t pre_buffer = 0;
+  uint32_t pre_offset = 0;
 };
 
 struct Copy {
@@ -38,6 +43,8 @@ struct Copy {
   uint32_t physical_address;
   uint32_t length;
   Fence fence;
+  uint64_t pre_buffer = 0;
+  uint32_t pre_offset = 0;
 };
 bool operator==(const Copy& a, const Copy& b);
 
@@ -90,6 +97,8 @@ class Core {
     uint64_t buffer;
     uint32_t buffer_offset;
     Fence fence;
+    uint64_t pre_buffer;
+    uint32_t pre_offset;
   };
 
   void CountPages(const Piece& piece, int32_t delta);

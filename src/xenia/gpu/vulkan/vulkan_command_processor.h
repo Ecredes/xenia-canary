@@ -441,6 +441,13 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   // Requests a readback buffer for CPU access to GPU data.
   VkBuffer RequestReadbackBuffer(uint32_t size);
+  // A host-visible buffer the GPU can copy into.
+  bool CreateReadbackBuffer(uint32_t size, VkBuffer& buffer_out,
+                            VkDeviceMemory& memory_out);
+  // A readback buffer for one draw's memexport output, reused once the GPU is
+  // done with its previous copy. Returns the memory, which pulls map.
+  bool RequestMemexportStaging(uint32_t size, VkBuffer& buffer_out,
+                               VkDeviceMemory& memory_out);
 
   void ClearTransientDescriptorPools();
 
@@ -882,6 +889,14 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
 
   // Simple single buffer for memexport (always syncs, no double-buffering)
+  struct MemexportStaging {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint32_t size = 0;
+    uint64_t submission = 0;
+  };
+  std::vector<MemexportStaging> memexport_staging_;
+
   VkBuffer memexport_readback_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory memexport_readback_buffer_memory_ = VK_NULL_HANDLE;
   uint32_t memexport_readback_buffer_size_ = 0;

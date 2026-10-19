@@ -445,6 +445,9 @@ bool VulkanSharedMemory::UploadRanges(
         successful = false;
         break;
       }
+      // Data the GPU wrote that the CPU hasn't pulled yet goes up with it.
+      memory().PrepareHostRead(upload_range_start << page_size_log2(),
+                               uint32_t(upload_buffer_size));
       MakeRangeValid(upload_range_start << page_size_log2(),
                      uint32_t(upload_buffer_size), false);
 

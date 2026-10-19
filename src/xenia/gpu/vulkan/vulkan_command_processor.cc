@@ -9,8 +9,10 @@
 
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <numeric>
 
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
@@ -1271,6 +1273,11 @@ void VulkanCommandProcessor::ShutdownContext() {
 
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroySemaphore, device,
                                          submission_timeline_);
+  for (MemexportStaging& staging : memexport_staging_) {
+    dfn.vkDestroyBuffer(device, staging.buffer, nullptr);
+    dfn.vkFreeMemory(device, staging.memory, nullptr);
+  }
+  memexport_staging_.clear();
 
   // Clean up all readback buffers.
   for (auto& pair : readback_buffers_) {
@@ -3011,6 +3018,42 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                  memexport_range_base_bytes + memexport_range.size_bytes);
   }
 
+  // With lazy pulls, keep what the GPU has in the export ranges before the
+  // draw: a pull then copies only the bytes the draw changed.
+  VkBuffer memexport_staging_buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memexport_staging_memory = VK_NULL_HANDLE;
+  uint32_t memexport_staging_half = 0;
+  if (!memexport_ranges_.empty() &&
+      GetReadbackResolveMode() == ReadbackResolveMode::kLazy &&
+      submission_timeline_ != VK_NULL_HANDLE) {
+    memexport_staging_half = std::accumulate(
+        memexport_ranges_.begin(), memexport_ranges_.end(), uint32_t(0),
+        [](uint32_t sum, const draw_util::MemExportRange& memexport_range) {
+          return sum + memexport_range.size_bytes;
+        });
+    if (RequestMemexportStaging(memexport_staging_half * 2,
+                                memexport_staging_buffer,
+                                memexport_staging_memory)) {
+      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+      // Copies can't be recorded in a render pass.
+      SubmitBarriers(true);
+      uint32_t staging_offset = 0;
+      for (const draw_util::MemExportRange& memexport_range :
+           memexport_ranges_) {
+        VkBufferCopy copy_region = {};
+        copy_region.srcOffset = memexport_range.base_address_dwords << 2;
+        copy_region.dstOffset = staging_offset;
+        copy_region.size = memexport_range.size_bytes;
+        deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(),
+                                                 memexport_staging_buffer, 1,
+                                                 &copy_region);
+        staging_offset += memexport_range.size_bytes;
+      }
+    } else {
+      memexport_staging_buffer = VK_NULL_HANDLE;
+    }
+  }
+
   // Insert the shared memory barrier if needed.
   // TODO(Triang3l): Find some PM4 command that can be used for indication of
   // when memexports should be awaited instead of inserting the barrier in Use
@@ -3104,9 +3147,45 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       memexport_range.size_bytes);
   }
 
-  // CPU readback for memexport data (if enabled).
-  if (GetGPUSetting(GPUSetting::ReadbackMemexport) &&
-      !memexport_ranges_.empty()) {
+  if (memexport_staging_buffer != VK_NULL_HANDLE) {
+    // Keep the exported data for the CPU to pull when it touches it, after
+    // the pre-image in the same buffer.
+    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+    // Copies can't be recorded in a render pass.
+    SubmitBarriers(true);
+    uint32_t staging_offset = 0;
+    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+      VkBufferCopy copy_region = {};
+      copy_region.srcOffset = memexport_range.base_address_dwords << 2;
+      copy_region.dstOffset = memexport_staging_half + staging_offset;
+      copy_region.size = memexport_range.size_bytes;
+      deferred_command_buffer_.CmdVkCopyBuffer(
+          shared_memory_->buffer(), memexport_staging_buffer, 1, &copy_region);
+      staging_offset += memexport_range.size_bytes;
+    }
+    uint64_t submission = GetCurrentSubmission();
+    // Submitted now, so a pull only ever waits for submitted work, whose
+    // timeline value is signaled.
+    if (EndSubmission(false)) {
+      staging_offset = 0;
+      for (const draw_util::MemExportRange& memexport_range :
+           memexport_ranges_) {
+        coherence::GpuWrite write = {
+            memexport_range.base_address_dwords << 2,
+            memexport_range.size_bytes, uint64_t(memexport_staging_memory),
+            memexport_staging_half + staging_offset, submission};
+        write.pre_buffer = uint64_t(memexport_staging_memory);
+        write.pre_offset = staging_offset;
+        memory_->RecordGpuWrite(write);
+        staging_offset += memexport_range.size_bytes;
+      }
+    }
+  } else if (((GetReadbackResolveMode() == ReadbackResolveMode::kLazy &&
+               submission_timeline_ != VK_NULL_HANDLE) ||
+              GetGPUSetting(GPUSetting::ReadbackMemexport)) &&
+             !memexport_ranges_.empty()) {
+    // Read the exported data on the CPU, also when lazy pulls had no staging
+    // buffer for it.
     // Calculate total size of all memexport ranges.
     uint32_t memexport_total_size = 0;
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
@@ -3153,8 +3232,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                   static_cast<const uint8_t*>(mapped_data);
               for (const draw_util::MemExportRange& memexport_range :
                    memexport_ranges_) {
-                std::memcpy(memory_->TranslatePhysical(
-                                memexport_range.base_address_dwords << 2),
+                uint32_t memexport_address = memexport_range.base_address_dwords
+                                             << 2;
+                // Older pending GPU data must not land on top of this later.
+                memory_->PrepareHostWrite(memexport_address,
+                                          memexport_range.size_bytes);
+                std::memcpy(memory_->TranslatePhysical(memexport_address),
                             readback_bytes, memexport_range.size_bytes);
                 readback_bytes += memexport_range.size_bytes;
               }
@@ -3705,6 +3788,122 @@ void VulkanCommandProcessor::PullSource::Unmap(uint64_t buffer) {
                                            VkDeviceMemory(buffer));
 }
 
+bool VulkanCommandProcessor::CreateReadbackBuffer(uint32_t size,
+                                                  VkBuffer& buffer_out,
+                                                  VkDeviceMemory& memory_out) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  // Create buffer with TRANSFER_DST usage for copying from GPU.
+  VkBufferCreateInfo buffer_info = {};
+  buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_info.size = size;
+  buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+  VkBuffer new_buffer;
+  if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &new_buffer) !=
+      VK_SUCCESS) {
+    XELOGE("VulkanCommandProcessor: Failed to create readback buffer of {} MB",
+           size >> 20);
+    return false;
+  }
+
+  // Get memory requirements.
+  VkMemoryRequirements memory_requirements;
+  dfn.vkGetBufferMemoryRequirements(device, new_buffer, &memory_requirements);
+
+  // Allocate HOST_VISIBLE | HOST_CACHED | HOST_COHERENT memory for readback.
+  const uint32_t memory_type_index = ui::vulkan::util::ChooseMemoryType(
+      vulkan_device->memory_types(), memory_requirements.memoryTypeBits,
+      ui::vulkan::util::MemoryPurpose::kReadback);
+  if (memory_type_index == UINT32_MAX) {
+    XELOGE(
+        "VulkanCommandProcessor: Failed to find suitable memory type for "
+        "readback buffer");
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+
+  VkMemoryAllocateInfo alloc_info = {};
+  alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc_info.allocationSize = memory_requirements.size;
+  alloc_info.memoryTypeIndex = memory_type_index;
+
+  VkDeviceMemory new_memory;
+  if (dfn.vkAllocateMemory(device, &alloc_info, nullptr, &new_memory) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "VulkanCommandProcessor: Failed to allocate memory for readback "
+        "buffer");
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+
+  // Bind memory to buffer.
+  if (dfn.vkBindBufferMemory(device, new_buffer, new_memory, 0) != VK_SUCCESS) {
+    XELOGE("VulkanCommandProcessor: Failed to bind memory to readback buffer");
+    dfn.vkFreeMemory(device, new_memory, nullptr);
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+
+  buffer_out = new_buffer;
+  memory_out = new_memory;
+  return true;
+}
+
+bool VulkanCommandProcessor::RequestMemexportStaging(
+    uint32_t size, VkBuffer& buffer_out, VkDeviceMemory& memory_out) {
+  // Beyond this many, the oldest is reused even if the GPU may still be on it.
+  constexpr size_t kMaxMemexportStaging = 64;
+  uint64_t completed_submission = GetCompletedSubmission();
+  auto free_staging =
+      std::find_if(memexport_staging_.begin(), memexport_staging_.end(),
+                   [&](const MemexportStaging& staging) {
+                     return staging.size >= size &&
+                            staging.submission <= completed_submission;
+                   });
+  MemexportStaging* reuse =
+      free_staging != memexport_staging_.end() ? &*free_staging : nullptr;
+  if (!reuse && memexport_staging_.size() >= kMaxMemexportStaging) {
+    reuse = &*std::min_element(
+        memexport_staging_.begin(), memexport_staging_.end(),
+        [](const MemexportStaging& a, const MemexportStaging& b) {
+          return a.submission < b.submission;
+        });
+  }
+  if (reuse) {
+    // Its pending bytes reach guest memory before the buffer is overwritten.
+    memory_->FlushGpuBuffer(uint64_t(reuse->memory));
+    if (reuse->size >= size) {
+      reuse->submission = GetCurrentSubmission();
+      buffer_out = reuse->buffer;
+      memory_out = reuse->memory;
+      return true;
+    }
+  }
+  uint32_t buffer_size = AlignReadbackBufferSize(size);
+  VkBuffer buffer;
+  VkDeviceMemory memory;
+  if (!CreateReadbackBuffer(buffer_size, buffer, memory)) {
+    return false;
+  }
+  if (reuse) {
+    // The GPU may still be copying into the old one.
+    destroy_buffers_.emplace_back(GetCurrentSubmission(), reuse->buffer);
+    destroy_memory_.emplace_back(GetCurrentSubmission(), reuse->memory);
+    *reuse = {buffer, memory, buffer_size, GetCurrentSubmission()};
+  } else {
+    memexport_staging_.push_back(
+        {buffer, memory, buffer_size, GetCurrentSubmission()});
+  }
+  buffer_out = buffer;
+  memory_out = memory;
+  return true;
+}
+
 VkBuffer VulkanCommandProcessor::RequestReadbackBuffer(uint32_t size) {
   if (size == 0) {
     return VK_NULL_HANDLE;
@@ -3717,60 +3916,9 @@ VkBuffer VulkanCommandProcessor::RequestReadbackBuffer(uint32_t size) {
     const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
     const VkDevice device = vulkan_device->device();
 
-    // Create buffer with TRANSFER_DST usage for copying from GPU.
-    VkBufferCreateInfo buffer_info = {};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = size;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
     VkBuffer new_buffer;
-    if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &new_buffer) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to create readback buffer of {} MB",
-          size >> 20);
-      return VK_NULL_HANDLE;
-    }
-
-    // Get memory requirements.
-    VkMemoryRequirements memory_requirements;
-    dfn.vkGetBufferMemoryRequirements(device, new_buffer, &memory_requirements);
-
-    // Allocate HOST_VISIBLE | HOST_CACHED | HOST_COHERENT memory for readback.
-    const uint32_t memory_type_index = ui::vulkan::util::ChooseMemoryType(
-        vulkan_device->memory_types(), memory_requirements.memoryTypeBits,
-        ui::vulkan::util::MemoryPurpose::kReadback);
-    if (memory_type_index == UINT32_MAX) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to find suitable memory type for "
-          "readback buffer");
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return VK_NULL_HANDLE;
-    }
-
-    VkMemoryAllocateInfo alloc_info = {};
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = memory_requirements.size;
-    alloc_info.memoryTypeIndex = memory_type_index;
-
     VkDeviceMemory new_memory;
-    if (dfn.vkAllocateMemory(device, &alloc_info, nullptr, &new_memory) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to allocate memory for readback "
-          "buffer");
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return VK_NULL_HANDLE;
-    }
-
-    // Bind memory to buffer.
-    if (dfn.vkBindBufferMemory(device, new_buffer, new_memory, 0) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to bind memory to readback buffer");
-      dfn.vkFreeMemory(device, new_memory, nullptr);
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    if (!CreateReadbackBuffer(size, new_buffer, new_memory)) {
       return VK_NULL_HANDLE;
     }
 

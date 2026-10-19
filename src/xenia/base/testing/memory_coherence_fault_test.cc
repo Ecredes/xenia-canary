@@ -7,10 +7,12 @@
  ******************************************************************************
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -60,8 +62,17 @@ class FakeSource : public GpuPullSource {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [&] { return passed_ >= fence || shut_down_; });
   }
-  const uint8_t* MapForRead(uint64_t buffer) override { return data_.data(); }
+  const uint8_t* MapForRead(uint64_t buffer) override {
+    return MapBuffer(buffer);
+  }
   void Unmap(uint64_t buffer) override {}
+  // Buffer 1 is all 0x47; others are what the test put there.
+  const uint8_t* MapBuffer(uint64_t buffer) {
+    return buffer == 1 ? data_.data() : other_[buffer].data();
+  }
+  void SetBuffer(uint64_t buffer, std::vector<uint8_t> data) {
+    other_[buffer] = std::move(data);
+  }
 
   void Pass(coherence::Fence fence) {
     {
@@ -86,6 +97,7 @@ class FakeSource : public GpuPullSource {
   coherence::Fence passed_ = 0;
   bool shut_down_ = false;
   std::vector<uint8_t> data_ = std::vector<uint8_t>(0x10000, 0x47);
+  std::map<uint64_t, std::vector<uint8_t>> other_;
 };
 
 // A 64 KB allocation through 0xE0000000 and its words in three views.
@@ -317,6 +329,24 @@ TEST_CASE("Memory coherence: fault path", "[memory_coherence]") {
     memory.UnregisterPhysicalMemoryInvalidationCallback(handle);
     REQUIRE_FALSE(through_other_view);
     REQUIRE(log.Covered(views.physical));
+  }
+
+  // delta_keeps_cpu_bytes: with a pre-image, a pull writes only the bytes the
+  // GPU changed, so a CPU write made after the pre-image survives.
+  {
+    Views views = AllocateViews(memory);
+    // The pre-image is what the GPU had before the draw; the shader then
+    // exported word 1 only.
+    source.SetBuffer(2, std::vector<uint8_t>(8, 0x5A));
+    std::vector<uint8_t> post(8, 0x5A);
+    std::fill(post.begin() + 4, post.end(), uint8_t(0x47));
+    source.SetBuffer(3, post);
+    auto* guest = memory.TranslatePhysical<uint32_t*>(views.physical);
+    guest[0] = 0x11111111;  // A CPU write after the pre-image was taken.
+    memory.RecordGpuWrite({views.physical, 8, 3, 0, 8, 2, 0});
+    source.Pass(8);
+    REQUIRE(uint32_t(views.c[0]) == 0x11111111);
+    REQUIRE(uint32_t(views.c[1]) == kGpuWord);
   }
 
   // flush_waits_unlocked: flushing a buffer before its reuse waits for the GPU

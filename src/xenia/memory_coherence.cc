@@ -18,7 +18,8 @@ namespace coherence {
 bool operator==(const Copy& a, const Copy& b) {
   return a.buffer == b.buffer && a.buffer_offset == b.buffer_offset &&
          a.physical_address == b.physical_address && a.length == b.length &&
-         a.fence == b.fence;
+         a.fence == b.fence && a.pre_buffer == b.pre_buffer &&
+         a.pre_offset == b.pre_offset;
 }
 
 Access EffectiveHostAccess(const PageView& view, bool gpu_owned) {
@@ -59,9 +60,11 @@ uint64_t Core::Subtract(uint32_t start, uint32_t end,
     }
     removed += cut_end - cut_start;
     if (copies) {
-      copies->push_back({piece.buffer,
-                         piece.buffer_offset + (cut_start - piece.start),
-                         cut_start, cut_end - cut_start, piece.fence});
+      copies->push_back(
+          {piece.buffer, piece.buffer_offset + (cut_start - piece.start),
+           cut_start, cut_end - cut_start, piece.fence, piece.pre_buffer,
+           piece.pre_buffer ? piece.pre_offset + (cut_start - piece.start)
+                            : 0});
     }
     CountPages(piece, -1);
     if (piece.start < cut_start) {
@@ -73,6 +76,9 @@ uint64_t Core::Subtract(uint32_t start, uint32_t end,
     if (cut_end < piece.end) {
       Piece right = piece;
       right.buffer_offset += cut_end - piece.start;
+      if (right.pre_buffer) {
+        right.pre_offset += cut_end - piece.start;
+      }
       right.start = cut_end;
       CountPages(right, 1);
       kept.push_back(right);
@@ -88,8 +94,9 @@ void Core::RecordGpuWrite(const GpuWrite& write) {
   }
   uint32_t end = write.physical_address + write.length;
   stats_.bytes_superseded += Subtract(write.physical_address, end, nullptr);
-  Piece piece{write.physical_address, end, write.buffer, write.buffer_offset,
-              write.fence};
+  Piece piece{write.physical_address, end,         write.buffer,
+              write.buffer_offset,    write.fence, write.pre_buffer,
+              write.pre_offset};
   CountPages(piece, 1);
   pieces_.push_back(piece);
   ++stats_.writes_recorded;
@@ -147,7 +154,8 @@ std::vector<Copy> Core::TakeCopiesFromBuffer(uint64_t buffer) {
       continue;
     }
     copies.push_back({piece.buffer, piece.buffer_offset, piece.start,
-                      piece.end - piece.start, piece.fence});
+                      piece.end - piece.start, piece.fence, piece.pre_buffer,
+                      piece.pre_offset});
     CountPages(piece, -1);
   }
   pieces_ = std::move(kept);

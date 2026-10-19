@@ -874,8 +874,27 @@ void Memory::ApplyCopies(const std::vector<coherence::Copy>& copies,
     if (!mapping) {
       continue;
     }
-    std::memcpy(TranslatePhysical(copy.physical_address),
-                mapping + copy.buffer_offset, copy.length);
+    const uint8_t* post = mapping + copy.buffer_offset;
+    uint8_t* guest = TranslatePhysical(copy.physical_address);
+    if (copy.pre_buffer) {
+      const uint8_t* pre_mapping = copy.pre_buffer == copy.buffer
+                                       ? mapping
+                                       : source->MapForRead(copy.pre_buffer);
+      if (pre_mapping) {
+        // Only what the GPU changed: the rest may be older than guest RAM.
+        const uint8_t* pre = pre_mapping + copy.pre_offset;
+        for (uint32_t i = 0; i < copy.length; ++i) {
+          if (post[i] != pre[i]) {
+            guest[i] = post[i];
+          }
+        }
+        if (copy.pre_buffer != copy.buffer) {
+          source->Unmap(copy.pre_buffer);
+        }
+      }
+    } else {
+      std::memcpy(guest, post, copy.length);
+    }
     source->Unmap(copy.buffer);
   }
 }
