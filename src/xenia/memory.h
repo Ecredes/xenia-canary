@@ -655,6 +655,13 @@ class Memory {
   // Copies what is still pending from a buffer before it's reused or freed.
   void FlushGpuBuffer(uint64_t buffer);
   coherence::Stats coherence_stats() const;
+  // Called with every range host code or a pull wrote, so the CPU backend can
+  // break lwarx/stwcx. reservations on it, as any write does on hardware.
+  using ReservationInvalidator = void (*)(void* context,
+                                          uint32_t physical_address,
+                                          uint32_t length);
+  void SetReservationInvalidator(ReservationInvalidator invalidator,
+                                 void* context);
 
   // Allocates virtual memory from the 'system' heap.
   // System memory is kept separate from game memory but is still accessible
@@ -779,6 +786,8 @@ class Memory {
   // Threads in GpuPullSource::AwaitFence, which may still use the old source
   // after it's replaced.
   std::atomic<uint32_t> gpu_pull_waiters_{0};
+  ReservationInvalidator reservation_invalidator_ = nullptr;
+  void* reservation_invalidator_context_ = nullptr;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
   std::vector<std::pair<PhysicalMemoryReadCallback, void*>*>

@@ -169,6 +169,15 @@ class X64Backend : public Backend {
   uint64_t CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
                                         uint64_t current_pc) override;
 
+  void InvalidateReservations(uint32_t physical_address,
+                              uint32_t length) override;
+  // The reservation generation of a guest address's granule, for tests.
+  uint32_t reservation_generation(uint32_t guest_address) const {
+    return reserve_helper_
+        .generations[(guest_address >> RESERVE_GRANULE_SHIFT) &
+                     RESERVE_ENTRY_MASK];
+  }
+
   void InstallBreakpoint(Breakpoint* breakpoint) override;
   void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) override;
   void UninstallBreakpoint(Breakpoint* breakpoint) override;

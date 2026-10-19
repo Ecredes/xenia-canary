@@ -349,6 +349,25 @@ TEST_CASE("Memory coherence: fault path", "[memory_coherence]") {
     REQUIRE(uint32_t(views.c[1]) == kGpuWord);
   }
 
+  // device_writes_break_reservations: host writes and pulls report the ranges
+  // they wrote, so reservations on them can be broken.
+  {
+    Views views = AllocateViews(memory);
+    InvalidationLog reserved;
+    memory.SetReservationInvalidator(
+        [](void* context, uint32_t physical_address, uint32_t length) {
+          InvalidationLog::Callback(context, physical_address, length, true);
+        },
+        &reserved);
+    memory.FinishHostWrite(views.physical + 0x20, 4);
+    REQUIRE(reserved.Covered(views.physical + 0x20));
+    memory.RecordGpuWrite({views.physical + 0x2000, 0x1000, 1, 0, 9});
+    source.Pass(9);
+    REQUIRE(uint32_t(views.c[0x2000 / 4]) == kGpuWord);
+    memory.SetReservationInvalidator(nullptr, nullptr);
+    REQUIRE(reserved.Covered(views.physical + 0x2000));
+  }
+
   // flush_waits_unlocked: flushing a buffer before its reuse waits for the GPU
   // without the global lock.
   {

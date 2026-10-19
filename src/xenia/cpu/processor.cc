@@ -95,6 +95,7 @@ Processor::~Processor() {
     modules_.clear();
   }
 
+  memory_->SetReservationInvalidator(nullptr, nullptr);
   frontend_.reset();
   backend_.reset();
 
@@ -134,6 +135,13 @@ bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
 
   backend_ = std::move(backend);
   frontend_ = std::move(frontend);
+
+  memory_->SetReservationInvalidator(
+      [](void* context, uint32_t physical_address, uint32_t length) {
+        static_cast<backend::Backend*>(context)->InvalidateReservations(
+            physical_address, length);
+      },
+      backend_.get());
 
   // Stack walker is used when profiling, debugging, and dumping.
   // Note that creation may fail, in which case we'll have to disable those

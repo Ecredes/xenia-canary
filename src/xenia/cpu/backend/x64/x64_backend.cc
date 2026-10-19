@@ -1761,6 +1761,27 @@ void X64Backend::InitializeBackendContext(void* ctx) {
   bctx->guest_tick_count = Clock::GetGuestTickCountPointer();
   bctx->reserve_helper_ = &reserve_helper_;
 }
+void X64Backend::InvalidateReservations(uint32_t physical_address,
+                                        uint32_t length) {
+  if (!length) {
+    return;
+  }
+  // Reservations are keyed by guest address, and the guest reaches physical
+  // memory through these views.
+  for (uint64_t view : {uint64_t(0xA0000000), uint64_t(0xC0000000),
+                        uint64_t(0xE0000000) - 0x1000}) {
+    uint64_t first = (view + physical_address) >> RESERVE_GRANULE_SHIFT;
+    uint64_t last =
+        (view + physical_address + length - 1) >> RESERVE_GRANULE_SHIFT;
+    last = std::min(last, first + RESERVE_ENTRY_MASK);
+    for (uint64_t granule = first; granule <= last; ++granule) {
+      std::atomic_ref<uint32_t>(
+          reserve_helper_.generations[granule & RESERVE_ENTRY_MASK])
+          .fetch_add(1);
+    }
+  }
+}
+
 void X64Backend::DeinitializeBackendContext(void* ctx) {
   X64BackendContext* bctx = BackendContextForGuestContext(ctx);
 

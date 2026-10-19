@@ -69,6 +69,11 @@ class Backend {
   virtual uint64_t CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
                                                 uint64_t current_pc) = 0;
 
+  // A device or host write to guest physical memory: breaks lwarx/stwcx.
+  // reservations on it.
+  virtual void InvalidateReservations(uint32_t physical_address,
+                                      uint32_t length) {}
+
   virtual void InstallBreakpoint(Breakpoint* breakpoint) {}
   virtual void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) {}
   virtual void UninstallBreakpoint(Breakpoint* breakpoint) {}

@@ -714,6 +714,10 @@ void Memory::FinishHostWrite(uint32_t physical_address, uint32_t length) {
   if (!length) {
     return;
   }
+  if (reservation_invalidator_) {
+    reservation_invalidator_(reservation_invalidator_context_, physical_address,
+                             length);
+  }
   // Watches are per view, so notify through every view of the range.
   for (PhysicalHeap* heap : {&heaps_.vA0000000, &heaps_.vC0000000,
                              &heaps_.vE0000000, &heaps_.v7F000000}) {
@@ -816,6 +820,13 @@ void Memory::FlushGpuBuffer(uint64_t buffer) {
   }
 }
 
+void Memory::SetReservationInvalidator(ReservationInvalidator invalidator,
+                                       void* context) {
+  auto global_lock = global_critical_region_.Acquire();
+  reservation_invalidator_ = invalidator;
+  reservation_invalidator_context_ = context;
+}
+
 coherence::Stats Memory::coherence_stats() const {
   auto global_lock = global_critical_region_.Acquire();
   return coherence_core_.stats();
@@ -896,6 +907,10 @@ void Memory::ApplyCopies(const std::vector<coherence::Copy>& copies,
       std::memcpy(guest, post, copy.length);
     }
     source->Unmap(copy.buffer);
+    if (reservation_invalidator_) {
+      reservation_invalidator_(reservation_invalidator_context_,
+                               copy.physical_address, copy.length);
+    }
   }
 }
 
