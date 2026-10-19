@@ -9,6 +9,7 @@
 
 #include "xenia/memory.h"
 
+#include <chrono>
 #include <cstring>
 #include <random>
 #include <thread>
@@ -27,6 +28,11 @@
 // TODO(benvanik): move xbox.h out
 #include "xenia/xbox.h"
 
+DEFINE_bool(gpu_coherence_conservative, false,
+            "Copy data the GPU writes into guest memory as soon as it's "
+            "recorded instead of when the CPU first touches it. Slow; for A/B "
+            "runs that rule the lazy pulls in or out.",
+            "GPU.Debug");
 DEFINE_bool(protect_zero, true, "Protect the zero page from reads and writes.",
             "Memory");
 DEFINE_bool(emit_inline_mmio_checks, false,
@@ -803,6 +809,9 @@ void Memory::RecordGpuWrite(const coherence::GpuWrite& write) {
   auto global_lock = global_critical_region_.Acquire();
   coherence_core_.RecordGpuWrite(write);
   UpdateHostProtection(write.physical_address, write.length);
+  if (cvars::gpu_coherence_conservative) {
+    PullGpuOwned(global_lock, write.physical_address, write.length);
+  }
 }
 
 void Memory::FlushGpuBuffer(uint64_t buffer) {
@@ -829,7 +838,23 @@ void Memory::SetReservationInvalidator(ReservationInvalidator invalidator,
 
 coherence::Stats Memory::coherence_stats() const {
   auto global_lock = global_critical_region_.Acquire();
-  return coherence_core_.stats();
+  coherence::Stats stats = coherence_core_.stats();
+  stats.waits = coherence_waits_;
+  stats.wait_us = coherence_wait_us_;
+  return stats;
+}
+
+void Memory::AwaitGpuFence(GpuPullSource* source, coherence::Fence fence) {
+  auto start = std::chrono::steady_clock::now();
+  source->AwaitFence(fence);
+  uint64_t us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count());
+  // Shorter ones are the fence check itself.
+  if (us > 50) {
+    ++coherence_waits_;
+    coherence_wait_us_ += us;
+  }
 }
 
 bool Memory::PullGpuOwned(global_unique_lock_type& global_lock,
@@ -865,7 +890,7 @@ coherence::Fence Memory::AwaitPendingGpuWrites(
     // The GPU may need this lock to finish; other threads may pull meanwhile.
     gpu_pull_waiters_.fetch_add(1, std::memory_order_relaxed);
     global_lock.unlock();
-    source->AwaitFence(fence);
+    AwaitGpuFence(source, fence);
     gpu_pull_waiters_.fetch_sub(1, std::memory_order_release);
     global_lock.lock();
     waited_source = source;

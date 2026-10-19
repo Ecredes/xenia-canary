@@ -68,6 +68,9 @@ struct Stats {
   uint64_t bytes_pulled = 0;
   uint64_t bytes_discarded = 0;
   uint64_t buffer_flushes = 0;
+  // Pulls that waited for the GPU, and how long in total. Filled by Memory.
+  uint64_t waits = 0;
+  uint64_t wait_us = 0;
 };
 
 class Core {

@@ -20,8 +20,11 @@
 
 #include "third_party/catch/include/catch.hpp"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/mutex.h"
 #include "xenia/memory.h"
+
+DECLARE_bool(gpu_coherence_conservative);
 
 namespace xe {
 namespace test {
@@ -366,6 +369,29 @@ TEST_CASE("Memory coherence: fault path", "[memory_coherence]") {
     REQUIRE(uint32_t(views.c[0x2000 / 4]) == kGpuWord);
     memory.SetReservationInvalidator(nullptr, nullptr);
     REQUIRE(reserved.Covered(views.physical + 0x2000));
+  }
+
+  // waits_are_counted: a pull that has to wait for the GPU shows in the stats.
+  {
+    Views views = AllocateViews(memory);
+    uint64_t waits = memory.coherence_stats().waits;
+    memory.RecordGpuWrite({views.physical, 0x1000, 1, 0, 11});
+    auto reader = ReadAsync(views.c);
+    REQUIRE(StillBlocked(reader));
+    source.Pass(11);
+    REQUIRE(reader.get() == kGpuWord);
+    REQUIRE(memory.coherence_stats().waits == waits + 1);
+  }
+
+  // conservative_applies_immediately: the debug mode copies GPU writes into
+  // guest memory as they're recorded.
+  {
+    Views views = AllocateViews(memory);
+    cvars::gpu_coherence_conservative = true;
+    source.Pass(12);
+    memory.RecordGpuWrite({views.physical, 0x1000, 1, 0, 12});
+    cvars::gpu_coherence_conservative = false;
+    REQUIRE(*memory.TranslatePhysical<uint32_t*>(views.physical) == kGpuWord);
   }
 
   // flush_waits_unlocked: flushing a buffer before its reuse waits for the GPU

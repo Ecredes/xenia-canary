@@ -775,6 +775,8 @@ class Memory {
   // new as every copy's fence.
   void ApplyCopies(const std::vector<coherence::Copy>& copies,
                    coherence::Fence passed_fence);
+  // Counted in the stats when it actually waited.
+  void AwaitGpuFence(GpuPullSource* source, coherence::Fence fence);
   void DiscardGpuOwned(uint32_t physical_address, uint32_t length);
   bool IsGpuOwned(uint32_t physical_address, uint32_t length) const;
   void UpdateHostProtection(uint32_t physical_address, uint32_t length);
@@ -786,6 +788,8 @@ class Memory {
   // Threads in GpuPullSource::AwaitFence, which may still use the old source
   // after it's replaced.
   std::atomic<uint32_t> gpu_pull_waiters_{0};
+  std::atomic<uint64_t> coherence_waits_{0};
+  std::atomic<uint64_t> coherence_wait_us_{0};
   ReservationInvalidator reservation_invalidator_ = nullptr;
   void* reservation_invalidator_context_ = nullptr;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>

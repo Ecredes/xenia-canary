@@ -232,6 +232,9 @@ class CommandProcessor {
   // rarely needed, most register writes have no special logic here
   XE_NOINLINE
   void HandleSpecialRegisterWrite(uint32_t index, uint32_t value);
+  // Every 10 s with readback_resolve = "lazy".
+  void LogCoherenceStats();
+  uint64_t coherence_stats_last_log_ms_ = 0;
 
   virtual void WriteRegister(uint32_t index, uint32_t value);
 

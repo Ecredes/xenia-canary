@@ -597,6 +597,24 @@ void CommandProcessor::LogRegisterSets(uint32_t base_register_index,
 #endif
 }
 
+void CommandProcessor::LogCoherenceStats() {
+  if (GetReadbackResolveMode() != ReadbackResolveMode::kLazy) {
+    return;
+  }
+  uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  if (now_ms - coherence_stats_last_log_ms_ < 10000) {
+    return;
+  }
+  coherence_stats_last_log_ms_ = now_ms;
+  coherence::Stats stats = memory_->coherence_stats();
+  XELOGI(
+      "coherence: writes {} pulled {} pages ({} KB), waits {} ({} us), "
+      "flushed {} buffers, discarded {} KB, superseded {} KB",
+      stats.writes_recorded, stats.pages_pulled, stats.bytes_pulled >> 10,
+      stats.waits, stats.wait_us, stats.buffer_flushes,
+      stats.bytes_discarded >> 10, stats.bytes_superseded >> 10);
+}
+
 void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
                                                   uint32_t value) {
   RegisterFile& regs = *register_file_;
