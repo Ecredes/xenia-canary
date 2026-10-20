@@ -163,9 +163,11 @@ jobs:
           python xenia-build.py test --config=Release --continue --
           "~PhysicalHeap vE0000000 alignment"
 
-      # Fork-only: upstream CI never builds the misc tools (GPU trace dump and
-      # viewer, shader compiler, vfs-dump, demos), so changes to the code they
-      # share with the app could break them unnoticed. Compile check only.
+      # Fork-only: upstream CI never builds the misc tools (XENIA_BUILD_MISC),
+      # so changes to the code they share with the app break them unnoticed.
+      # The GPU trace dumps and viewers are compile-checked here. vfs-dump,
+      # the shader compiler and the window demos are already broken upstream
+      # and left out until fixed (fork issue #60).
       - name: Build misc tools
         env:
           CMAKE_C_COMPILER_LAUNCHER: ccache
@@ -175,6 +177,10 @@ jobs:
         run: >-
           python xenia-build.py build --config=Release
           --cmake-define XENIA_BUILD_MISC=ON
+          --target xenia-gpu-d3d12-trace-dump
+          --target xenia-gpu-d3d12-trace-viewer
+          --target xenia-gpu-vulkan-trace-dump
+          --target xenia-gpu-vulkan-trace-viewer
 
       # Only entries this build used are kept, so the cache doesn't grow with
       # every upstream change, and the entries it replaces are deleted to stay
