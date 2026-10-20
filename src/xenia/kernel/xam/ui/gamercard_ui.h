@@ -10,6 +10,8 @@
 #ifndef XENIA_KERNEL_XAM_UI_GAMERCARD_UI_H_
 #define XENIA_KERNEL_XAM_UI_GAMERCARD_UI_H_
 
+#include <memory>
+
 #include "xenia/kernel/xam/xam_ui.h"
 
 namespace xe {
@@ -37,8 +39,6 @@ struct GamercardSettings {
 
   // Other
   std::vector<uint8_t> profile_icon;
-  // Immediate Texture?
-  xe::ui::ImmediateTexture* icon_texture;
 };
 
 class GamercardUI final : public XamDialog {
@@ -83,6 +83,8 @@ class GamercardUI final : public XamDialog {
   // changed.
   GamercardSettings gamercardOriginalValues_ = {};
   GamercardSettings gamercardValues_ = {};
+  // The picture of gamercardValues_.profile_icon.
+  std::unique_ptr<xe::ui::ImmediateTexture> icon_texture_;
 };
 
 }  // namespace ui

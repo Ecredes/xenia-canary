@@ -263,8 +263,7 @@ void GamercardUI::LoadGamercardInfo() {
     gamercardOriginalValues_.profile_icon.assign(gamer_icon.begin(),
                                                  gamer_icon.end());
 
-    gamercardOriginalValues_.icon_texture =
-        imgui_drawer()->LoadImGuiIcon(gamer_icon).release();
+    icon_texture_ = imgui_drawer()->LoadImGuiIcon(gamer_icon);
 
     LoadStringSetting(UserSettingId::XPROFILE_GAMERCARD_USER_NAME,
                       gamercardOriginalValues_.gamer_name);
@@ -358,10 +357,10 @@ void GamercardUI::SelectNewIcon() {
       if (res == kernel::xam::kProfileIconSizeSmall ||
           res == kernel::xam::kProfileIconSize) {
         gamercardValues_.profile_icon = ReadPngFromFile(path);
-        gamercardValues_.icon_texture =
-            imgui_drawer()
-                ->LoadImGuiIcon(gamercardValues_.profile_icon)
-                .release();
+        // The frame being built may still draw the old picture.
+        imgui_drawer()->DestroyTextureAfterFrame(std::move(icon_texture_));
+        icon_texture_ =
+            imgui_drawer()->LoadImGuiIcon(gamercardValues_.profile_icon);
       }
     }
   }
@@ -379,10 +378,9 @@ void GamercardUI::DrawBaseSettings(ImGuiIO& io) {
 
   ImGui::BeginDisabled(!is_signed_in_);
   ImGui::BeginDisabled(kernel_state_->title_id());
-  if (ImGui::ImageButton(
-          "###ProfileIcon",
-          reinterpret_cast<ImTextureID>(gamercardValues_.icon_texture),
-          xe::ui::default_image_icon_size)) {
+  if (ImGui::ImageButton("###ProfileIcon",
+                         reinterpret_cast<ImTextureID>(icon_texture_.get()),
+                         xe::ui::default_image_icon_size)) {
     SelectNewIcon();
   }
   ImGui::EndDisabled();
