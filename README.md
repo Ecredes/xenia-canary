@@ -195,6 +195,57 @@ conflicts with telemetry until #23 lands; use keyboard or ViGEm meanwhile.
 | 1 | telemetry overlaps the fix's diff |
 | 2 | broken (merge conflict, build failure, git error) |
 
+## Integration build
+
+One build with every pending fork branch: `integration` is regenerated from
+the latest `upstream/canary_experimental` with each branch in
+`config/integration.txt` merged in, in order. Use it to play and explore
+titles past bugs we've already fixed, to catch fixes that conflict with each
+other before upstream does, and to run the regression set across all of our
+work. From the xenia-canary repo, in PowerShell:
+
+```powershell
+..\xenia-canary-tooling\integrate.ps1               # fetch, regenerate, build
+..\xenia-canary-tooling\integrate.ps1 -NoBuild      # merge only
+..\xenia-canary-tooling\integrate.ps1 -Resume       # after resolving a conflict
+..\xenia-canary-tooling\integrate.ps1 -Push         # also force-push it for a Fork CI build
+..\xenia-canary-tooling\integrate.ps1 -Clean        # remove the worktree and branch
+```
+
+1. Fetches the remotes named in the list, then resets the worktree
+   `.claude/worktrees/integration` (branch `integration`) to upstream.
+2. Merges each listed ref with `--no-ff`. A branch whose commits are all
+   upstream already is skipped and reported: drop it from the list. A branch
+   inside one listed earlier (a stack step) is reported as already in.
+3. On a conflict it stops (exit 1). Resolve and `git add` the files in the
+   worktree, without committing, and rerun with `-Resume`: it commits the
+   merge with rerere on and carries on. Every later regeneration replays the
+   recorded resolution by itself ("conflicts replayed by rerere").
+4. Builds `xenia-app` (release) and prints the exe path for `game_launch`.
+
+Rules:
+
+- **Never cut a branch from `integration`** or base a PR on it. A fix built
+  there can silently depend on another unmerged fix, so it won't stand alone
+  upstream. Fixes start from `canary_experimental` as always.
+- **A/B stays against upstream** (`ab-build.ps1`). The integration build is
+  for finding bugs and checking combinations, not for attributing a change.
+- **Fix bugs on topic branches**, not in conflict resolutions. A resolution
+  only combines two branches; if one of them is wrong, fix it there and
+  regenerate (rerere still replays the rest).
+- A topic branch that changes where a recorded resolution applies makes the
+  merge conflict again; resolve it once more.
+
+Resolutions live in the main checkout's `.git/rr-cache` (kept 60 days
+unused, 15 days unresolved by default; `git config gc.rerereResolved` to
+change). If it's lost, the next regeneration stops at each conflict again.
+
+| Exit | Meaning |
+|---|---|
+| 0 | ready (built, or merged with `-NoBuild`) |
+| 1 | merge conflict to resolve, then `-Resume` |
+| 2 | broken (git error, unfinished resolution, build failure) |
+
 ## Tests
 
 ```bash

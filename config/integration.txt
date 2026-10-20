@@ -1,0 +1,35 @@
+# Branches merged into the integration branch, in order, on top of
+# upstream/canary_experimental (see README.md, "Integration build").
+# Branches already upstream are skipped and reported; drop them here.
+# Stacks are listed by their top branch.
+
+# Upstream PR queue (fork #28)
+origin/3pp/libusb-1.0.30
+origin/base/xdg-open-no-shell
+origin/base/posix-unhandled-signal-chain
+origin/base/posix-console-logging
+origin/base/posix-thread-start-leak
+origin/gpu/vulkan-edram-compute-modified
+origin/base/string-buffer-va-copy
+origin/memory/physical-heap-alignment
+origin/kernel/stale-stash-handle
+origin/gpu/fast-readback-per-resolve
+origin/cpu/posix-stack-walker-guard
+origin/cpu/posix-stack-walker
+origin/build/kernel-wswitch
+
+# Other fixes
+origin/cpu/xex-dll-keep-heap
+origin/kernel/getmodule-name-first
+origin/kernel/launch-data-target
+origin/kernel/stfs-device-stubs
+origin/kernel/xsocket-close-once
+origin/xam/loopback-sessions
+
+# GPU-CPU coherence; contains cpu/reservation-generations
+origin/coherence/9-default
+
+# Fork features
+origin/testing/telemetry
+origin/host/7-headless-shell
+origin/hid/remote-input
