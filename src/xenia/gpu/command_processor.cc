@@ -92,16 +92,17 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_string(
-    readback_resolve, "none",
+    readback_resolve, "lazy",
     "Controls CPU readback of render-to-texture resolve results.\n"
-    " fast: Read from previous frame (1 frame delay, no GPU stall, slight "
-    "performance hit)\n"
+    " fast: Approximate: copy the previous frame's result (1 frame stale, "
+    "waits for the GPU only on the first resolve to a range)\n"
     " full: Wait for GPU to finish (accurate but slow, GPU-CPU sync stall)\n"
     " lazy: Copy into guest memory when the CPU first touches it (accurate)\n"
     " none: Disable readback completely (some games render better without it)",
     "GPU");
 
 UPDATE_from_string(readback_resolve, 2025, 12, 4, 21, "fast");
+UPDATE_from_string(readback_resolve, 2026, 10, 20, 1, "none");
 
 DEFINE_bool(
     readback_resolve_half_pixel_offset, false,
@@ -122,7 +123,9 @@ DEFINE_bool(
     "Read data written by memory export in shaders on the CPU. "
     "This may be needed in some games (but many only access exported data on "
     "the GPU, and this flag isn't needed to handle such behavior), but causes "
-    "mid-frame synchronization, so it has a huge performance impact.",
+    "mid-frame synchronization, so it has a huge performance impact.\n"
+    "Not used with readback_resolve = lazy, which reads exported data when "
+    "the CPU first touches it.",
     "GPU");
 
 namespace xe {
