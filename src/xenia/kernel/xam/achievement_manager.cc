@@ -146,6 +146,9 @@ void AchievementManager::ShowAchievementEarnedNotification(
                   xe::to_utf8(achievement->achievement_name));
 
   const Emulator* emulator = kernel_state()->emulator();
+  if (!emulator->display_window()) {
+    return;
+  }
   ui::WindowedAppContext& app_context =
       emulator->display_window()->app_context();
   ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();

@@ -219,8 +219,7 @@ X_RESULT xeXamDispatchDialogAsync(T* dialog,
 X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
   kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
 
-  auto display_window = kernel_state()->emulator()->display_window();
-  display_window->app_context().CallInUIThread([run_callback]() {
+  auto finish = [run_callback]() {
     run_callback();
 
     kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
@@ -232,7 +231,15 @@ X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
 
     std::thread thread(run);
     thread.detach();
-  });
+  };
+
+  // Without a window (--headless) there is no UI thread to defer to.
+  auto display_window = kernel_state()->emulator()->display_window();
+  if (display_window) {
+    display_window->app_context().CallInUIThread(finish);
+  } else {
+    finish();
+  }
 
   return X_ERROR_SUCCESS;
 }
@@ -472,8 +479,10 @@ dword_result_t XNotifyQueueUI_entry(dword_t exnq, dword_t dwUserIndex,
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
 
-  new xe::ui::XNotifyWindow(imgui_drawer, "", displayText, dwUserIndex,
-                            position_id);
+  if (imgui_drawer) {
+    new xe::ui::XNotifyWindow(imgui_drawer, "", displayText, dwUserIndex,
+                              position_id);
+  }
 
   // XNotifyQueueUI -> XNotifyQueueUIEx -> XMsgProcessRequest ->
   // XMsgStartIORequestEx & XMsgInProcessCall
@@ -1125,6 +1134,10 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
     return X_ERROR_NO_SUCH_USER;
   }
 
+  if (cvars::headless) {
+    return xeXamDispatchHeadlessAsync([]() {});
+  }
+
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
 
@@ -1142,6 +1155,10 @@ dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
     return X_ERROR_ACCESS_DENIED;
   }
 
+  if (cvars::headless) {
+    return xeXamDispatchHeadlessAsync([]() {});
+  }
+
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
 
@@ -1157,6 +1174,10 @@ dword_result_t XamShowEditProfileUI_entry(dword_t user_index) {
   auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
   if (!user) {
     return X_ERROR_ACCESS_DENIED;
+  }
+
+  if (cvars::headless) {
+    return xeXamDispatchHeadlessAsync([]() {});
   }
 
   xe::ui::ImGuiDrawer* imgui_drawer =

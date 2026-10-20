@@ -702,7 +702,7 @@ X_RESULT KernelState::ApplyTitleUpdate(
       XELOGW(
           "Skipping incompatible title update for {} due to signature mismatch",
           title_module->name());
-      if (!GetExecutableModule()) {
+      if (!GetExecutableModule() && emulator_->display_window()) {
         emulator_->display_window()->app_context().CallInUIThread([&]() {
           new xe::ui::HostNotificationWindow(
               emulator_->imgui_drawer(), "Warning!",
@@ -719,7 +719,7 @@ X_RESULT KernelState::ApplyTitleUpdate(
         "Applying incompatible title update for {} due to enabled "
         "allow_incompatible_title_update config option!",
         title_module->name());
-    if (!GetExecutableModule()) {
+    if (!GetExecutableModule() && emulator_->display_window()) {
       emulator_->display_window()->app_context().CallInUIThread([&]() {
         new xe::ui::HostNotificationWindow(
             emulator_->imgui_drawer(), "Warning!",

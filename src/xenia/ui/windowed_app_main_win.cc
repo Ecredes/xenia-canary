@@ -8,6 +8,8 @@
  */
 
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #include "xenia/base/console.h"
 #include "xenia/base/cvar.h"
@@ -15,6 +17,7 @@
 #include "xenia/base/platform_win.h"
 #include "xenia/kernel/kernel_state.cc"
 #include "xenia/ui/windowed_app.h"
+#include "xenia/ui/windowed_app_context_headless.h"
 #include "xenia/ui/windowed_app_context_win.h"
 
 #include "version.h"
@@ -306,6 +309,61 @@ LONG _UnhandledExceptionFilter(_EXCEPTION_POINTERS* ExceptionInfo) {
 
   return EXCEPTION_CONTINUE_SEARCH;
 }
+static bool IsHeadlessRequestedWin32() {
+  // Only splits the command line, cvars are parsed by the app's context.
+  std::vector<std::string> args;
+  if (!xe::ParseWin32LaunchArguments(true, "", {}, &args)) {
+    return false;
+  }
+  std::vector<const char*> argv;
+  argv.reserve(args.size());
+  for (const std::string& arg : args) {
+    argv.push_back(arg.c_str());
+  }
+  return xe::ui::IsHeadlessRequested(int(argv.size()), argv.data());
+}
+
+// Without a window: no message loop window, the app must create none.
+static int RunHeadless() {
+  int result;
+  {
+    xe::ui::HeadlessWindowedAppContext app_context;
+
+    std::unique_ptr<xe::ui::WindowedApp> app =
+        xe::ui::GetWindowedAppCreator()(app_context);
+
+    if (!xe::ParseWin32LaunchArguments(false, app->GetPositionalOptionsUsage(),
+                                       app->GetPositionalOptions(), nullptr)) {
+      return EXIT_FAILURE;
+    }
+
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+      return EXIT_FAILURE;
+    }
+
+    xe::InitializeWin32App(app->GetName());
+
+    if (app->OnInitialize()) {
+      if (cvars::enable_console) {
+        xe::AttachConsole();
+      }
+      app_context.RunMainLoop();
+      result = EXIT_SUCCESS;
+    } else {
+      result = EXIT_FAILURE;
+    }
+
+    app->InvokeOnDestroy();
+  }
+
+  // Logging may still be needed in the destructors.
+  xe::ShutdownWin32App();
+
+  CoUninitialize();
+
+  return result;
+}
+
 int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev,
                     LPWSTR command_line, int show_cmd) {
   MODULEINFO modinfo;
@@ -318,6 +376,9 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev,
 
   int result;
   SetUnhandledExceptionFilter(_UnhandledExceptionFilter);
+  if (IsHeadlessRequestedWin32()) {
+    return RunHeadless();
+  }
   {
     xe::ui::Win32WindowedAppContext app_context(hinstance, show_cmd);
     // TODO(Triang3l): Initialize creates a window. Set DPI awareness via the

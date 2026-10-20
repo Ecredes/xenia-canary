@@ -15,8 +15,49 @@
 #include "xenia/base/logging.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context_gtk.h"
+#include "xenia/ui/windowed_app_context_headless.h"
+
+namespace {
+
+// Without a windowing system: no GTK+, so no display server is needed.
+int RunHeadless(int argc, char** argv) {
+  int result;
+
+  {
+    xe::ui::HeadlessWindowedAppContext app_context;
+
+    std::unique_ptr<xe::ui::WindowedApp> app =
+        xe::ui::GetWindowedAppCreator()(app_context);
+
+    cvar::ParseLaunchArguments(argc, argv, app->GetPositionalOptionsUsage(),
+                               app->GetPositionalOptions());
+
+    // Initialize logging. Needs parsed cvars.
+    xe::InitializeLogging(app->GetName());
+
+    if (app->OnInitialize()) {
+      app_context.RunMainLoop();
+      result = EXIT_SUCCESS;
+    } else {
+      result = EXIT_FAILURE;
+    }
+
+    app->InvokeOnDestroy();
+  }
+
+  // Logging may still be needed in the destructors.
+  xe::ShutdownLogging();
+
+  return result;
+}
+
+}  // namespace
 
 int main(int argc_pre_gtk, char** argv_pre_gtk) {
+  if (xe::ui::IsHeadlessRequested(argc_pre_gtk, argv_pre_gtk)) {
+    return RunHeadless(argc_pre_gtk, argv_pre_gtk);
+  }
+
   // Before touching anything GTK+, make sure that when running on Wayland,
   // we'll still get an X11 (Xwayland) window
   // also allow users to override this

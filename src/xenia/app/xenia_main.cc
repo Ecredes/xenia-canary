@@ -16,6 +16,7 @@
 
 #include "xenia/app/discord/discord_presence.h"
 #include "xenia/app/emulator_window.h"
+#include "xenia/app/title_launch.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
@@ -26,6 +27,7 @@
 #include "xenia/config.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
@@ -279,6 +281,9 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   static std::vector<std::unique_ptr<hid::InputDriver>> CreateInputDrivers(
       ui::Window* window);
 
+  // From the emulator thread.
+  X_STATUS RunTitle(const std::filesystem::path& path);
+
   void EmulatorThread();
   void ShutdownEmulatorThreadFromUIThread();
 
@@ -446,7 +451,8 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
-  if (cvars::hid.compare("nop") == 0) {
+  // Without a window (headless), only drivers that don't need one.
+  if (!window || cvars::hid.compare("nop") == 0) {
     drivers.emplace_back(
         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
   } else {
@@ -477,6 +483,17 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     }
   }
   return drivers;
+}
+
+X_STATUS EmulatorApp::RunTitle(const std::filesystem::path& path) {
+  if (emulator_window_) {
+    // The window reports launch failures in its own dialogs.
+    return app_context().CallInUIThread(
+               [this, path]() { emulator_window_->RunTitle(path); })
+               ? X_STATUS_SUCCESS
+               : X_STATUS_UNSUCCESSFUL;
+  }
+  return LaunchTitle(*emulator_, path).status;
 }
 
 bool EmulatorApp::OnInitialize() {
@@ -545,13 +562,15 @@ bool EmulatorApp::OnInitialize() {
   emulator_ =
       std::make_unique<Emulator>("", storage_root, content_root, cache_root);
 
-  // Main emulator display window.
-  emulator_window_ =
-      EmulatorWindow::Create(emulator_.get(), app_context(),
-                             cvars::window_size_x, cvars::window_size_y);
-  if (!emulator_window_) {
-    XELOGE("Failed to create the main emulator window");
-    return false;
+  // Main emulator display window, none when headless.
+  if (!cvars::headless) {
+    emulator_window_ =
+        EmulatorWindow::Create(emulator_.get(), app_context(),
+                               cvars::window_size_x, cvars::window_size_y);
+    if (!emulator_window_) {
+      XELOGE("Failed to create the main emulator window");
+      return false;
+    }
   }
 
   // Setup the emulator and run its loop in a separate thread.
@@ -594,7 +613,8 @@ void EmulatorApp::EmulatorThread() {
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.
   X_STATUS result = emulator_->Setup(
-      emulator_window_->window(), emulator_window_->imgui_drawer(), true, true,
+      emulator_window_ ? emulator_window_->window() : nullptr,
+      emulator_window_ ? emulator_window_->imgui_drawer() : nullptr, true, true,
       CreateAudioSystem, CreateGraphicsSystem, CreateInputDrivers);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
@@ -602,8 +622,10 @@ void EmulatorApp::EmulatorThread() {
     return;
   }
 
-  app_context().CallInUIThread(
-      [this]() { emulator_window_->SetupGraphicsSystemPresenterPainting(); });
+  if (emulator_window_) {
+    app_context().CallInUIThread(
+        [this]() { emulator_window_->SetupGraphicsSystemPresenterPainting(); });
+  }
 
   const auto fs = emulator_->file_system();
 
@@ -696,7 +718,7 @@ void EmulatorApp::EmulatorThread() {
 
   // Set a debug handler.
   // This will respond to debugging requests so we can open the debug UI.
-  if (cvars::debug) {
+  if (cvars::debug && emulator_window_) {
     emulator_->processor()->set_debug_listener_request_handler(
         [this](xe::cpu::Processor* processor) {
           if (debug_window_) {
@@ -718,19 +740,28 @@ void EmulatorApp::EmulatorThread() {
       discord::DiscordPresence::PlayingTitle(
           game_title.empty() ? "Unknown Title" : std::string(game_title));
     }
-    app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
+    if (emulator_window_) {
+      app_context().CallInUIThread(
+          [this]() { emulator_window_->UpdateTitle(); });
+    }
     emulator_thread_event_->Set();
   });
 
   emulator_->on_shader_storage_initialization.AddListener(
       [this](bool initializing) {
+        if (!emulator_window_) {
+          return;
+        }
         app_context().CallInUIThread([this, initializing]() {
           emulator_window_->SetInitializingShaderStorage(initializing);
         });
       });
 
   emulator_->on_patch_apply.AddListener([this]() {
-    app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
+    if (emulator_window_) {
+      app_context().CallInUIThread(
+          [this]() { emulator_window_->UpdateTitle(); });
+    }
   });
 
   emulator_->on_terminate.AddListener([]() {
@@ -740,8 +771,10 @@ void EmulatorApp::EmulatorThread() {
   });
 
   // Enable emulator input now that the emulator is properly loaded.
-  app_context().CallInUIThread(
-      [this]() { emulator_window_->OnEmulatorInitialized(); });
+  if (emulator_window_) {
+    app_context().CallInUIThread(
+        [this]() { emulator_window_->OnEmulatorInitialized(); });
+  }
 
   // Grab path from the flag or unnamed argument.
   std::filesystem::path path;
@@ -753,9 +786,14 @@ void EmulatorApp::EmulatorThread() {
     // Normalize the path and make absolute.
     auto abs_path = std::filesystem::absolute(path);
 
-    result = app_context().CallInUIThread(
-        [this, abs_path]() { return emulator_window_->RunTitle(abs_path); });
+    result = RunTitle(abs_path);
     if (XFAILED(result)) {
+      if (!emulator_window_) {
+        // Headless: no one to show a message box to, the exit code tells.
+        XELOGE("Failed to launch target: {:08X}", result);
+        xe::FlushLog();
+        std::quick_exit(EXIT_FAILURE);
+      }
       xe::FatalError(fmt::format("Failed to launch target: {:08X}", result));
       app_context().RequestDeferredQuit();
       return;
@@ -770,9 +808,7 @@ void EmulatorApp::EmulatorThread() {
 
     if (!xam->loader_data().host_path.empty()) {
       const std::filesystem::path host_path = xam->loader_data().host_path;
-      app_context().CallInUIThread([this, host_path]() {
-        return emulator_window_->RunTitle(host_path);
-      });
+      RunTitle(host_path);
     }
   }
 
