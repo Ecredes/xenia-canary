@@ -293,9 +293,6 @@ class EmulatorWindow {
   void CycleReadbackResolve();
   void DisplayHotKeysConfig();
 
-  static std::string CanonicalizeFileExtension(
-      const std::filesystem::path& path);
-
   void RunPreviouslyPlayedTitle();
   void FillRecentlyLaunchedTitlesMenu(xe::ui::MenuItem* recent_menu);
   void LoadRecentlyLaunchedTitles();
