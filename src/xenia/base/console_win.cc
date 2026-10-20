@@ -14,6 +14,7 @@
 
 #include "xenia/base/console.h"
 #include "xenia/base/platform_win.h"
+#include "xenia/base/system.h"
 
 namespace xe {
 
@@ -35,6 +36,12 @@ static bool has_shell_environment_variable() {
 }
 
 void AttachConsole() {
+  if (!IsInteractive()) {
+    // No one to read a new console window; keep the inherited streams, which
+    // whoever runs us may have redirected.
+    has_console_attached_ = true;
+    return;
+  }
   bool has_console = ::AttachConsole(ATTACH_PARENT_PROCESS) == TRUE;
 #if 0
   if (!has_console || !has_shell_environment_variable()) {

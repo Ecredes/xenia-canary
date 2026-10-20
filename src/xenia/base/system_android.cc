@@ -283,7 +283,8 @@ void LaunchWebBrowser(const std::string_view url) {
 
 void LaunchFileExplorer(const std::filesystem::path& path) { assert_always(); }
 
-void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
+void ShowPlatformSimpleMessageBox(SimpleMessageBoxType type,
+                                  std::string_view message) {
   // TODO(Triang3l): Likely not needed much at all. ShowSimpleMessageBox is a
   // concept pretty unfriendly to platforms like Android because it's blocking,
   // and because it can be called from threads other than the UI thread. In the

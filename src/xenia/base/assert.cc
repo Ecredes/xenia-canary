@@ -20,6 +20,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/system.h"
 
 #if XE_PLATFORM_GNU_LINUX
 #include <dlfcn.h>
@@ -94,9 +95,9 @@ void AssertFailed(const char* expression, const char* file, int line) {
 
   if (debugging::IsDebuggerAttached()) {
     raise(SIGTRAP);
-  } else if (!ignore_all_asserts) {
+  } else if (!ignore_all_asserts && IsInteractive()) {
     // Without a debugger SIGTRAP terminates the process, ask instead like the
-    // assertion dialog on Windows.
+    // assertion dialog on Windows. With no one to ask, it's only logged.
     const std::string message = fmt::format(
         "Assertion failed!\n\nFile: {}\nLine: {}\n\nExpression: {}\n\n"
         "Abort closes Xenia, Ignore continues execution.",

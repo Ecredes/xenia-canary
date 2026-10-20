@@ -35,7 +35,8 @@ void LaunchFileExplorer(const std::filesystem::path& path) {
   system(cmd.c_str());
 }
 
-void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
+void ShowPlatformSimpleMessageBox(SimpleMessageBoxType type,
+                                  std::string_view message) {
   void* libsdl2 = dlopen("libSDL2.so", RTLD_LAZY | RTLD_LOCAL);
   assert_not_null(libsdl2);
   if (libsdl2) {

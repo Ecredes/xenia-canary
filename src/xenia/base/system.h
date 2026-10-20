@@ -38,8 +38,18 @@ enum class SimpleMessageBoxType {
   Error,
 };
 
-// This is expected to block the caller until the message box is closed.
+// Whether someone can answer prompts. A headless process sets false before
+// parsing its command line, so message boxes and assertion prompts go to the
+// standard streams instead of waiting for a click.
+void SetInteractive(bool is_interactive);
+bool IsInteractive();
+
+// This is expected to block the caller until the message box is closed. When
+// not interactive, writes the message to stdout (help) or stderr instead.
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message);
+// The platform's message box, for ShowSimpleMessageBox.
+void ShowPlatformSimpleMessageBox(SimpleMessageBoxType type,
+                                  std::string_view message);
 
 }  // namespace xe
 

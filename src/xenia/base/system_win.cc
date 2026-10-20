@@ -25,8 +25,8 @@ void LaunchFileExplorer(const std::filesystem::path& url) {
                 SW_SHOWNORMAL);
 }
 
-void ShowSimpleMessageBox(SimpleMessageBoxType type,
-                          const std::string_view message) {
+void ShowPlatformSimpleMessageBox(SimpleMessageBoxType type,
+                                  const std::string_view message) {
   const wchar_t* title;
   std::u16string wide_message = xe::to_utf16(message);
   DWORD type_flags = MB_OK | MB_APPLMODAL | MB_SETFOREGROUND;
