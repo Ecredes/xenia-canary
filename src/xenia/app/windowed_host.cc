@@ -19,6 +19,10 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/ui/create_profile_ui.h"
+#include "xenia/kernel/xam/ui/passcode_ui.h"
+#include "xenia/kernel/xam/ui/signin_ui.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_guest_notification.h"
@@ -151,6 +155,52 @@ void WindowedHost::RequestText(
       });
   if (!queued) {
     done(std::nullopt);
+  }
+}
+
+void WindowedHost::RequestSignIn(SignInRequest request,
+                                 std::function<void(SignInAnswer)> done) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    done(std::nullopt);
+    return;
+  }
+  bool queued = app_context_.CallInUIThread([imgui_drawer, request, done]() {
+    new kernel::xam::ui::SigninUI(imgui_drawer, request, done);
+  });
+  if (!queued) {
+    done(std::nullopt);
+  }
+}
+
+void WindowedHost::RequestPasscode(PasscodeRequest request,
+                                   std::function<void(PasscodeAnswer)> done) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    done(std::nullopt);
+    return;
+  }
+  bool queued = app_context_.CallInUIThread([imgui_drawer, request, done]() {
+    new kernel::xam::ui::ProfilePasscodeUI(imgui_drawer, request, done);
+  });
+  if (!queued) {
+    done(std::nullopt);
+  }
+}
+
+void WindowedHost::RequestProfileCreation(std::function<void()> done) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    done();
+    return;
+  }
+  bool queued = app_context_.CallInUIThread([imgui_drawer, done]() {
+    auto dialog = new kernel::xam::ui::CreateProfileUI(
+        imgui_drawer, kernel::kernel_state()->emulator());
+    dialog->set_close_callback(done);
+  });
+  if (!queued) {
+    done();
   }
 }
 

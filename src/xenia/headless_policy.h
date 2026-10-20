@@ -11,6 +11,7 @@
 #define XENIA_HEADLESS_POLICY_H_
 
 #include <cstdlib>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -35,6 +36,26 @@ inline uint32_t HeadlessChoice(const ChoiceRequest& request) {
 // The text entered with no one to type: the title's default, not cancelled.
 inline std::optional<std::string> HeadlessText(const TextRequest& request) {
   return request.default_text;
+}
+
+// The profiles signed in with no one to choose: the ones already assigned to
+// slots, in slot order, as many as needed.
+inline std::map<uint8_t, uint64_t> HeadlessSignIn(
+    const SignInRequest& request) {
+  std::map<uint8_t, uint64_t> chosen;
+  for (const auto& [slot, xuid] : request.signed_in) {
+    if (chosen.size() >= request.users_needed) {
+      break;
+    }
+    chosen[slot] = xuid;
+  }
+  return chosen;
+}
+
+// The pass code entered with no one to enter it: like pressing Sign In
+// without choosing keys, every key none.
+inline std::vector<uint16_t> HeadlessPasscode(const PasscodeRequest& request) {
+  return std::vector<uint16_t>(request.length, 0);
 }
 
 // The process exit status when the title ends itself.

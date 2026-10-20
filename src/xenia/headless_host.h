@@ -33,6 +33,12 @@ class HeadlessHost : public EmulatorHost {
   void RequestText(
       TextRequest request,
       std::function<void(std::optional<std::string> text)> done) override;
+  // Answers with HeadlessSignIn, HeadlessPasscode, and creates no profile.
+  void RequestSignIn(SignInRequest request,
+                     std::function<void(SignInAnswer)> done) override;
+  void RequestPasscode(PasscodeRequest request,
+                       std::function<void(PasscodeAnswer)> done) override;
+  void RequestProfileCreation(std::function<void()> done) override;
   // Ends the process with HeadlessExitCode.
   void RequestLifecycle(LifecycleRequest request) override;
 };

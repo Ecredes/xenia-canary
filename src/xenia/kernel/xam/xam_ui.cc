@@ -8,6 +8,9 @@
  */
 
 #include "xenia/kernel/xam/xam_ui.h"
+
+#include <cstring>
+
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
@@ -20,11 +23,8 @@
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 
-#include "xenia/kernel/xam/ui/create_profile_ui.h"
 #include "xenia/kernel/xam/ui/game_achievements_ui.h"
 #include "xenia/kernel/xam/ui/gamercard_ui.h"
-#include "xenia/kernel/xam/ui/passcode_ui.h"
-#include "xenia/kernel/xam/ui/signin_ui.h"
 #include "xenia/kernel/xam/ui/title_info_ui.h"
 
 DEFINE_bool(storage_selection_dialog, false,
@@ -70,12 +70,13 @@ Answer xeXamWaitForAnswer(
   return answer;
 }
 
-// The guest-visible side of a XAM choice dialog, whoever answers it through
-// the host (a user, or a policy without a UI): one dialog at a time, the
-// system UI notification around it, and completion like any XAM call,
-// blocking or through an overlapped.
-X_RESULT xeXamShowChoice(ChoiceRequest request,
-                         std::function<X_RESULT(uint32_t button)> on_answer,
+// The guest-visible side of a XAM dialog, whoever answers it through the host
+// (a user, or a policy without a UI): one dialog at a time, the system UI
+// notification around it, and completion like any XAM call, blocking or
+// through an overlapped. ask passes the request to the host.
+template <typename Answer>
+X_RESULT xeXamShowDialog(std::function<void(std::function<void(Answer)>)> ask,
+                         std::function<X_RESULT(Answer)> on_answer,
                          uint32_t overlapped) {
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_ACCESS_DENIED;
@@ -85,14 +86,10 @@ X_RESULT xeXamShowChoice(ChoiceRequest request,
   auto pre = []() {
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
   };
-  auto run = [request = std::move(request), on_answer]() -> X_RESULT {
-    uint32_t button = xeXamWaitForAnswer<uint32_t>(
-        [&request](std::function<void(uint32_t)> done) {
-          kernel_state()->emulator()->host().RequestChoice(request,
-                                                           std::move(done));
-        });
+  auto run = [ask = std::move(ask), on_answer]() -> X_RESULT {
+    Answer answer = xeXamWaitForAnswer<Answer>(ask);
     kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-    return on_answer(button);
+    return on_answer(std::move(answer));
   };
   auto post = []() {
     std::jthread t([] {
@@ -109,6 +106,17 @@ X_RESULT xeXamShowChoice(ChoiceRequest request,
   }
   kernel_state()->CompleteOverlappedDeferred(run, overlapped, pre, post);
   return X_ERROR_IO_PENDING;
+}
+
+X_RESULT xeXamShowChoice(ChoiceRequest request,
+                         std::function<X_RESULT(uint32_t button)> on_answer,
+                         uint32_t overlapped) {
+  return xeXamShowDialog<uint32_t>(
+      [request = std::move(request)](std::function<void(uint32_t)> done) {
+        kernel_state()->emulator()->host().RequestChoice(request,
+                                                         std::move(done));
+      },
+      std::move(on_answer), overlapped);
 }
 
 // The same for text entry, completed with an extended error and a length.
@@ -153,66 +161,34 @@ X_RESULT xeXamShowText(
 }
 
 // The same for a dialog the title doesn't wait for: on_answer runs later.
-X_RESULT xeXamShowChoiceAsync(ChoiceRequest request,
-                              std::function<void(uint32_t button)> on_answer) {
+template <typename Answer>
+X_RESULT xeXamShowDialogAsync(
+    std::function<void(std::function<void(Answer)>)> ask,
+    std::function<void(Answer)> on_answer) {
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_ACCESS_DENIED;
   }
   kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
   kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
-  kernel_state()->emulator()->host().RequestChoice(
-      std::move(request), [on_answer](uint32_t button) {
-        on_answer(button);
-        kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-        std::thread([] {
-          xe::threading::Sleep(kUIDelayMillis);
-          kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
-        }).detach();
-      });
+  ask([on_answer](Answer answer) {
+    on_answer(std::move(answer));
+    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    std::thread([] {
+      xe::threading::Sleep(kUIDelayMillis);
+      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    }).detach();
+  });
   return X_ERROR_SUCCESS;
 }
 
-template <typename T>
-X_RESULT xeXamDispatchDialog(T* dialog,
-                             std::function<X_RESULT(T*)> close_callback,
-                             uint32_t overlapped) {
-  auto pre = []() {
-    kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
-  };
-  auto run = [dialog, close_callback]() -> X_RESULT {
-    X_RESULT result;
-    dialog->set_close_callback([&dialog, &result, &close_callback]() {
-      result = close_callback(dialog);
-    });
-    xe::threading::Fence fence;
-    xe::ui::WindowedAppContext& app_context =
-        kernel_state()->emulator()->display_window()->app_context();
-    if (app_context.CallInUIThreadSynchronous(
-            [&dialog, &fence]() { dialog->Then(&fence); })) {
-      fence.Wait();
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-    } else {
-      delete dialog;
-    }
-    // dialog should be deleted at this point!
-    return result;
-  };
-  auto post = []() {
-    std::jthread t([] {
-      xe::threading::Sleep(kUIDelayMillis);
-      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
-    });
-    t.detach();
-  };
-  if (!overlapped) {
-    pre();
-    auto result = run();
-    post();
-    return result;
-  } else {
-    kernel_state()->CompleteOverlappedDeferred(run, overlapped, pre, post);
-    return X_ERROR_IO_PENDING;
-  }
+X_RESULT xeXamShowChoiceAsync(ChoiceRequest request,
+                              std::function<void(uint32_t button)> on_answer) {
+  return xeXamShowDialogAsync<uint32_t>(
+      [request = std::move(request)](std::function<void(uint32_t)> done) {
+        kernel_state()->emulator()->host().RequestChoice(request,
+                                                         std::move(done));
+      },
+      std::move(on_answer));
 }
 
 X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
@@ -241,30 +217,6 @@ X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
   }
 }
 
-X_RESULT xeXamDispatchHeadlessEx(
-    std::function<X_RESULT(uint32_t&, uint32_t&)> run_callback,
-    uint32_t overlapped) {
-  auto pre = []() {
-    kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
-  };
-  auto post = []() {
-    xe::threading::Sleep(kUIDelayMillis);
-    kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
-  };
-  if (!overlapped) {
-    pre();
-    uint32_t extended_error, length;
-    auto result = run_callback(extended_error, length);
-    post();
-    // TODO(gibbed): do something with extended_error/length?
-    return result;
-  } else {
-    kernel_state()->CompleteOverlappedDeferredEx(run_callback, overlapped, pre,
-                                                 post);
-    return X_ERROR_IO_PENDING;
-  }
-}
-
 template <typename T>
 X_RESULT xeXamDispatchDialogAsync(T* dialog,
                                   std::function<void(T*)> close_callback) {
@@ -274,27 +226,6 @@ X_RESULT xeXamDispatchDialogAsync(T* dialog,
   // destroyed.
   dialog->set_close_callback([dialog, close_callback]() {
     close_callback(dialog);
-
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-
-    auto run = []() -> void {
-      xe::threading::Sleep(kUIDelayMillis);
-      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
-    };
-
-    std::thread thread(run);
-    thread.detach();
-  });
-
-  return X_ERROR_SUCCESS;
-}
-
-X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
-  kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
-
-  auto display_window = kernel_state()->emulator()->display_window();
-  display_window->app_context().CallInUIThread([run_callback]() {
-    run_callback();
 
     kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
 
@@ -334,37 +265,26 @@ static dword_result_t XamShowMessageBoxUi(
   }
 
   if (flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE) {
-    if (cvars::headless) {
-      // Auto-pick the focused button.
-      auto run = [result_ptr, active_button]() -> X_RESULT {
-        result_ptr->ButtonPressed = static_cast<uint32_t>(active_button);
-        return X_ERROR_SUCCESS;
-      };
-      return xeXamDispatchHeadless(run, overlapped);
-    }
-
-    if (kernel_state()->xam_state()->IsUIActive()) {
-      return X_ERROR_ACCESS_DENIED;
-    }
-
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
-    const Emulator* emulator = kernel_state()->emulator();
-    xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-
-    auto close = [result_ptr,
-                  active_button](ui::ProfilePasscodeUI* dialog) -> X_RESULT {
-      if (dialog->SelectedSignedIn()) {
-        // Logged in
-        return X_ERROR_SUCCESS;
-      } else {
+    PasscodeRequest request{title, text,
+                            sizeof(result_ptr->Passcode) / sizeof(uint16_t)};
+    auto on_answer = [result_ptr](PasscodeAnswer keys) -> X_RESULT {
+      std::memset(result_ptr, 0, sizeof(MESSAGEBOX_RESULT));
+      if (!keys) {
         return X_ERROR_FUNCTION_FAILED;
       }
+      for (size_t i = 0;
+           i < keys->size() && i < xe::countof(result_ptr->Passcode); i++) {
+        result_ptr->Passcode[i] = (*keys)[i];
+      }
+      return X_ERROR_SUCCESS;
     };
-
-    return xeXamDispatchDialog<ui::ProfilePasscodeUI>(
-        new ui::ProfilePasscodeUI(imgui_drawer, title, text, result_ptr), close,
-        overlapped);
+    return xeXamShowDialog<PasscodeAnswer>(
+        [request =
+             std::move(request)](std::function<void(PasscodeAnswer)> done) {
+          kernel_state()->emulator()->host().RequestPasscode(request,
+                                                             std::move(done));
+        },
+        on_answer, overlapped);
   }
 
   auto on_answer = [result_ptr](uint32_t button) -> X_RESULT {
@@ -876,60 +796,37 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
     return X_ERROR_INVALID_PARAMETER;
   }
 
-  if (cvars::headless) {
-    return xeXamDispatchHeadlessAsync([users_needed]() {
-      std::map<uint8_t, uint64_t> xuids;
-
-      for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
-        UserProfile* profile = kernel_state()->xam_state()->GetUserProfile(i);
-        if (profile) {
-          xuids[i] = profile->xuid();
-          if (xuids.size() >= users_needed) {
-            break;
-          }
+  SignInRequest request;
+  request.users_needed = users_needed;
+  request.last_used_slot = static_cast<uint8_t>(
+      kernel_state()->emulator()->input_system()->GetLastUsedSlot());
+  for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
+    UserProfile* profile = kernel_state()->xam_state()->GetUserProfile(i);
+    if (profile) {
+      request.signed_in[static_cast<uint8_t>(i)] = profile->xuid();
+    }
+  }
+  return xeXamShowDialogAsync<SignInAnswer>(
+      [request = std::move(request)](std::function<void(SignInAnswer)> done) {
+        kernel_state()->emulator()->host().RequestSignIn(request,
+                                                         std::move(done));
+      },
+      [](SignInAnswer xuids) {
+        if (xuids) {
+          kernel_state()->xam_state()->profile_manager()->LoginMultiple(*xuids);
         }
-      }
-
-      kernel_state()->xam_state()->profile_manager()->LoginMultiple(xuids);
-    });
-  }
-
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_ACCESS_DENIED;
-  }
-
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
-  auto close = [](ui::SigninUI* dialog) -> void {};
-
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  return xeXamDispatchDialogAsync<ui::SigninUI>(
-      new ui::SigninUI(
-          imgui_drawer, kernel_state()->xam_state()->profile_manager(),
-          emulator->input_system()->GetLastUsedSlot(), users_needed),
-      close);
+      });
 }
 
 X_RESULT xeXamShowCreateProfileUIEx(uint32_t user_index, dword_t flag,
                                     char* unkn2_ptr) {
-  Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-
-  if (cvars::headless) {
-    return X_ERROR_SUCCESS;
-  }
-
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_ACCESS_DENIED;
-  }
-
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
-  auto close = [](ui::CreateProfileUI* dialog) -> void {};
-
-  return xeXamDispatchDialogAsync<ui::CreateProfileUI>(
-      new ui::CreateProfileUI(imgui_drawer, emulator), close);
+  // The answer carries nothing: the profile, if made, is the host's.
+  return xeXamShowDialogAsync<bool>(
+      [](std::function<void(bool)> done) {
+        kernel_state()->emulator()->host().RequestProfileCreation(
+            [done]() { done(true); });
+      },
+      [](bool) {});
 }
 
 dword_result_t XamShowSigninUI_entry(dword_t users_needed, dword_t flags) {

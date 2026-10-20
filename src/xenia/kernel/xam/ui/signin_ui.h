@@ -10,6 +10,9 @@
 #ifndef XENIA_KERNEL_XAM_UI_SIGNIN_UI_H_
 #define XENIA_KERNEL_XAM_UI_SIGNIN_UI_H_
 
+#include <functional>
+
+#include "xenia/emulator_host.h"
 #include "xenia/kernel/xam/xam_ui.h"
 
 namespace xe {
@@ -19,10 +22,12 @@ namespace ui {
 
 class SigninUI final : public XamDialog {
  public:
-  SigninUI(xe::ui::ImGuiDrawer* imgui_drawer, ProfileManager* profile_manager,
-           uint32_t last_used_slot, uint32_t users_needed);
-
-  ~SigninUI() = default;
+  // done receives the chosen profiles, or none if cancelled.
+  SigninUI(xe::ui::ImGuiDrawer* imgui_drawer, const SignInRequest& request,
+           std::function<void(SignInAnswer)> done);
+  // Answers here, so whoever waits is released even if the dialog is
+  // destroyed without an answer (as cancelled).
+  ~SigninUI() override;
 
  private:
   void OnDraw(ImGuiIO& io) override;
@@ -46,6 +51,8 @@ class SigninUI final : public XamDialog {
   bool creating_profile_ = false;
   char gamertag_[16] = "";
   bool valid_gamertag_ = false;
+  std::function<void(SignInAnswer)> done_;
+  SignInAnswer answer_;
 };
 
 }  // namespace ui

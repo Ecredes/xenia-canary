@@ -10,6 +10,9 @@
 #ifndef XENIA_KERNEL_XAM_UI_PASSCODE_UI_H_
 #define XENIA_KERNEL_XAM_UI_PASSCODE_UI_H_
 
+#include <functional>
+
+#include "xenia/emulator_host.h"
 #include "xenia/kernel/xam/xam_ui.h"
 
 namespace xe {
@@ -19,12 +22,13 @@ namespace ui {
 
 class ProfilePasscodeUI final : public XamDialog {
  public:
-  ProfilePasscodeUI(xe::ui::ImGuiDrawer* imgui_drawer, std::string_view title,
-                    std::string_view description,
-                    MESSAGEBOX_RESULT* result_ptr);
-  ~ProfilePasscodeUI() = default;
-
-  bool SelectedSignedIn() const { return selected_signed_in_; }
+  // done receives the keys, or none if cancelled.
+  ProfilePasscodeUI(xe::ui::ImGuiDrawer* imgui_drawer,
+                    const PasscodeRequest& request,
+                    std::function<void(PasscodeAnswer)> done);
+  // Answers here, so whoever waits is released even if the dialog is
+  // destroyed without an answer (as cancelled).
+  ~ProfilePasscodeUI() override;
 
  private:
   const char* labelled_keys_[11] = {"None", "X",  "Y",    "RB",   "LB",   "LT",
@@ -48,13 +52,13 @@ class ProfilePasscodeUI final : public XamDialog {
   void DrawPasscodeField(uint8_t key_id);
 
   bool has_opened_ = false;
-  bool selected_signed_in_ = false;
   std::string title_;
   std::string description_;
 
   static constexpr uint8_t passcode_length = sizeof(X_XAMACCOUNTINFO::passcode);
   int key_indexes_[passcode_length] = {0, 0, 0, 0};
-  MESSAGEBOX_RESULT* result_ptr_;
+  std::function<void(PasscodeAnswer)> done_;
+  PasscodeAnswer answer_;
 };
 
 }  // namespace ui

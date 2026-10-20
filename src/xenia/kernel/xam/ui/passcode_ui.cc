@@ -15,21 +15,24 @@ namespace xam {
 namespace ui {
 
 ProfilePasscodeUI::ProfilePasscodeUI(xe::ui::ImGuiDrawer* imgui_drawer,
-                                     std::string_view title,
-                                     std::string_view description,
-                                     MESSAGEBOX_RESULT* result_ptr)
+                                     const PasscodeRequest& request,
+                                     std::function<void(PasscodeAnswer)> done)
     : XamDialog(imgui_drawer),
-      title_(title),
-      description_(description),
-      result_ptr_(result_ptr) {
-  std::memset(result_ptr, 0, sizeof(MESSAGEBOX_RESULT));
-
+      title_(request.title),
+      description_(request.description),
+      done_(std::move(done)) {
   if (title_.empty()) {
     title_ = "Enter Pass Code";
   }
 
   if (description_.empty()) {
     description_ = "Enter your Xbox LIVE pass code.";
+  }
+}
+
+ProfilePasscodeUI::~ProfilePasscodeUI() {
+  if (done_) {
+    done_(std::move(answer_));
   }
 }
 
@@ -67,20 +70,16 @@ void ProfilePasscodeUI::OnDraw(ImGuiIO& io) {
 
     for (uint8_t i = 0; i < passcode_length; i++) {
       DrawPasscodeField(i);
-      // result_ptr_->Passcode[i] =
-      // keys_map_.at(labelled_keys_[key_indexes_[i]]);
     }
 
     ImGui::NewLine();
 
-    // We write each key on close to prevent simultaneous dialogs.
     if (ImGui::Button("Sign In")) {
+      std::vector<uint16_t> keys;
       for (uint8_t i = 0; i < passcode_length; i++) {
-        result_ptr_->Passcode[i] =
-            keys_map_.at(labelled_keys_[key_indexes_[i]]);
+        keys.push_back(keys_map_.at(labelled_keys_[key_indexes_[i]]));
       }
-
-      selected_signed_in_ = true;
+      answer_ = std::move(keys);
 
       Close();
     }
@@ -90,9 +89,11 @@ void ProfilePasscodeUI::OnDraw(ImGuiIO& io) {
     if (ImGui::Button("Cancel")) {
       Close();
     }
-  }
 
-  ImGui::EndPopup();
+    ImGui::EndPopup();
+  } else {
+    Close();
+  }
 }
 
 }  // namespace ui

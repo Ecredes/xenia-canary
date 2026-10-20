@@ -15,13 +15,20 @@ namespace xam {
 namespace ui {
 
 SigninUI::SigninUI(xe::ui::ImGuiDrawer* imgui_drawer,
-                   ProfileManager* profile_manager, uint32_t last_used_slot,
-                   uint32_t users_needed)
+                   const SignInRequest& request,
+                   std::function<void(SignInAnswer)> done)
     : XamDialog(imgui_drawer),
-      profile_manager_(profile_manager),
-      last_user_(last_used_slot),
-      users_needed_(users_needed),
-      title_("Sign In") {}
+      profile_manager_(kernel_state()->xam_state()->profile_manager()),
+      title_("Sign In"),
+      users_needed_(request.users_needed),
+      last_user_(request.last_used_slot),
+      done_(std::move(done)) {}
+
+SigninUI::~SigninUI() {
+  if (done_) {
+    done_(std::move(answer_));
+  }
+}
 
 void SigninUI::OnDraw(ImGuiIO& io) {
   bool first_draw = false;
@@ -185,7 +192,7 @@ void SigninUI::OnDraw(ImGuiIO& io) {
           profile_map[slot] = xuid;
         }
       }
-      profile_manager_->LoginMultiple(profile_map);
+      answer_ = std::move(profile_map);
 
       ImGui::CloseCurrentPopup();
       Close();

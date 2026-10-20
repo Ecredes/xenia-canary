@@ -45,6 +45,11 @@ class WindowedHost : public EmulatorHost {
   void RequestText(
       TextRequest request,
       std::function<void(std::optional<std::string> text)> done) override;
+  void RequestSignIn(SignInRequest request,
+                     std::function<void(SignInAnswer)> done) override;
+  void RequestPasscode(PasscodeRequest request,
+                       std::function<void(PasscodeAnswer)> done) override;
+  void RequestProfileCreation(std::function<void()> done) override;
   // Tells the user, then exits for a relaunch or termination once they close
   // the notice, saving the config.
   void RequestLifecycle(LifecycleRequest request) override;

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -64,6 +65,27 @@ struct TextRequest {
   size_t max_length = 0;
 };
 
+// Signing users in to profiles, e.g. a title's sign-in prompt.
+struct SignInRequest {
+  uint32_t users_needed = 1;
+  // The controller slot preselected when one user is needed.
+  uint8_t last_used_slot = 0;
+  // Profiles assigned to slots now: slot to XUID.
+  std::map<uint8_t, uint64_t> signed_in;
+};
+// Profiles to sign in, slot to XUID, or none if cancelled.
+using SignInAnswer = std::optional<std::map<uint8_t, uint64_t>>;
+
+// A profile's pass code, asked by a title's pass code message box.
+struct PasscodeRequest {
+  std::string title;
+  std::string description;
+  // In keys.
+  size_t length = 0;
+};
+// The pass code's keys, as XAM's pass code key values, or none if cancelled.
+using PasscodeAnswer = std::optional<std::vector<uint16_t>>;
+
 // The title ending itself; the host decides how the process goes on.
 struct LifecycleRequest {
   enum class Kind {
@@ -103,6 +125,14 @@ class EmulatorHost {
   virtual void RequestText(
       TextRequest request,
       std::function<void(std::optional<std::string> text)> done) = 0;
+  // done receives the profiles to sign in, on any thread, exactly once.
+  virtual void RequestSignIn(SignInRequest request,
+                             std::function<void(SignInAnswer)> done) = 0;
+  virtual void RequestPasscode(PasscodeRequest request,
+                               std::function<void(PasscodeAnswer)> done) = 0;
+  // Lets the user create a profile; creating it is the host's own business.
+  // done is called once the user is done, on any thread.
+  virtual void RequestProfileCreation(std::function<void()> done) = 0;
   // The title then terminates; the host may end the process.
   virtual void RequestLifecycle(LifecycleRequest request) = 0;
 };

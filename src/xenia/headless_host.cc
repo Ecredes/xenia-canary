@@ -48,6 +48,25 @@ void HeadlessHost::RequestText(
   done(std::move(text));
 }
 
+void HeadlessHost::RequestSignIn(SignInRequest request,
+                                 std::function<void(SignInAnswer)> done) {
+  std::map<uint8_t, uint64_t> chosen = HeadlessSignIn(request);
+  XELOGI("Sign-in without a UI: {} of {} profiles", chosen.size(),
+         request.users_needed);
+  done(std::move(chosen));
+}
+
+void HeadlessHost::RequestPasscode(PasscodeRequest request,
+                                   std::function<void(PasscodeAnswer)> done) {
+  XELOGI("{}: pass code entered without a UI", request.title);
+  done(HeadlessPasscode(request));
+}
+
+void HeadlessHost::RequestProfileCreation(std::function<void()> done) {
+  XELOGI("No profile created without a UI");
+  done();
+}
+
 void HeadlessHost::RequestLifecycle(LifecycleRequest request) {
   int exit_code = HeadlessExitCode(request);
   XELOGI("The title ended itself, exiting with {}", exit_code);

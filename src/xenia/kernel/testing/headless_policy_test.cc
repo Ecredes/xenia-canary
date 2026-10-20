@@ -41,5 +41,19 @@ TEST_CASE("Headless text entry keeps the title's default", "[headless]") {
   REQUIRE(HeadlessText(TextRequest{}) == std::optional<std::string>(""));
 }
 
+TEST_CASE("Headless sign-in keeps the profiles in slots", "[headless]") {
+  SignInRequest one{1, 0, {{1, 0xE001}, {3, 0xE003}}};
+  REQUIRE(HeadlessSignIn(one) == std::map<uint8_t, uint64_t>{{1, 0xE001}});
+  SignInRequest two{2, 0, {{1, 0xE001}, {3, 0xE003}}};
+  REQUIRE(HeadlessSignIn(two) ==
+          std::map<uint8_t, uint64_t>{{1, 0xE001}, {3, 0xE003}});
+  // No profile in a slot: no one signs in.
+  REQUIRE(HeadlessSignIn(SignInRequest{1, 0, {}}).empty());
+}
+
+TEST_CASE("Headless pass code is every key none", "[headless]") {
+  REQUIRE(HeadlessPasscode({"", "", 4}) == std::vector<uint16_t>(4, 0));
+}
+
 }  // namespace test
 }  // namespace xe
