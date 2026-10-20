@@ -126,16 +126,18 @@ inline void CommandVar<std::filesystem::path>::AddToLaunchOptions(
     cxxopts::Options* options) {
   options->add_options()(name_, description_, cxxopts::value<std::string>());
 }
+// --help lists the default group. A transient option is in no config file, so
+// it goes there; others are listed in the config file under their category.
 template <class T>
 void ConfigVar<T>::AddToLaunchOptions(cxxopts::Options* options) {
-  options->add_options(category_)(this->name_, this->description_,
-                                  cxxopts::value<T>());
+  options->add_options(is_transient_ ? "" : category_)(
+      this->name_, this->description_, cxxopts::value<T>());
 }
 template <>
 inline void ConfigVar<std::filesystem::path>::AddToLaunchOptions(
     cxxopts::Options* options) {
-  options->add_options(category_)(this->name_, this->description_,
-                                  cxxopts::value<std::string>());
+  options->add_options(is_transient_ ? "" : category_)(
+      this->name_, this->description_, cxxopts::value<std::string>());
 }
 template <class T>
 void CommandVar<T>::LoadFromLaunchOptions(cxxopts::ParseResult* result) {
