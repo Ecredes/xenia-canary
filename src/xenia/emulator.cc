@@ -910,9 +910,10 @@ X_STATUS Emulator::ProcessContentPackageHeader(
   installation_info.content_size_ = package->GetPackageSize();
   installation_info.installation_state_ = InstallState::pending;
 
-  installation_info.icon_ = imgui_drawer_->LoadImGuiIcon(
-      std::span<const uint8_t>(header->content_metadata.title_thumbnail,
-                               header->content_metadata.title_thumbnail_size));
+  installation_info.icon_data_.assign(
+      header->content_metadata.title_thumbnail,
+      header->content_metadata.title_thumbnail +
+          header->content_metadata.title_thumbnail_size);
 
   return X_STATUS_SUCCESS;
 }
@@ -1605,7 +1606,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
-  display_window_->SetIcon(nullptr, 0);
+  host_.SetTitleIcon({});
 
   // Allow xam to request module loads.
   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
@@ -1813,7 +1814,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
       auto icon_block = game_info_database_->GetIcon();
       if (!icon_block.empty()) {
-        display_window_->SetIcon(icon_block.data(), icon_block.size());
+        host_.SetTitleIcon(std::move(icon_block));
       }
     }
   }

@@ -62,5 +62,15 @@ void WindowedHost::Notify(Notification notification) {
       });
 }
 
+void WindowedHost::SetTitleIcon(std::vector<uint8_t> icon) {
+  ui::Window* window = window_.load(std::memory_order_acquire);
+  if (!window) {
+    return;
+  }
+  app_context_.CallInUIThread([window, icon = std::move(icon)]() {
+    window->SetIcon(icon.empty() ? nullptr : icon.data(), icon.size());
+  });
+}
+
 }  // namespace app
 }  // namespace xe

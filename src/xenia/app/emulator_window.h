@@ -10,7 +10,10 @@
 #ifndef XENIA_APP_EMULATOR_WINDOW_H_
 #define XENIA_APP_EMULATOR_WINDOW_H_
 
+#include <algorithm>
+#include <iterator>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "xenia/app/profile_dialogs.h"
@@ -187,12 +190,14 @@ class EmulatorWindow {
           emulator_window_(emulator_window),
           installation_entries_(entries) {
       window_id_ = GetWindowId();
-    }
-
-    ~ContentInstallDialog() {
-      for (auto& entry : *installation_entries_) {
-        entry.icon_.release();
-      }
+      // One per entry, in order.
+      std::transform(
+          installation_entries_->cbegin(), installation_entries_->cend(),
+          std::back_inserter(icons_),
+          [imgui_drawer](const Emulator::ContentInstallEntry& entry) {
+            return imgui_drawer->LoadImGuiIcon(
+                std::span<const uint8_t>(entry.icon_data_));
+          });
     }
 
    protected:
@@ -204,6 +209,7 @@ class EmulatorWindow {
     EmulatorWindow& emulator_window_;
     std::shared_ptr<std::vector<Emulator::ContentInstallEntry>>
         installation_entries_;
+    std::vector<std::unique_ptr<ui::ImmediateTexture>> icons_;
   };
 
   class DisplayConfigDialog final : public ui::ImGuiDialog {

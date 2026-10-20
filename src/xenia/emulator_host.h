@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace xe {
 
@@ -42,6 +43,9 @@ class EmulatorHost {
   virtual ~EmulatorHost() = default;
 
   virtual void Notify(Notification notification) = 0;
+  // The running title's icon (an image file, as the title provides it), or
+  // none when empty.
+  virtual void SetTitleIcon(std::vector<uint8_t> icon) = 0;
 };
 
 }  // namespace xe

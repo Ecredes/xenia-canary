@@ -14,6 +14,7 @@
 
 #include "xenia/emulator_host.h"
 #include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 
 namespace xe {
@@ -26,16 +27,19 @@ class WindowedHost : public EmulatorHost {
   explicit WindowedHost(ui::WindowedAppContext& app_context)
       : app_context_(app_context) {}
 
-  // The drawer exists only once the window does, after the emulator. Until
-  // then, notifications go to the log.
-  void SetImGuiDrawer(ui::ImGuiDrawer* imgui_drawer) {
+  // The window and its drawer exist only after the emulator. Until then,
+  // notifications go to the log and the icon is dropped.
+  void SetWindow(ui::Window* window, ui::ImGuiDrawer* imgui_drawer) {
+    window_.store(window, std::memory_order_release);
     imgui_drawer_.store(imgui_drawer, std::memory_order_release);
   }
 
   void Notify(Notification notification) override;
+  void SetTitleIcon(std::vector<uint8_t> icon) override;
 
  private:
   ui::WindowedAppContext& app_context_;
+  std::atomic<ui::Window*> window_ = nullptr;
   std::atomic<ui::ImGuiDrawer*> imgui_drawer_ = nullptr;
 };
 

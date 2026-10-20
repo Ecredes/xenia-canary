@@ -19,6 +19,8 @@ namespace xe {
 class HeadlessHost : public EmulatorHost {
  public:
   void Notify(Notification notification) override;
+  // Nothing shows it.
+  void SetTitleIcon(std::vector<uint8_t> icon) override {}
 };
 
 }  // namespace xe

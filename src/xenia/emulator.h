@@ -276,7 +276,8 @@ class Emulator {
     X_STATUS installation_result_{};
     std::string installation_error_message_{};
 
-    std::unique_ptr<ui::ImmediateTexture> icon_;
+    // The package's thumbnail, an image file.
+    std::vector<uint8_t> icon_data_;
   };
 
   // Migrates data from content to content/xuid with respect to common data.

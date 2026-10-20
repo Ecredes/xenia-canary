@@ -614,8 +614,9 @@ void EmulatorWindow::ContentInstallDialog::OnDraw(ImGuiIO& io) {
     ImGui::BeginTable(fmt::format("table_{}", entry.name_).c_str(), 2);
     ImGui::TableNextRow(0);
     ImGui::TableSetColumnIndex(0);
-    if (entry.icon_) {
-      ImGui::Image(reinterpret_cast<ImTextureID>(entry.icon_.get()),
+    const auto& icon = icons_[&entry - installation_entries_->data()];
+    if (icon) {
+      ImGui::Image(reinterpret_cast<ImTextureID>(icon.get()),
                    ui::default_image_icon_size);
     } else {
       ImGui::Dummy(ui::default_image_icon_size);

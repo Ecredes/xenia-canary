@@ -557,7 +557,8 @@ bool EmulatorApp::OnInitialize() {
     XELOGE("Failed to create the main emulator window");
     return false;
   }
-  host_->SetImGuiDrawer(emulator_window_->imgui_drawer());
+  host_->SetWindow(emulator_window_->window(),
+                   emulator_window_->imgui_drawer());
 
   // Setup the emulator and run its loop in a separate thread.
   emulator_thread_quit_requested_.store(false, std::memory_order_relaxed);
