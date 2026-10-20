@@ -45,10 +45,11 @@ void ImGuiDialog::Draw() {
     OnDraw(GetIO());
   }
 
-  // Check to see if the UI closed itself and needs to be deleted.
+  // Check to see if the UI closed itself and needs to be deleted. Not yet:
+  // this frame's draw lists may still use what the dialog owns, like textures.
   if (has_close_pending_) {
     OnClose();
-    delete this;
+    imgui_drawer_->DeleteDialogAfterFrame(this);
   }
 }
 

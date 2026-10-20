@@ -49,6 +49,9 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   void AddDialog(ImGuiDialog* dialog);
   void RemoveDialog(ImGuiDialog* dialog);
+  // For a dialog that closed while drawing: deletes it once the frame has been
+  // rendered.
+  void DeleteDialogAfterFrame(ImGuiDialog* dialog);
 
   void AddNotification(ImGuiNotification* notification);
   void RemoveNotification(ImGuiNotification* notification);
@@ -125,6 +128,7 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   bool IsDrawingDialogs() const { return dialog_loop_next_index_ != SIZE_MAX; }
   void DetachIfLastWindowRemoved();
+  void DeleteClosedDialogs();
   void UpdateGamepads();
 
   std::optional<ImGuiKey> VirtualKeyToImGuiKey(VirtualKey vkey);
@@ -138,6 +142,8 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   std::function<void(uint8_t)> onGuidePressFunction_;
   // All currently-attached dialogs that get drawn.
   std::vector<ImGuiDialog*> dialogs_;
+  // Closed this frame, deleted after it's rendered.
+  std::vector<ImGuiDialog*> closed_dialogs_;
 
   // All queued notifications. Notification at index 0 is currently presented
   // one.
