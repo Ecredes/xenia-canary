@@ -49,14 +49,6 @@ class ContentListDialog final : public ui::ImGuiDialog {
     Initialize();
   }
 
-  ~ContentListDialog() {
-    for (auto& type : enumerated_entries_) {
-      for (auto& entry : type.second) {
-        entry.icon.release();
-      }
-    }
-  }
-
  protected:
   void OnDraw(ImGuiIO& io) override;
   void OnCategoryDraw(ImGuiIO& io, const XContentType type,

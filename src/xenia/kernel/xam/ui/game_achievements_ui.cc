@@ -26,11 +26,7 @@ GameAchievementsUI::GameAchievementsUI(xe::ui::ImGuiDrawer* imgui_drawer,
   LoadAchievementsData();
 }
 
-GameAchievementsUI::~GameAchievementsUI() {
-  for (auto& entry : achievements_icons_) {
-    entry.second.release();
-  }
-}
+GameAchievementsUI::~GameAchievementsUI() = default;
 
 bool GameAchievementsUI::LoadAchievementsData() {
   achievements_info_ =

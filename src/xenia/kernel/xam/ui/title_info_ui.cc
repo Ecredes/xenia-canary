@@ -31,11 +31,7 @@ TitleListUI::TitleListUI(xe::ui::ImGuiDrawer* imgui_drawer,
   LoadProfileTitleList(imgui_drawer, profile);
 }
 
-TitleListUI::~TitleListUI() {
-  for (auto& entry : title_icon) {
-    entry.second.release();
-  }
-}
+TitleListUI::~TitleListUI() = default;
 
 void TitleListUI::LoadProfileTitleList(xe::ui::ImGuiDrawer* imgui_drawer,
                                        const UserProfile* profile) {
