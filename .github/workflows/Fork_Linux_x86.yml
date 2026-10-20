@@ -142,6 +142,22 @@ jobs:
           ./xenia-build.py test --config=Release --continue -- \
             "~PhysicalHeap vE0000000 AllocRange alignment"
 
+      # Fork-only: upstream CI never builds the misc tools (GPU trace dump and
+      # viewer, shader compiler, vfs-dump, demos), so changes to the code they
+      # share with the app could break them unnoticed. Compile check only.
+      - name: Build misc tools
+        env:
+          CC: clang-${{ env.LLVM_VERSION }}
+          CXX: clang++-${{ env.LLVM_VERSION }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 2G
+        run: |-
+          export CCACHE_DIR=$HOME/.ccache
+          export LDFLAGS="-fuse-ld=lld -Wl,--thinlto-cache-dir=$HOME/.cache/thinlto"
+          ./xenia-build.py build --config=Release --cmake-define XENIA_BUILD_MISC=ON
+
       # Only entries this build used are kept, and the entries this save
       # replaces are deleted, as in Fork_Windows_x86.yml.
       - name: Trim compiler output

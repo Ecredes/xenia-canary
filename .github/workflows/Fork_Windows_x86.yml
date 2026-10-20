@@ -163,6 +163,19 @@ jobs:
           python xenia-build.py test --config=Release --continue --
           "~PhysicalHeap vE0000000 alignment"
 
+      # Fork-only: upstream CI never builds the misc tools (GPU trace dump and
+      # viewer, shader compiler, vfs-dump, demos), so changes to the code they
+      # share with the app could break them unnoticed. Compile check only.
+      - name: Build misc tools
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_DIR: C:\ccache
+          CCACHE_MAXSIZE: 2G
+        run: >-
+          python xenia-build.py build --config=Release
+          --cmake-define XENIA_BUILD_MISC=ON
+
       # Only entries this build used are kept, so the cache doesn't grow with
       # every upstream change, and the entries it replaces are deleted to stay
       # under the repository's 10 GB cache limit.
