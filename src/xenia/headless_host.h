@@ -26,6 +26,8 @@ class HeadlessHost : public EmulatorHost {
   void RequestDiscImage(
       std::string prompt,
       std::function<void(std::filesystem::path)> done) override;
+  // Ends the process with HeadlessExitCode.
+  void RequestLifecycle(LifecycleRequest request) override;
 };
 
 }  // namespace xe

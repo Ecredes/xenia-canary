@@ -11,7 +11,6 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
-#include "xenia/config.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
@@ -26,10 +25,6 @@
 #include "xenia/kernel/xconfig.h"
 #include "xenia/kernel/xenumerator.h"
 #include "xenia/kernel/xthread.h"
-#include "xenia/ui/imgui_dialog.h"
-#include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/window.h"
-#include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
 
 #include "third_party/fmt/include/fmt/format.h"
@@ -485,44 +480,19 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
   auto& loader_data = xam->loader_data();
   loader_data.launch_flags = flags;
 
-  std::string title;
-  std::string message;
+  LifecycleRequest::Kind kind;
 
   // Translate the launch path to a full path.
   if (raw_name_ptr && !raw_name_ptr.value().empty()) {
     loader_data.launch_path = xe::path_to_utf8(raw_name_ptr.value());
     xam->SaveLoaderData();
-    title = "Title was restarted";
-    message =
-        "Title closed with new launch data. \nPlease restart Xenia. "
-        "Game will be loaded automatically.";
+    kind = LifecycleRequest::Kind::kRelaunch;
   } else {
-    title = "Title terminated";
-    message = "Game requested exit to dashboard.";
+    kind = LifecycleRequest::Kind::kTerminate;
     assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
   }
 
-  auto display_window = kernel_state()->emulator()->display_window();
-  auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();
-
-  if (display_window && imgui_drawer) {
-    display_window->app_context().CallInUIThreadSynchronous(
-        [imgui_drawer, title, message]() {
-          auto dialog = xe::ui::ImGuiDialog::ShowMessageBox(
-              imgui_drawer, title.c_str(), message.c_str());
-
-          std::jthread([dialog]() {
-            while (!dialog->IsClosing()) {
-              std::this_thread::yield();
-            }
-
-            config::SaveConfig();
-            xe::FlushLog();
-
-            std::quick_exit(0);
-          }).detach();
-        });
-  }
+  kernel_state()->emulator()->host().RequestLifecycle({kind});
 
   // This function does not return.
   kernel_state()->TerminateTitle();
@@ -530,31 +500,10 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
 DECLARE_XAM_EXPORT1(XamLoaderLaunchTitle, kNone, kSketchy);
 
 void XamLoaderTerminateTitle_entry() {
-  std::string title = "Title terminated";
-  std::string message = "Game requested exit to dashboard.";
   assert_always("Game requested exit to dashboard via XamLoaderTerminateTitle");
 
-  auto display_window = kernel_state()->emulator()->display_window();
-  auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();
-
-  if (display_window && imgui_drawer) {
-    display_window->app_context().CallInUIThreadSynchronous(
-        [imgui_drawer, title, message]() {
-          auto dialog = xe::ui::ImGuiDialog::ShowMessageBox(
-              imgui_drawer, title.c_str(), message.c_str());
-
-          std::jthread([dialog]() {
-            while (!dialog->IsClosing()) {
-              std::this_thread::yield();
-            }
-
-            config::SaveConfig();
-            xe::FlushLog();
-
-            std::quick_exit(0);
-          }).detach();
-        });
-  }
+  kernel_state()->emulator()->host().RequestLifecycle(
+      {LifecycleRequest::Kind::kTerminate});
 
   // This function does not return.
   kernel_state()->TerminateTitle();

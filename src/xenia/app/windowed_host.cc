@@ -9,9 +9,14 @@
 
 #include "xenia/app/windowed_host.h"
 
+#include <cstdlib>
+#include <memory>
+#include <thread>
 #include <utility>
 
 #include "xenia/base/logging.h"
+#include "xenia/base/threading.h"
+#include "xenia/config.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_guest_notification.h"
@@ -34,6 +39,32 @@ void ShowNotification(ui::ImGuiDrawer* imgui_drawer,
     new NotificationWindow(imgui_drawer, notification.title,
                            notification.description, notification.user_index);
   }
+}
+
+// What the user is told when the title ends itself, and whether the process
+// then exits.
+struct LifecycleNotice {
+  const char* title;
+  const char* message;
+  bool exit_when_closed;
+};
+
+LifecycleNotice GetLifecycleNotice(LifecycleRequest::Kind kind) {
+  switch (kind) {
+    case LifecycleRequest::Kind::kRelaunch:
+      return {"Title was restarted",
+              "Title closed with new launch data. \nPlease restart Xenia. "
+              "Game will be loaded automatically.",
+              true};
+    case LifecycleRequest::Kind::kTerminate:
+      return {"Title terminated", "Game requested exit to dashboard.", true};
+    case LifecycleRequest::Kind::kLaunchContent:
+      return {"Launching new title!",
+              "Launching new title. \nPlease close Xenia and launch it "
+              "again. Game should load automatically.",
+              false};
+  }
+  return {"Title terminated", "", true};
 }
 
 }  // namespace
@@ -82,6 +113,31 @@ void WindowedHost::ReportError(ErrorReport report) {
   }
   app_context_.CallInUIThread([imgui_drawer, report = std::move(report)]() {
     ui::ImGuiDialog::ShowMessageBox(imgui_drawer, report.title, report.message);
+  });
+}
+
+void WindowedHost::RequestLifecycle(LifecycleRequest request) {
+  LifecycleNotice notice = GetLifecycleNotice(request.kind);
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    XELOGI("{}: {}", notice.title, notice.message);
+    return;
+  }
+  app_context_.CallInUIThread([imgui_drawer, notice]() {
+    ui::ImGuiDialog* dialog = ui::ImGuiDialog::ShowMessageBox(
+        imgui_drawer, notice.title, notice.message);
+    if (!notice.exit_when_closed) {
+      return;
+    }
+    // Signaled when the dialog is destroyed after closing.
+    auto closed = std::make_shared<xe::threading::Fence>();
+    dialog->Then(closed.get());
+    std::thread([closed]() {
+      closed->Wait();
+      config::SaveConfig();
+      xe::FlushLog();
+      std::quick_exit(EXIT_SUCCESS);
+    }).detach();
   });
 }
 

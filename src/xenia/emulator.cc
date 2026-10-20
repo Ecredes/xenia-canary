@@ -1535,17 +1535,8 @@ static std::string format_version(xex2_version version) {
 
 X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
-  // Making changes to the UI (setting the icon) and executing game config
-  // load callbacks which expect to be called from the UI thread.
-  // If not on UI thread, dispatch to it synchronously.
-  if (!display_window_->app_context().IsInUIThread()) {
-    X_STATUS result = X_STATUS_UNSUCCESSFUL;
-    display_window_->app_context().CallInUIThreadSynchronous(
-        [this, &path, &module_path, &result]() {
-          result = CompleteLaunch(path, module_path);
-        });
-    return result;
-  }
+  // Runs on the launching thread. Game config load callbacks run here too, so
+  // an app whose callbacks need its UI thread launches from it.
 
   // Setup NullDevices for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these

@@ -21,8 +21,6 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xenumerator.h"
-#include "xenia/ui/imgui_dialog.h"
-#include "xenia/ui/imgui_drawer.h"
 #include "xenia/vfs/devices/stfs_xbox.h"
 #include "xenia/xbox.h"
 
@@ -882,17 +880,8 @@ dword_result_t xeXamContentLaunchImage(dword_t user_index,
 
   xam->SaveLoaderData();
 
-  auto display_window = kernel_state()->emulator()->display_window();
-  auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();
-
-  if (display_window && imgui_drawer) {
-    display_window->app_context().CallInUIThreadSynchronous([imgui_drawer]() {
-      xe::ui::ImGuiDialog::ShowMessageBox(
-          imgui_drawer, "Launching new title!",
-          "Launching new title. \nPlease close Xenia and launch it again. Game "
-          "should load automatically.");
-    });
-  }
+  kernel_state()->emulator()->host().RequestLifecycle(
+      {LifecycleRequest::Kind::kLaunchContent});
 
   kernel_state()->TerminateTitle();
   return X_ERROR_SUCCESS;

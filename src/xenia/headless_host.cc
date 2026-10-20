@@ -9,7 +9,10 @@
 
 #include "xenia/headless_host.h"
 
+#include <cstdlib>
+
 #include "xenia/base/logging.h"
+#include "xenia/headless_policy.h"
 
 namespace xe {
 
@@ -27,6 +30,13 @@ void HeadlessHost::RequestDiscImage(
     std::string prompt, std::function<void(std::filesystem::path)> done) {
   XELOGW("No disc image to swap in without a UI: {}", prompt);
   done({});
+}
+
+void HeadlessHost::RequestLifecycle(LifecycleRequest request) {
+  int exit_code = HeadlessExitCode(request);
+  XELOGI("The title ended itself, exiting with {}", exit_code);
+  xe::FlushLog();
+  std::quick_exit(exit_code);
 }
 
 }  // namespace xe

@@ -42,6 +42,20 @@ struct ErrorReport {
   std::string message;
 };
 
+// The title ending itself; the host decides how the process goes on.
+struct LifecycleRequest {
+  enum class Kind {
+    // XamLoaderLaunchTitle with a path: run again with the saved launch data.
+    kRelaunch,
+    // Back to the dashboard: XamLoaderTerminateTitle, or XamLoaderLaunchTitle
+    // without a path.
+    kTerminate,
+    // A content package launched as a new title, from the saved launch data.
+    kLaunchContent,
+  };
+  Kind kind;
+};
+
 // What the emulator needs from whatever runs it: the windowed UI, a runner
 // without a window, or a test. The emulator speaks to it in plain data and
 // never touches windows or UI itself. All methods may be called from any
@@ -59,6 +73,8 @@ class EmulatorHost {
   // empty one for none, on any thread.
   virtual void RequestDiscImage(
       std::string prompt, std::function<void(std::filesystem::path)> done) = 0;
+  // The title then terminates; the host may end the process.
+  virtual void RequestLifecycle(LifecycleRequest request) = 0;
 };
 
 }  // namespace xe

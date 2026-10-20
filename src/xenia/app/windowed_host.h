@@ -40,6 +40,9 @@ class WindowedHost : public EmulatorHost {
   void RequestDiscImage(
       std::string prompt,
       std::function<void(std::filesystem::path)> done) override;
+  // Tells the user, then exits for a relaunch or termination once they close
+  // the notice, saving the config.
+  void RequestLifecycle(LifecycleRequest request) override;
 
  private:
   ui::WindowedAppContext& app_context_;
