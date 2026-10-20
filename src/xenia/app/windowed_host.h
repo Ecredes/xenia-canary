@@ -50,6 +50,9 @@ class WindowedHost : public EmulatorHost {
   void RequestPasscode(PasscodeRequest request,
                        std::function<void(PasscodeAnswer)> done) override;
   void RequestProfileCreation(std::function<void()> done) override;
+  void ShowAchievements(uint64_t xuid, uint32_t title_id,
+                        std::function<void()> done) override;
+  void ShowGamercard(uint64_t xuid, std::function<void()> done) override;
   // Tells the user, then exits for a relaunch or termination once they close
   // the notice, saving the config.
   void RequestLifecycle(LifecycleRequest request) override;

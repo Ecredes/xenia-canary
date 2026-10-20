@@ -34,11 +34,15 @@ class HeadlessHost : public EmulatorHost {
       TextRequest request,
       std::function<void(std::optional<std::string> text)> done) override;
   // Answers with HeadlessSignIn, HeadlessPasscode, and creates no profile.
+  // Shows nothing.
   void RequestSignIn(SignInRequest request,
                      std::function<void(SignInAnswer)> done) override;
   void RequestPasscode(PasscodeRequest request,
                        std::function<void(PasscodeAnswer)> done) override;
   void RequestProfileCreation(std::function<void()> done) override;
+  void ShowAchievements(uint64_t xuid, uint32_t title_id,
+                        std::function<void()> done) override;
+  void ShowGamercard(uint64_t xuid, std::function<void()> done) override;
   // Ends the process with HeadlessExitCode.
   void RequestLifecycle(LifecycleRequest request) override;
 };

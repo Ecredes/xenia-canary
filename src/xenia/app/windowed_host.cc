@@ -21,8 +21,11 @@
 #include "xenia/config.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
+#include "xenia/kernel/xam/ui/game_achievements_ui.h"
+#include "xenia/kernel/xam/ui/gamercard_ui.h"
 #include "xenia/kernel/xam/ui/passcode_ui.h"
 #include "xenia/kernel/xam/ui/signin_ui.h"
+#include "xenia/kernel/xam/user_tracker.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_guest_notification.h"
@@ -199,6 +202,54 @@ void WindowedHost::RequestProfileCreation(std::function<void()> done) {
         imgui_drawer, kernel::kernel_state()->emulator());
     dialog->set_close_callback(done);
   });
+  if (!queued) {
+    done();
+  }
+}
+
+void WindowedHost::ShowAchievements(uint64_t xuid, uint32_t title_id,
+                                    std::function<void()> done) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    done();
+    return;
+  }
+  bool queued =
+      app_context_.CallInUIThread([imgui_drawer, xuid, title_id, done]() {
+        // The profile may have signed out since it was asked for.
+        auto xam_state = kernel::kernel_state()->xam_state();
+        const kernel::xam::UserProfile* profile =
+            xam_state->GetUserProfile(xuid);
+        std::optional<kernel::xam::TitleInfo> info;
+        if (profile) {
+          info = xam_state->user_tracker()->GetUserTitleInfo(xuid, title_id);
+        }
+        if (!info) {
+          done();
+          return;
+        }
+        auto dialog = new kernel::xam::ui::GameAchievementsUI(
+            imgui_drawer, ImVec2(100.f, 100.f), &info.value(), profile);
+        dialog->set_close_callback(done);
+      });
+  if (!queued) {
+    done();
+  }
+}
+
+void WindowedHost::ShowGamercard(uint64_t xuid, std::function<void()> done) {
+  ui::Window* window = window_.load(std::memory_order_acquire);
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!window || !imgui_drawer) {
+    done();
+    return;
+  }
+  bool queued =
+      app_context_.CallInUIThread([window, imgui_drawer, xuid, done]() {
+        auto dialog = new kernel::xam::ui::GamercardUI(
+            window, imgui_drawer, kernel::kernel_state(), xuid);
+        dialog->set_close_callback(done);
+      });
   if (!queued) {
     done();
   }

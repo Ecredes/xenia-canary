@@ -23,10 +23,6 @@
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 
-#include "xenia/kernel/xam/ui/game_achievements_ui.h"
-#include "xenia/kernel/xam/ui/gamercard_ui.h"
-#include "xenia/kernel/xam/ui/title_info_ui.h"
-
 DEFINE_bool(storage_selection_dialog, false,
             "Show storage device selection dialog when the game requests it.",
             "UI");
@@ -215,30 +211,6 @@ X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
                                                post);
     return X_ERROR_IO_PENDING;
   }
-}
-
-template <typename T>
-X_RESULT xeXamDispatchDialogAsync(T* dialog,
-                                  std::function<void(T*)> close_callback) {
-  kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
-  // Important to pass captured vars by value here since we return from this
-  // without waiting for the dialog to close so the original local vars will be
-  // destroyed.
-  dialog->set_close_callback([dialog, close_callback]() {
-    close_callback(dialog);
-
-    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-
-    auto run = []() -> void {
-      xe::threading::Sleep(kUIDelayMillis);
-      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
-    };
-
-    std::thread thread(run);
-    thread.detach();
-  });
-
-  return X_ERROR_SUCCESS;
 }
 
 static dword_result_t XamShowMessageBoxUi(
@@ -896,16 +868,24 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
     return X_ERROR_NO_SUCH_USER;
   }
 
-  xe::ui::ImGuiDrawer* imgui_drawer =
-      kernel_state()->emulator()->imgui_drawer();
-
-  auto close = [](ui::GameAchievementsUI* dialog) -> void {};
-  return xeXamDispatchDialogAsync<ui::GameAchievementsUI>(
-      new ui::GameAchievementsUI(imgui_drawer, ImVec2(100.f, 100.f),
-                                 &info.value(), user),
-      close);
+  return xeXamShowDialogAsync<bool>(
+      [xuid = user->xuid(), proper_title_id](std::function<void(bool)> done) {
+        kernel_state()->emulator()->host().ShowAchievements(
+            xuid, proper_title_id, [done]() { done(true); });
+      },
+      [](bool) {});
 }
 DECLARE_XAM_EXPORT1(XamShowAchievementsUI, kUserProfiles, kStub);
+
+// Both the gamercard and its editor show the editable gamercard.
+X_RESULT xeXamShowGamercard(uint64_t xuid) {
+  return xeXamShowDialogAsync<bool>(
+      [xuid](std::function<void(bool)> done) {
+        kernel_state()->emulator()->host().ShowGamercard(
+            xuid, [done]() { done(true); });
+      },
+      [](bool) {});
+}
 
 dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
   auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
@@ -913,14 +893,7 @@ dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
     return X_ERROR_ACCESS_DENIED;
   }
 
-  xe::ui::ImGuiDrawer* imgui_drawer =
-      kernel_state()->emulator()->imgui_drawer();
-
-  auto close = [](ui::GamercardUI* dialog) -> void {};
-  return xeXamDispatchDialogAsync<ui::GamercardUI>(
-      new ui::GamercardUI(kernel_state()->emulator()->display_window(),
-                          imgui_drawer, kernel_state(), user->xuid()),
-      close);
+  return xeXamShowGamercard(user->xuid());
 }
 DECLARE_XAM_EXPORT1(XamShowGamerCardUI, kUserProfiles, kImplemented);
 
@@ -930,14 +903,7 @@ dword_result_t XamShowEditProfileUI_entry(dword_t user_index) {
     return X_ERROR_ACCESS_DENIED;
   }
 
-  xe::ui::ImGuiDrawer* imgui_drawer =
-      kernel_state()->emulator()->imgui_drawer();
-
-  auto close = [](ui::GamercardUI* dialog) -> void {};
-  return xeXamDispatchDialogAsync<ui::GamercardUI>(
-      new ui::GamercardUI(kernel_state()->emulator()->display_window(),
-                          imgui_drawer, kernel_state(), user->xuid()),
-      close);
+  return xeXamShowGamercard(user->xuid());
 }
 DECLARE_XAM_EXPORT1(XamShowEditProfileUI, kUserProfiles, kImplemented);
 

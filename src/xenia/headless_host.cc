@@ -67,6 +67,18 @@ void HeadlessHost::RequestProfileCreation(std::function<void()> done) {
   done();
 }
 
+void HeadlessHost::ShowAchievements(uint64_t xuid, uint32_t title_id,
+                                    std::function<void()> done) {
+  XELOGI("Achievements of {:016X} in {:08X} not shown without a UI", xuid,
+         title_id);
+  done();
+}
+
+void HeadlessHost::ShowGamercard(uint64_t xuid, std::function<void()> done) {
+  XELOGI("Gamercard of {:016X} not shown without a UI", xuid);
+  done();
+}
+
 void HeadlessHost::RequestLifecycle(LifecycleRequest request) {
   int exit_code = HeadlessExitCode(request);
   XELOGI("The title ended itself, exiting with {}", exit_code);

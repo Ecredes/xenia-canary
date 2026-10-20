@@ -133,6 +133,13 @@ class EmulatorHost {
   // Lets the user create a profile; creating it is the host's own business.
   // done is called once the user is done, on any thread.
   virtual void RequestProfileCreation(std::function<void()> done) = 0;
+  // Shows a signed-in profile's achievements in a title. done is called once
+  // the user is done, on any thread.
+  virtual void ShowAchievements(uint64_t xuid, uint32_t title_id,
+                                std::function<void()> done) = 0;
+  // Shows a signed-in profile's gamercard, which the user may edit. done is
+  // called once the user is done, on any thread.
+  virtual void ShowGamercard(uint64_t xuid, std::function<void()> done) = 0;
   // The title then terminates; the host may end the process.
   virtual void RequestLifecycle(LifecycleRequest request) = 0;
 };
