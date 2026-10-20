@@ -16,6 +16,7 @@
 
 #include "xenia/app/discord/discord_presence.h"
 #include "xenia/app/emulator_window.h"
+#include "xenia/app/first_run_disclaimer.h"
 #include "xenia/app/windowed_host.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -543,6 +544,8 @@ bool EmulatorApp::OnInitialize() {
     discord::DiscordPresence::Initialize();
     discord::DiscordPresence::NotPlaying();
   }
+
+  ShowFirstRunDisclaimer();
 
   // Create the emulator but don't initialize so we can setup the window.
   host_ = std::make_unique<WindowedHost>(app_context());
