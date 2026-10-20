@@ -49,8 +49,6 @@
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
-#include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/device.h"
 #include "xenia/vfs/devices/disc_image_device.h"
@@ -119,7 +117,6 @@ Emulator::Emulator(EmulatorHost& host,
       cache_root_(cache_root),
       title_name_(),
       title_version_(),
-      display_window_(nullptr),
       host_(host),
       memory_(),
       audio_system_(),
@@ -170,18 +167,15 @@ Emulator::~Emulator() {
 }
 
 X_STATUS Emulator::Setup(
-    ui::Window* display_window, ui::ImGuiDrawer* imgui_drawer,
-    bool require_cpu_backend, bool with_presentation,
+    ui::WindowedAppContext* app_context, bool require_cpu_backend,
+    bool with_presentation,
     std::function<std::unique_ptr<apu::AudioSystem>(cpu::Processor*)>
         audio_system_factory,
     std::function<std::unique_ptr<gpu::GraphicsSystem>()>
         graphics_system_factory,
-    std::function<std::vector<std::unique_ptr<hid::InputDriver>>(ui::Window*)>
+    std::function<std::vector<std::unique_ptr<hid::InputDriver>>()>
         input_driver_factory) {
   X_STATUS result = X_STATUS_UNSUCCESSFUL;
-
-  display_window_ = display_window;
-  imgui_drawer_ = imgui_drawer;
 
   // Initialize clock.
   // 360 uses a 50MHz clock.
@@ -259,13 +253,13 @@ X_STATUS Emulator::Setup(
 
   XELOGI("{}: Initializing HID...", __func__);
   // Initialize the HID.
-  input_system_ = std::make_unique<xe::hid::InputSystem>(display_window_);
+  input_system_ = std::make_unique<xe::hid::InputSystem>();
   if (!input_system_) {
     XELOGE("{}: Cannot initalize input_system!", __func__);
     return X_STATUS_NOT_IMPLEMENTED;
   }
   if (input_driver_factory) {
-    auto input_drivers = input_driver_factory(display_window_);
+    auto input_drivers = input_driver_factory();
     for (size_t i = 0; i < input_drivers.size(); ++i) {
       input_system_->AddDriver(std::move(input_drivers[i]));
     }
@@ -274,12 +268,6 @@ X_STATUS Emulator::Setup(
   result = input_system_->Setup();
   if (result) {
     return result;
-  }
-
-  // Add inputSystem to UI. Headless users such as the trace dumpers don't
-  // provide an ImGui drawer.
-  if (imgui_drawer_) {
-    imgui_drawer_->LoadInputSystem(input_system_.get());
   }
 
   XELOGI("{}: Initializing VFS...", __func__);
@@ -307,10 +295,8 @@ X_STATUS Emulator::Setup(
 
   XELOGI("{}: Starting graphics_system...", __func__);
   // Setup the core components.
-  result = graphics_system_->Setup(
-      processor_.get(), kernel_state_.get(),
-      display_window_ ? &display_window_->app_context() : nullptr,
-      with_presentation);
+  result = graphics_system_->Setup(processor_.get(), kernel_state_.get(),
+                                   app_context, with_presentation);
   if (result) {
     XELOGE("{}: Failed to setup graphics_system!", __func__);
     return result;
@@ -1393,9 +1379,7 @@ void Emulator::WaitUntilExit() {
 
 void Emulator::AddGameConfigLoadCallback(GameConfigLoadCallback* callback) {
   assert_not_null(callback);
-  // Game config load callbacks handling is entirely in the UI thread.
-  assert_true(!display_window_ ||
-              display_window_->app_context().IsInUIThread());
+  // Only on the thread that launches titles, which calls the callbacks.
   // Check if already added.
   if (std::ranges::find(std::as_const(game_config_load_callbacks_), callback) !=
       game_config_load_callbacks_.cend()) {
@@ -1406,9 +1390,7 @@ void Emulator::AddGameConfigLoadCallback(GameConfigLoadCallback* callback) {
 
 void Emulator::RemoveGameConfigLoadCallback(GameConfigLoadCallback* callback) {
   assert_not_null(callback);
-  // Game config load callbacks handling is entirely in the UI thread.
-  assert_true(!display_window_ ||
-              display_window_->app_context().IsInUIThread());
+  // Only on the thread that launches titles, which calls the callbacks.
   auto it =
       std::ranges::find(std::as_const(game_config_load_callbacks_), callback);
   if (it == game_config_load_callbacks_.cend()) {

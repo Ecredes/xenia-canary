@@ -111,7 +111,7 @@ bool TraceDump::Setup() {
   emulator_ = std::make_unique<Emulator>(host_, "", "", "", "");
   // Presentation is needed without a window to capture the guest output.
   X_STATUS result = emulator_->Setup(
-      nullptr, nullptr, false, true, nullptr,
+      nullptr, false, true, nullptr,
       [this]() { return CreateGraphicsSystem(); }, nullptr);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);

@@ -204,7 +204,7 @@ bool HidDemoApp::OnInitialize() {
   }
 
   // Initialize input system and all drivers.
-  input_system_ = std::make_unique<xe::hid::InputSystem>(window_.get());
+  input_system_ = std::make_unique<xe::hid::InputSystem>();
   auto drivers = CreateInputDrivers(window_.get());
   for (size_t i = 0; i < drivers.size(); ++i) {
     auto& driver = drivers[i];

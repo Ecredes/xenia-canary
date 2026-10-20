@@ -49,8 +49,7 @@ class InputDriver;
 class InputSystem;
 }  // namespace hid
 namespace ui {
-class ImGuiDrawer;
-class Window;
+class WindowedAppContext;
 }  // namespace ui
 }  // namespace xe
 
@@ -135,11 +134,9 @@ class Emulator {
   bool is_title_open() const { return title_id_.has_value(); }
 
   // Window used for displaying graphical output. Can be null.
-  ui::Window* display_window() const { return display_window_; }
 
   // ImGui drawer for various kinds of dialogs requested by the guest. Can be
   // null.
-  ui::ImGuiDrawer* imgui_drawer() const { return imgui_drawer_; }
 
   // Guest memory system modelling the RAM (both virtual and physical) of the
   // system.
@@ -184,18 +181,20 @@ class Emulator {
     return game_info_database_.get();
   }
   // Initializes the emulator and configures all components.
-  // The given window is used for display and the provided functions are used
-  // to create subsystems as required.
+  // The presenter is created on app_context's UI thread if given, for an app
+  // that paints guest output into a window; without one it's created here,
+  // for offscreen use. The provided functions are used to create subsystems
+  // as required.
   // Once this function returns a game can be launched using one of the Launch
   // functions.
   X_STATUS Setup(
-      ui::Window* display_window, ui::ImGuiDrawer* imgui_drawer,
-      bool require_cpu_backend, bool with_presentation,
+      ui::WindowedAppContext* app_context, bool require_cpu_backend,
+      bool with_presentation,
       std::function<std::unique_ptr<apu::AudioSystem>(cpu::Processor*)>
           audio_system_factory,
       std::function<std::unique_ptr<gpu::GraphicsSystem>()>
           graphics_system_factory,
-      std::function<std::vector<std::unique_ptr<hid::InputDriver>>(ui::Window*)>
+      std::function<std::vector<std::unique_ptr<hid::InputDriver>>()>
           input_driver_factory);
 
   // Terminates the currently running title.
@@ -346,8 +345,6 @@ class Emulator {
   std::string title_name_;
   std::string title_version_;
 
-  ui::Window* display_window_ = nullptr;
-  ui::ImGuiDrawer* imgui_drawer_ = nullptr;
   EmulatorHost& host_;
 
   std::unique_ptr<Memory> memory_;

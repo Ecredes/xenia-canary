@@ -258,6 +258,9 @@ void EmulatorWindow::ShutdownGraphicsSystemPresenterPainting() {
 }
 
 void EmulatorWindow::OnEmulatorInitialized() {
+  // The overlay shows controller state.
+  imgui_drawer_->LoadInputSystem(emulator_->input_system());
+
   if (!emulator_->kernel_state()
            ->xam_state()
            ->profile_manager()

@@ -654,10 +654,11 @@ void EmulatorApp::EmulatorThread() {
 
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.
-  X_STATUS result = emulator_->Setup(
-      emulator_window_ ? emulator_window_->window() : nullptr,
-      emulator_window_ ? emulator_window_->imgui_drawer() : nullptr, true, true,
-      CreateAudioSystem, CreateGraphicsSystem, CreateInputDrivers);
+  ui::Window* window = emulator_window_ ? emulator_window_->window() : nullptr;
+  X_STATUS result =
+      emulator_->Setup(emulator_window_ ? &app_context() : nullptr, true, true,
+                       CreateAudioSystem, CreateGraphicsSystem,
+                       [window]() { return CreateInputDrivers(window); });
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     exit_code_ = EXIT_FAILURE;

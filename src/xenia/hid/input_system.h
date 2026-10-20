@@ -30,10 +30,8 @@ namespace hid {
 
 class InputSystem {
  public:
-  explicit InputSystem(xe::ui::Window* window);
+  InputSystem();
   ~InputSystem();
-
-  xe::ui::Window* window() const { return window_; }
 
   X_STATUS Setup();
 
@@ -72,8 +70,6 @@ class InputSystem {
   X_INPUT_VIBRATION ModifyVibrationLevel(X_INPUT_VIBRATION* vibration);
 
   std::vector<InputDriver*> FilterDrivers(uint32_t flags);
-
-  xe::ui::Window* window_ = nullptr;
 
   std::vector<std::unique_ptr<InputDriver>> drivers_;
 

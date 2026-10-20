@@ -32,7 +32,7 @@ DEFINE_double(
     right_stick_deadzone_percentage, 0.0,
     "Defines deadzone level for right stick. Allowed range [0.0-1.0].", "HID");
 
-InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
+InputSystem::InputSystem() {
 #ifdef XE_PLATFORM_WIN32
   portal_ = std::make_unique<HardwarePortal>();
 #endif  // XE_PLATFORM_WIN32
