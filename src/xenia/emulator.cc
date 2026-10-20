@@ -31,6 +31,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
+#include "xenia/base/threading.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
@@ -48,8 +49,6 @@
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
-#include "xenia/ui/file_picker.h"
-#include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
@@ -1331,45 +1330,15 @@ bool Emulator::RestoreFromFile(const std::filesystem::path& path) {
 
 const std::filesystem::path Emulator::GetNewDiscPath(
     std::string window_message) {
-  // GTK only allows widgets to be built on the UI thread, and XamSwapDisc
-  // calls this from a guest thread.
-  ui::Window* window = display_window();
-  if (window && !window->app_context().IsInUIThread()) {
-    std::filesystem::path path;
-    if (!window->app_context().CallInUIThreadSynchronous(
-            [this, &window_message, &path]() {
-              path = ShowDiscPicker(window_message);
-            })) {
-      return std::filesystem::path();
-    }
-    return path;
-  }
-  return ShowDiscPicker(window_message);
-}
-
-const std::filesystem::path Emulator::ShowDiscPicker(
-    std::string window_message) {
-  std::filesystem::path path = "";
-
-  auto file_picker = xe::ui::FilePicker::Create();
-  file_picker->set_mode(ui::FilePicker::Mode::kOpen);
-  file_picker->set_type(ui::FilePicker::Type::kFile);
-  file_picker->set_multi_selection(false);
-  file_picker->set_title(!window_message.empty() ? window_message
-                                                 : "Select Content Package");
-  file_picker->set_extensions({
-      {"Supported Files", "*.iso;*.xex;*.xcp;*.*"},
-      {"Disc Image (*.iso)", "*.iso"},
-      {"Xbox Executable (*.xex)", "*.xex"},
-      {"All Files (*.*)", "*.*"},
-  });
-
-  if (file_picker->Show()) {
-    auto selected_files = file_picker->selected_files();
-    if (!selected_files.empty()) {
-      path = selected_files[0];
-    }
-  }
+  // XamSwapDisc waits for the choice on a guest thread.
+  std::filesystem::path path;
+  xe::threading::Fence fence;
+  host_.RequestDiscImage(std::move(window_message),
+                         [&path, &fence](std::filesystem::path chosen) {
+                           path = std::move(chosen);
+                           fence.Signal();
+                         });
+  fence.Wait();
   return path;
 }
 
@@ -1459,13 +1428,8 @@ bool Emulator::ExceptionCallback(Exception* ex) {
       "Xenia has now paused itself.\n\n"
       "{}",
       crash_msg);
-  // Display a dialog telling the user the guest has crashed.
-  if (display_window_ && imgui_drawer_) {
-    display_window_->app_context().CallInUIThreadSynchronous([this,
-                                                              &crash_dlg]() {
-      xe::ui::ImGuiDialog::ShowMessageBox(imgui_drawer_, "Uh-oh!", crash_dlg);
-    });
-  }
+  // Tell the user the guest has crashed.
+  host_.ReportError({"Uh-oh!", std::move(crash_dlg)});
 
   // Now suspend ourself (we should be a guest thread).
   current_thread->Suspend(nullptr);

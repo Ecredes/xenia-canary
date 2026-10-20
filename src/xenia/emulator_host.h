@@ -11,6 +11,8 @@
 #define XENIA_EMULATOR_HOST_H_
 
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -34,6 +36,12 @@ struct Notification {
   std::optional<uint8_t> position_id;
 };
 
+// An error the user should see, e.g. the title crashing.
+struct ErrorReport {
+  std::string title;
+  std::string message;
+};
+
 // What the emulator needs from whatever runs it: the windowed UI, a runner
 // without a window, or a test. The emulator speaks to it in plain data and
 // never touches windows or UI itself. All methods may be called from any
@@ -46,6 +54,11 @@ class EmulatorHost {
   // The running title's icon (an image file, as the title provides it), or
   // none when empty.
   virtual void SetTitleIcon(std::vector<uint8_t> icon) = 0;
+  virtual void ReportError(ErrorReport report) = 0;
+  // Asks for a disc image to swap in. done receives the chosen path, or an
+  // empty one for none, on any thread.
+  virtual void RequestDiscImage(
+      std::string prompt, std::function<void(std::filesystem::path)> done) = 0;
 };
 
 }  // namespace xe

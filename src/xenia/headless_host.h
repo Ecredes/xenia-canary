@@ -21,6 +21,11 @@ class HeadlessHost : public EmulatorHost {
   void Notify(Notification notification) override;
   // Nothing shows it.
   void SetTitleIcon(std::vector<uint8_t> icon) override {}
+  void ReportError(ErrorReport report) override;
+  // No one to choose one: no disc.
+  void RequestDiscImage(
+      std::string prompt,
+      std::function<void(std::filesystem::path)> done) override;
 };
 
 }  // namespace xe

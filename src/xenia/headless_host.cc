@@ -19,4 +19,14 @@ void HeadlessHost::Notify(Notification notification) {
          notification.description);
 }
 
+void HeadlessHost::ReportError(ErrorReport report) {
+  XELOGE("{}: {}", report.title, report.message);
+}
+
+void HeadlessHost::RequestDiscImage(
+    std::string prompt, std::function<void(std::filesystem::path)> done) {
+  XELOGW("No disc image to swap in without a UI: {}", prompt);
+  done({});
+}
+
 }  // namespace xe

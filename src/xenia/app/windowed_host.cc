@@ -12,6 +12,8 @@
 #include <utility>
 
 #include "xenia/base/logging.h"
+#include "xenia/ui/file_picker.h"
+#include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_guest_notification.h"
 #include "xenia/ui/imgui_host_notification.h"
 
@@ -70,6 +72,47 @@ void WindowedHost::SetTitleIcon(std::vector<uint8_t> icon) {
   app_context_.CallInUIThread([window, icon = std::move(icon)]() {
     window->SetIcon(icon.empty() ? nullptr : icon.data(), icon.size());
   });
+}
+
+void WindowedHost::ReportError(ErrorReport report) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    XELOGE("{}: {}", report.title, report.message);
+    return;
+  }
+  app_context_.CallInUIThread([imgui_drawer, report = std::move(report)]() {
+    ui::ImGuiDialog::ShowMessageBox(imgui_drawer, report.title, report.message);
+  });
+}
+
+void WindowedHost::RequestDiscImage(
+    std::string prompt, std::function<void(std::filesystem::path)> done) {
+  // GTK only allows widgets to be built on the UI thread, and XamSwapDisc asks
+  // from a guest thread.
+  bool queued = app_context_.CallInUIThread([prompt, done]() {
+    auto file_picker = ui::FilePicker::Create();
+    file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+    file_picker->set_type(ui::FilePicker::Type::kFile);
+    file_picker->set_multi_selection(false);
+    file_picker->set_title(!prompt.empty() ? prompt : "Select Content Package");
+    file_picker->set_extensions({
+        {"Supported Files", "*.iso;*.xex;*.xcp;*.*"},
+        {"Disc Image (*.iso)", "*.iso"},
+        {"Xbox Executable (*.xex)", "*.xex"},
+        {"All Files (*.*)", "*.*"},
+    });
+    std::filesystem::path path;
+    if (file_picker->Show()) {
+      auto selected_files = file_picker->selected_files();
+      if (!selected_files.empty()) {
+        path = selected_files[0];
+      }
+    }
+    done(std::move(path));
+  });
+  if (!queued) {
+    done({});
+  }
 }
 
 }  // namespace app

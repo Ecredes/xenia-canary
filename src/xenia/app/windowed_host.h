@@ -36,6 +36,10 @@ class WindowedHost : public EmulatorHost {
 
   void Notify(Notification notification) override;
   void SetTitleIcon(std::vector<uint8_t> icon) override;
+  void ReportError(ErrorReport report) override;
+  void RequestDiscImage(
+      std::string prompt,
+      std::function<void(std::filesystem::path)> done) override;
 
  private:
   ui::WindowedAppContext& app_context_;

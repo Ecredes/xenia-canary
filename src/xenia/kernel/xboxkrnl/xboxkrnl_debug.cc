@@ -14,10 +14,6 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xthread.h"
-#include "xenia/ui/imgui_dialog.h"
-#include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/window.h"
-#include "xenia/ui/windowed_app_context.h"
 
 namespace xe {
 namespace kernel {
@@ -166,20 +162,11 @@ void KeBugCheckEx_entry(dword_t code, dword_t param1, dword_t param2,
   // Show crash dialog and suspend the guest thread instead of killing the
   // host process.
   auto current_thread = kernel::XThread::GetCurrentThread();
-  const auto* emulator = kernel_state()->emulator();
-  auto* display_window = emulator->display_window();
-  auto* imgui_drawer = emulator->imgui_drawer();
-  if (display_window && imgui_drawer) {
-    auto dlg_msg = fmt::format(
-        "The guest kernel has crashed (KeBugCheck).\n\n{}\n\n"
-        "The faulting thread has been suspended.",
-        msg);
-    display_window->app_context().CallInUIThreadSynchronous(
-        [imgui_drawer, &dlg_msg]() {
-          xe::ui::ImGuiDialog::ShowMessageBox(imgui_drawer,
-                                              "Guest Kernel Crash", dlg_msg);
-        });
-  }
+  kernel_state()->emulator()->host().ReportError(
+      {"Guest Kernel Crash",
+       fmt::format("The guest kernel has crashed (KeBugCheck).\n\n{}\n\n"
+                   "The faulting thread has been suspended.",
+                   msg)});
 
   if (current_thread) {
     current_thread->Suspend(nullptr);
