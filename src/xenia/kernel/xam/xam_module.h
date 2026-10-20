@@ -10,6 +10,7 @@
 #ifndef XENIA_KERNEL_XAM_XAM_MODULE_H_
 #define XENIA_KERNEL_XAM_XAM_MODULE_H_
 
+#include <filesystem>
 #include <string>
 
 #include "xenia/cpu/export_resolver.h"
@@ -48,6 +49,8 @@ class XamModule : public KernelModule {
   LoaderData& loader_data() { return loader_data_; }
 
  private:
+  std::filesystem::path LoaderDataPath() const;
+
   uint32_t callback_ = 0;
   LoaderData loader_data_;
 };

@@ -26,6 +26,7 @@
 #include "xenia/config.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/xam/launch_data.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
@@ -749,6 +750,22 @@ void EmulatorApp::EmulatorThread() {
     path = cvars::target;
   }
 
+  // Launch data a title saved for its relaunch, read before anything launches
+  // since the launch uses it. Only for the title it belongs to.
+  auto xam = emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
+      "xam.xex");
+  if (xam) {
+    xam->LoadLoaderData();
+    const std::filesystem::path saved_host_path = xam->loader_data().host_path;
+    if (kernel::xam::LaunchDataAppliesTo(saved_host_path, path)) {
+      path = saved_host_path;
+    } else if (!saved_host_path.empty()) {
+      XELOGW("Ignoring launch data saved by {} for launching {}",
+             saved_host_path, path);
+      xam->loader_data() = {};
+    }
+  }
+
   if (!path.empty()) {
     // Normalize the path and make absolute.
     auto abs_path = std::filesystem::absolute(path);
@@ -759,20 +776,6 @@ void EmulatorApp::EmulatorThread() {
       xe::FatalError(fmt::format("Failed to launch target: {:08X}", result));
       app_context().RequestDeferredQuit();
       return;
-    }
-  }
-
-  auto xam = emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
-      "xam.xex");
-
-  if (xam) {
-    xam->LoadLoaderData();
-
-    if (!xam->loader_data().host_path.empty()) {
-      const std::filesystem::path host_path = xam->loader_data().host_path;
-      app_context().CallInUIThread([this, host_path]() {
-        return emulator_window_->RunTitle(host_path);
-      });
     }
   }
 

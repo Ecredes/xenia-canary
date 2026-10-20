@@ -10,6 +10,7 @@
 #include "xenia/kernel/xam/xam_module.h"
 
 #include "xenia/base/math.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_private.h"
 
@@ -62,8 +63,16 @@ void XamModule::RegisterExportTable(xe::cpu::ExportResolver* export_resolver) {
 
 XamModule::~XamModule() {}
 
+std::filesystem::path XamModule::LoaderDataPath() const {
+  // Per storage root, not the working directory, so instances with their own
+  // storage never pick up each other's.
+  return kernel_state_->emulator()->storage_root() /
+         kXamModuleLoaderDataFileName;
+}
+
 void XamModule::LoadLoaderData() {
-  FILE* file = xe::filesystem::OpenFile(kXamModuleLoaderDataFileName, "rb");
+  const std::filesystem::path loader_data_path = LoaderDataPath();
+  FILE* file = xe::filesystem::OpenFile(loader_data_path, "rb");
 
   if (!file) {
     loader_data_.launch_data.clear();
@@ -95,11 +104,11 @@ void XamModule::LoadLoaderData() {
 
   fclose(file);
   // We read launch data. Let's remove it till next request.
-  std::filesystem::remove(kXamModuleLoaderDataFileName);
+  std::filesystem::remove(loader_data_path);
 }
 
 void XamModule::SaveLoaderData() {
-  FILE* file = xe::filesystem::OpenFile(kXamModuleLoaderDataFileName, "wb");
+  FILE* file = xe::filesystem::OpenFile(LoaderDataPath(), "wb");
 
   if (!file) {
     return;
