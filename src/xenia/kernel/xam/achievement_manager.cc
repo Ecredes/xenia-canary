@@ -14,7 +14,6 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/achievement_backends/gpd_achievement_backend.h"
 #include "xenia/kernel/xam/xdbf/gpd_info.h"
-#include "xenia/ui/imgui_guest_notification.h"
 
 DEFINE_bool(show_achievement_notification, false,
             "Show achievement notification on screen.", "UI");
@@ -145,16 +144,9 @@ void AchievementManager::ShowAchievementEarnedNotification(
       fmt::format("{}G - {}", achievement->gamerscore,
                   xe::to_utf8(achievement->achievement_name));
 
-  const Emulator* emulator = kernel_state()->emulator();
-  ui::WindowedAppContext& app_context =
-      emulator->display_window()->app_context();
-  ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-
-  app_context.CallInUIThread([imgui_drawer, description]() {
-    new xe::ui::AchievementNotificationWindow(
-        imgui_drawer, "Achievement unlocked", description, 0,
-        kernel_state()->notification_position_);
-  });
+  kernel_state()->emulator()->host().Notify(
+      {Notification::Kind::kAchievement, "Achievement unlocked", description, 0,
+       static_cast<uint8_t>(kernel_state()->notification_position_)});
 }
 
 }  // namespace xam

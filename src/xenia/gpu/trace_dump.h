@@ -17,6 +17,7 @@
 #include "xenia/gpu/trace_player.h"
 #include "xenia/gpu/trace_protocol.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/headless_host.h"
 #include "xenia/memory.h"
 
 namespace xe {
@@ -39,6 +40,8 @@ class TraceDump {
   virtual void BeginHostCapture() = 0;
   virtual void EndHostCapture() = 0;
 
+  // Before the emulator, which uses it until destroyed.
+  HeadlessHost host_;
   std::unique_ptr<Emulator> emulator_;
   GraphicsSystem* graphics_system_ = nullptr;
   std::unique_ptr<TracePlayer> player_;

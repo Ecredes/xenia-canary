@@ -26,7 +26,6 @@
 #include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
-#include "xenia/ui/imgui_host_notification.h"
 
 #include "third_party/crypto/TinySHA1.hpp"
 
@@ -703,12 +702,9 @@ X_RESULT KernelState::ApplyTitleUpdate(
           "Skipping incompatible title update for {} due to signature mismatch",
           title_module->name());
       if (!GetExecutableModule()) {
-        emulator_->display_window()->app_context().CallInUIThread([&]() {
-          new xe::ui::HostNotificationWindow(
-              emulator_->imgui_drawer(), "Warning!",
-              "Title Update signature doesn't match. Skipping its application!",
-              0);
-        });
+        emulator_->host().Notify({Notification::Kind::kHost, "Warning!",
+                                  "Title Update signature doesn't match. "
+                                  "Skipping its application!"});
       }
       return X_STATUS_SUCCESS;
     }
@@ -720,13 +716,10 @@ X_RESULT KernelState::ApplyTitleUpdate(
         "allow_incompatible_title_update config option!",
         title_module->name());
     if (!GetExecutableModule()) {
-      emulator_->display_window()->app_context().CallInUIThread([&]() {
-        new xe::ui::HostNotificationWindow(
-            emulator_->imgui_drawer(), "Warning!",
-            "Title Update signature doesn't match. This can cause unexpected "
-            "issues or crashes!",
-            0);
-      });
+      emulator_->host().Notify(
+          {Notification::Kind::kHost, "Warning!",
+           "Title Update signature doesn't match. This can cause unexpected "
+           "issues or crashes!"});
     }
   }
 

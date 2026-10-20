@@ -16,6 +16,7 @@
 
 #include "xenia/app/discord/discord_presence.h"
 #include "xenia/app/emulator_window.h"
+#include "xenia/app/windowed_host.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
@@ -284,6 +285,8 @@ class EmulatorApp final : public xe::ui::WindowedApp {
 
   DebugWindowClosedListener debug_window_closed_listener_;
 
+  // Before the emulator, which uses it until destroyed.
+  std::unique_ptr<WindowedHost> host_;
   std::unique_ptr<Emulator> emulator_;
   std::unique_ptr<EmulatorWindow> emulator_window_;
 
@@ -542,8 +545,9 @@ bool EmulatorApp::OnInitialize() {
   }
 
   // Create the emulator but don't initialize so we can setup the window.
-  emulator_ =
-      std::make_unique<Emulator>("", storage_root, content_root, cache_root);
+  host_ = std::make_unique<WindowedHost>(app_context());
+  emulator_ = std::make_unique<Emulator>(*host_, "", storage_root, content_root,
+                                         cache_root);
 
   // Main emulator display window.
   emulator_window_ =
@@ -553,6 +557,7 @@ bool EmulatorApp::OnInitialize() {
     XELOGE("Failed to create the main emulator window");
     return false;
   }
+  host_->SetImGuiDrawer(emulator_window_->imgui_drawer());
 
   // Setup the emulator and run its loop in a separate thread.
   emulator_thread_quit_requested_.store(false, std::memory_order_relaxed);

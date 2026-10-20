@@ -20,6 +20,7 @@
 #include "xenia/apu/audio_media_player.h"
 #include "xenia/base/delegate.h"
 #include "xenia/base/exception_handler.h"
+#include "xenia/emulator_host.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/game_info_database.h"
 #include "xenia/kernel/util/xlast.h"
@@ -95,11 +96,17 @@ class Emulator {
     Emulator& emulator_;
   };
 
-  explicit Emulator(const std::filesystem::path& command_line,
+  // The host must outlive the emulator.
+  explicit Emulator(EmulatorHost& host,
+                    const std::filesystem::path& command_line,
                     const std::filesystem::path& storage_root,
                     const std::filesystem::path& content_root,
                     const std::filesystem::path& cache_root);
   ~Emulator();
+
+  // What runs the emulator: the windowed UI, a runner without a window, or a
+  // test. The emulator reaches the user only through it.
+  EmulatorHost& host() const { return host_; }
 
   // Full command line used when launching the process.
   const std::filesystem::path& command_line() const { return command_line_; }
@@ -344,6 +351,7 @@ class Emulator {
 
   ui::Window* display_window_ = nullptr;
   ui::ImGuiDrawer* imgui_drawer_ = nullptr;
+  EmulatorHost& host_;
 
   std::unique_ptr<Memory> memory_;
 

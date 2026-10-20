@@ -51,7 +51,6 @@
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/imgui_host_notification.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/device.h"
@@ -107,7 +106,8 @@ Emulator::GameConfigLoadCallback::~GameConfigLoadCallback() {
   emulator_.RemoveGameConfigLoadCallback(this);
 }
 
-Emulator::Emulator(const std::filesystem::path& command_line,
+Emulator::Emulator(EmulatorHost& host,
+                   const std::filesystem::path& command_line,
                    const std::filesystem::path& storage_root,
                    const std::filesystem::path& content_root,
                    const std::filesystem::path& cache_root)
@@ -121,6 +121,7 @@ Emulator::Emulator(const std::filesystem::path& command_line,
       title_name_(),
       title_version_(),
       display_window_(nullptr),
+      host_(host),
       memory_(),
       audio_system_(),
       audio_media_player_(),
@@ -844,8 +845,8 @@ X_STATUS Emulator::DataMigration(const uint64_t xuid) {
     migration_status_message.append(
         " For more information check xenia.log file.");
   }
-  new xe::ui::HostNotificationWindow(imgui_drawer_, "Migration Status",
-                                     migration_status_message, 0);
+  host_.Notify({Notification::Kind::kHost, "Migration Status",
+                migration_status_message});
   return X_STATUS_SUCCESS;
 }
 

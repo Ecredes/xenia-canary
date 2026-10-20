@@ -19,7 +19,6 @@
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/imgui_guest_notification.h"
 
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
 #include "xenia/kernel/xam/ui/game_achievements_ui.h"
@@ -469,11 +468,9 @@ dword_result_t XNotifyQueueUI_entry(dword_t exnq, dword_t dwUserIndex,
 
   XELOGI("XNotifyQueueUI: {}", displayText);
 
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-
-  new xe::ui::XNotifyWindow(imgui_drawer, "", displayText, dwUserIndex,
-                            position_id);
+  kernel_state()->emulator()->host().Notify(
+      {Notification::Kind::kGuest, "", displayText,
+       static_cast<uint8_t>(dwUserIndex.value()), position_id});
 
   // XNotifyQueueUI -> XNotifyQueueUIEx -> XMsgProcessRequest ->
   // XMsgStartIORequestEx & XMsgInProcessCall
