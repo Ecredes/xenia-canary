@@ -15,7 +15,7 @@
 namespace xe {
 
 // Hosts the emulator with no one to show anything to: tools like the GPU trace
-// dump, and later headless runs. What a user would see goes to the log.
+// dump, and headless runs. What a user would see goes to the log.
 class HeadlessHost : public EmulatorHost {
  public:
   void Notify(Notification notification) override;
