@@ -11,6 +11,8 @@
 #define XENIA_HEADLESS_POLICY_H_
 
 #include <cstdlib>
+#include <optional>
+#include <string>
 
 #include "xenia/emulator_host.h"
 
@@ -28,6 +30,11 @@ inline uint32_t HeadlessChoice(const ChoiceRequest& request) {
   return request.unattended_button < request.buttons.size()
              ? request.unattended_button
              : 0;
+}
+
+// The text entered with no one to type: the title's default, not cancelled.
+inline std::optional<std::string> HeadlessText(const TextRequest& request) {
+  return request.default_text;
 }
 
 // The process exit status when the title ends itself.

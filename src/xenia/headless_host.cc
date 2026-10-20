@@ -40,6 +40,14 @@ void HeadlessHost::RequestChoice(ChoiceRequest request,
   done(button);
 }
 
+void HeadlessHost::RequestText(
+    TextRequest request,
+    std::function<void(std::optional<std::string> text)> done) {
+  std::optional<std::string> text = HeadlessText(request);
+  XELOGI("{}: entered \"{}\" without a UI", request.title, text.value_or(""));
+  done(std::move(text));
+}
+
 void HeadlessHost::RequestLifecycle(LifecycleRequest request) {
   int exit_code = HeadlessExitCode(request);
   XELOGI("The title ended itself, exiting with {}", exit_code);

@@ -34,5 +34,12 @@ TEST_CASE("Headless choice answers the unattended button", "[headless]") {
   REQUIRE(HeadlessChoice(bad_default) == 0);
 }
 
+TEST_CASE("Headless text entry keeps the title's default", "[headless]") {
+  TextRequest name{"Name", "Enter your name", "Player", 16};
+  REQUIRE(HeadlessText(name) == std::optional<std::string>("Player"));
+  // Not cancelled even without a default.
+  REQUIRE(HeadlessText(TextRequest{}) == std::optional<std::string>(""));
+}
+
 }  // namespace test
 }  // namespace xe

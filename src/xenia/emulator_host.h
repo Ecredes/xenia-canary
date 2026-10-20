@@ -55,6 +55,15 @@ struct ChoiceRequest {
   uint32_t unattended_button = 0;
 };
 
+// Text entry, e.g. a title's on-screen keyboard.
+struct TextRequest {
+  std::string title;
+  std::string description;
+  std::string default_text;
+  // In characters, including the terminator.
+  size_t max_length = 0;
+};
+
 // The title ending itself; the host decides how the process goes on.
 struct LifecycleRequest {
   enum class Kind {
@@ -89,6 +98,11 @@ class EmulatorHost {
   // done receives the chosen button's index, on any thread, exactly once.
   virtual void RequestChoice(ChoiceRequest request,
                              std::function<void(uint32_t button)> done) = 0;
+  // done receives the entered text, or none if cancelled, on any thread,
+  // exactly once.
+  virtual void RequestText(
+      TextRequest request,
+      std::function<void(std::optional<std::string> text)> done) = 0;
   // The title then terminates; the host may end the process.
   virtual void RequestLifecycle(LifecycleRequest request) = 0;
 };

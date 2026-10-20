@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "xenia/app/choice_dialog.h"
+#include "xenia/app/text_input_dialog.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
@@ -132,6 +133,24 @@ void WindowedHost::RequestChoice(ChoiceRequest request,
       });
   if (!queued) {
     done(default_button);
+  }
+}
+
+void WindowedHost::RequestText(
+    TextRequest request,
+    std::function<void(std::optional<std::string> text)> done) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    done(std::nullopt);
+    return;
+  }
+  // The dialog answers when destroyed, also if it never opened.
+  bool queued = app_context_.CallInUIThread(
+      [imgui_drawer, request = std::move(request), done]() mutable {
+        new TextInputDialog(imgui_drawer, std::move(request), std::move(done));
+      });
+  if (!queued) {
+    done(std::nullopt);
   }
 }
 

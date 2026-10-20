@@ -42,6 +42,9 @@ class WindowedHost : public EmulatorHost {
       std::function<void(std::filesystem::path)> done) override;
   void RequestChoice(ChoiceRequest request,
                      std::function<void(uint32_t button)> done) override;
+  void RequestText(
+      TextRequest request,
+      std::function<void(std::optional<std::string> text)> done) override;
   // Tells the user, then exits for a relaunch or termination once they close
   // the notice, saving the config.
   void RequestLifecycle(LifecycleRequest request) override;

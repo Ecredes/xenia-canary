@@ -29,6 +29,10 @@ class HeadlessHost : public EmulatorHost {
   // Answers with HeadlessChoice.
   void RequestChoice(ChoiceRequest request,
                      std::function<void(uint32_t button)> done) override;
+  // Answers with HeadlessText.
+  void RequestText(
+      TextRequest request,
+      std::function<void(std::optional<std::string> text)> done) override;
   // Ends the process with HeadlessExitCode.
   void RequestLifecycle(LifecycleRequest request) override;
 };

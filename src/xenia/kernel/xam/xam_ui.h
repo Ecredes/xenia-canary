@@ -40,48 +40,6 @@ class XamDialog : public xe::ui::ImGuiDialog {
   std::function<void()> close_callback_ = nullptr;
 };
 
-class KeyboardInputDialog : public XamDialog {
- public:
-  KeyboardInputDialog(xe::ui::ImGuiDrawer* imgui_drawer, std::string& title,
-                      std::string& description, std::string& default_text,
-                      size_t max_length)
-      : XamDialog(imgui_drawer),
-        title_(title),
-        description_(description),
-        default_text_(default_text),
-        max_length_(max_length),
-        text_buffer_() {
-    if (!title_.size()) {
-      if (!description_.size()) {
-        title_ = "Keyboard Input";
-      } else {
-        title_ = description_;
-        description_ = "";
-      }
-    }
-    text_ = default_text;
-    text_buffer_.resize(max_length);
-    xe::string_util::copy_truncating(text_buffer_.data(), default_text_,
-                                     text_buffer_.size());
-  }
-  virtual ~KeyboardInputDialog() {}
-
-  const std::string& text() const { return text_; }
-  bool cancelled() const { return cancelled_; }
-
-  void OnDraw(ImGuiIO& io) override;
-
- private:
-  bool has_opened_ = false;
-  std::string title_;
-  std::string description_;
-  std::string default_text_;
-  size_t max_length_ = 0;
-  std::vector<char> text_buffer_;
-  std::string text_ = "";
-  bool cancelled_ = true;
-};
-
 bool xeDrawProfileContent(xe::ui::ImGuiDrawer* imgui_drawer,
                           const uint64_t xuid, const uint8_t user_index,
                           const X_XAMACCOUNTINFO* account,
