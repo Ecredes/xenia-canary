@@ -127,7 +127,7 @@ void ProfileConfigDialog::LoadProfileIcon(const uint64_t xuid) {
 
   if (!profile) {
     if (profile_icon_.contains(xuid)) {
-      profile_icon_[xuid].release();
+      imgui_drawer()->DestroyTextureAfterFrame(std::move(profile_icon_[xuid]));
     }
     return;
   }
@@ -138,7 +138,7 @@ void ProfileConfigDialog::LoadProfileIcon(const uint64_t xuid) {
     return;
   }
 
-  profile_icon_[xuid].release();
+  imgui_drawer()->DestroyTextureAfterFrame(std::move(profile_icon_[xuid]));
   profile_icon_[xuid] = imgui_drawer()->LoadImGuiIcon(profile_icon);
 }
 

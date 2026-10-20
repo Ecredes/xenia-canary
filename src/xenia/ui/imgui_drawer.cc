@@ -73,7 +73,7 @@ ImGuiDrawer::ImGuiDrawer(xe::ui::Window* window, size_t z_order)
 }
 
 ImGuiDrawer::~ImGuiDrawer() {
-  DeleteClosedDialogs();
+  DestroyRetiredAfterFrame();
   SetPresenter(nullptr);
   if (!dialogs_.empty()) {
     window_->RemoveInputListener(this);
@@ -728,8 +728,8 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
     io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
   }
 
-  // The frame no longer uses what the dialogs that closed during it own.
-  DeleteClosedDialogs();
+  // The frame no longer uses what closed dialogs own or replaced textures.
+  DestroyRetiredAfterFrame();
 
   // Detaching is deferred if the last dialog is removed during drawing, perform
   // it now if needed.
@@ -746,13 +746,21 @@ void ImGuiDrawer::DeleteDialogAfterFrame(ImGuiDialog* dialog) {
   closed_dialogs_.push_back(dialog);
 }
 
-void ImGuiDrawer::DeleteClosedDialogs() {
+void ImGuiDrawer::DestroyTextureAfterFrame(
+    std::unique_ptr<ImmediateTexture> texture) {
+  if (texture) {
+    retired_textures_.push_back(std::move(texture));
+  }
+}
+
+void ImGuiDrawer::DestroyRetiredAfterFrame() {
   // A destructor may close another dialog.
   std::vector<ImGuiDialog*> closed_dialogs;
   closed_dialogs.swap(closed_dialogs_);
   for (ImGuiDialog* dialog : closed_dialogs) {
     delete dialog;
   }
+  retired_textures_.clear();
 }
 
 void ImGuiDrawer::ClearDialogs() {
