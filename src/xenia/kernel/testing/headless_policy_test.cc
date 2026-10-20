@@ -24,5 +24,15 @@ TEST_CASE("Headless exit code for a title ending itself", "[headless]") {
           EXIT_SUCCESS);
 }
 
+TEST_CASE("Headless choice answers the unattended button", "[headless]") {
+  ChoiceRequest offer{"Xbox Marketplace", "", {"Yes", "No"}, 0, 1};
+  REQUIRE(HeadlessChoice(offer) == 1);
+  ChoiceRequest message_box{"", "", {"A", "B", "C"}, 2, 2};
+  REQUIRE(HeadlessChoice(message_box) == 2);
+  // A title's out-of-range default falls back to the first button.
+  ChoiceRequest bad_default{"", "", {"OK"}, 3, 3};
+  REQUIRE(HeadlessChoice(bad_default) == 0);
+}
+
 }  // namespace test
 }  // namespace xe

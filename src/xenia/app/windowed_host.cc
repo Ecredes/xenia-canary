@@ -14,6 +14,7 @@
 #include <thread>
 #include <utility>
 
+#include "xenia/app/choice_dialog.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
@@ -114,6 +115,24 @@ void WindowedHost::ReportError(ErrorReport report) {
   app_context_.CallInUIThread([imgui_drawer, report = std::move(report)]() {
     ui::ImGuiDialog::ShowMessageBox(imgui_drawer, report.title, report.message);
   });
+}
+
+void WindowedHost::RequestChoice(ChoiceRequest request,
+                                 std::function<void(uint32_t button)> done) {
+  ui::ImGuiDrawer* imgui_drawer = imgui_drawer_.load(std::memory_order_acquire);
+  if (!imgui_drawer) {
+    done(request.default_button);
+    return;
+  }
+  uint32_t default_button = request.default_button;
+  // The dialog answers when destroyed, also if it never opened.
+  bool queued = app_context_.CallInUIThread(
+      [imgui_drawer, request = std::move(request), done]() mutable {
+        new ChoiceDialog(imgui_drawer, std::move(request), std::move(done));
+      });
+  if (!queued) {
+    done(default_button);
+  }
 }
 
 void WindowedHost::RequestLifecycle(LifecycleRequest request) {

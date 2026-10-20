@@ -42,6 +42,19 @@ struct ErrorReport {
   std::string message;
 };
 
+// A choice of one of several buttons, e.g. a title's message box.
+struct ChoiceRequest {
+  std::string title;
+  std::string text;
+  // At least one.
+  std::vector<std::string> buttons;
+  // The answer if the dialog closes without a choice.
+  uint32_t default_button = 0;
+  // The answer when no one is there to ask. Not always the default: a "buy
+  // the full game?" offer is answered "No" unattended.
+  uint32_t unattended_button = 0;
+};
+
 // The title ending itself; the host decides how the process goes on.
 struct LifecycleRequest {
   enum class Kind {
@@ -73,6 +86,9 @@ class EmulatorHost {
   // empty one for none, on any thread.
   virtual void RequestDiscImage(
       std::string prompt, std::function<void(std::filesystem::path)> done) = 0;
+  // done receives the chosen button's index, on any thread, exactly once.
+  virtual void RequestChoice(ChoiceRequest request,
+                             std::function<void(uint32_t button)> done) = 0;
   // The title then terminates; the host may end the process.
   virtual void RequestLifecycle(LifecycleRequest request) = 0;
 };

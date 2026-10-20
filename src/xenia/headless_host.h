@@ -26,6 +26,9 @@ class HeadlessHost : public EmulatorHost {
   void RequestDiscImage(
       std::string prompt,
       std::function<void(std::filesystem::path)> done) override;
+  // Answers with HeadlessChoice.
+  void RequestChoice(ChoiceRequest request,
+                     std::function<void(uint32_t button)> done) override;
   // Ends the process with HeadlessExitCode.
   void RequestLifecycle(LifecycleRequest request) override;
 };

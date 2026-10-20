@@ -40,36 +40,6 @@ class XamDialog : public xe::ui::ImGuiDialog {
   std::function<void()> close_callback_ = nullptr;
 };
 
-class MessageBoxDialog : public XamDialog {
- public:
-  MessageBoxDialog(xe::ui::ImGuiDrawer* imgui_drawer, std::string& title,
-                   std::string& description, std::vector<std::string> buttons,
-                   uint32_t default_button)
-      : XamDialog(imgui_drawer),
-        title_(title),
-        description_(description),
-        buttons_(std::move(buttons)),
-        default_button_(default_button),
-        chosen_button_(default_button) {
-    if (!title_.size()) {
-      title_ = "Message Box";
-    }
-  }
-
-  uint32_t chosen_button() const { return chosen_button_; }
-
-  void OnDraw(ImGuiIO& io) override;
-  virtual ~MessageBoxDialog() {}
-
- private:
-  bool has_opened_ = false;
-  std::string title_;
-  std::string description_;
-  std::vector<std::string> buttons_;
-  uint32_t default_button_ = 0;
-  uint32_t chosen_button_ = 0;
-};
-
 class KeyboardInputDialog : public XamDialog {
  public:
   KeyboardInputDialog(xe::ui::ImGuiDrawer* imgui_drawer, std::string& title,

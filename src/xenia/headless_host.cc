@@ -32,6 +32,14 @@ void HeadlessHost::RequestDiscImage(
   done({});
 }
 
+void HeadlessHost::RequestChoice(ChoiceRequest request,
+                                 std::function<void(uint32_t button)> done) {
+  uint32_t button = HeadlessChoice(request);
+  XELOGI("{}: answered \"{}\" without a UI", request.title,
+         request.buttons.empty() ? "" : request.buttons[button]);
+  done(button);
+}
+
 void HeadlessHost::RequestLifecycle(LifecycleRequest request) {
   int exit_code = HeadlessExitCode(request);
   XELOGI("The title ended itself, exiting with {}", exit_code);

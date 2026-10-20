@@ -23,6 +23,13 @@ namespace xe {
 // sysexits' EX_TEMPFAIL, "try again", which runners treat as restart.
 constexpr int kExitCodeRelaunch = 75;
 
+// The button chosen with no one to ask.
+inline uint32_t HeadlessChoice(const ChoiceRequest& request) {
+  return request.unattended_button < request.buttons.size()
+             ? request.unattended_button
+             : 0;
+}
+
 // The process exit status when the title ends itself.
 inline int HeadlessExitCode(const LifecycleRequest& request) {
   switch (request.kind) {

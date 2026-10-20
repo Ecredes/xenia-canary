@@ -55,6 +55,70 @@ namespace xam {
 //
 // We deliberately delay the XN_SYS_UI = false notification to give games time
 // to create a listener (if they're insane enough do this).
+// The guest-visible side of a XAM choice dialog, whoever answers it through
+// the host (a user, or a policy without a UI): one dialog at a time, the
+// system UI notification around it, and completion like any XAM call,
+// blocking or through an overlapped.
+X_RESULT xeXamShowChoice(ChoiceRequest request,
+                         std::function<X_RESULT(uint32_t button)> on_answer,
+                         uint32_t overlapped) {
+  if (kernel_state()->xam_state()->IsUIActive()) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+
+  auto pre = []() {
+    kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+  };
+  auto run = [request = std::move(request), on_answer]() -> X_RESULT {
+    uint32_t button = 0;
+    xe::threading::Fence answered;
+    kernel_state()->emulator()->host().RequestChoice(
+        request, [&button, &answered](uint32_t chosen) {
+          button = chosen;
+          answered.Signal();
+        });
+    answered.Wait();
+    kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    return on_answer(button);
+  };
+  auto post = []() {
+    std::jthread t([] {
+      xe::threading::Sleep(kUIDelayMillis);
+      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    });
+    t.detach();
+  };
+  if (!overlapped) {
+    pre();
+    auto result = run();
+    post();
+    return result;
+  }
+  kernel_state()->CompleteOverlappedDeferred(run, overlapped, pre, post);
+  return X_ERROR_IO_PENDING;
+}
+
+// The same for a dialog the title doesn't wait for: on_answer runs later.
+X_RESULT xeXamShowChoiceAsync(ChoiceRequest request,
+                              std::function<void(uint32_t button)> on_answer) {
+  if (kernel_state()->xam_state()->IsUIActive()) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+  kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+  kernel_state()->emulator()->host().RequestChoice(
+      std::move(request), [on_answer](uint32_t button) {
+        on_answer(button);
+        kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+        std::thread([] {
+          xe::threading::Sleep(kUIDelayMillis);
+          kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+        }).detach();
+      });
+  return X_ERROR_SUCCESS;
+}
+
 template <typename T>
 X_RESULT xeXamDispatchDialog(T* dialog,
                              std::function<X_RESULT(T*)> close_callback,
@@ -236,37 +300,6 @@ X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
   return X_ERROR_SUCCESS;
 }
 
-void MessageBoxDialog::OnDraw(ImGuiIO& io) {
-  bool first_draw = false;
-  if (!has_opened_) {
-    ImGui::OpenPopup(title_.c_str());
-    has_opened_ = true;
-    first_draw = true;
-  }
-  if (ImGui::BeginPopupModal(title_.c_str(), nullptr,
-                             ImGuiWindowFlags_AlwaysAutoResize)) {
-    if (description_.size()) {
-      ImGui::Text("%s", description_.c_str());
-    }
-    if (first_draw) {
-      ImGui::SetKeyboardFocusHere();
-    }
-    for (size_t i = 0; i < buttons_.size(); ++i) {
-      if (ImGui::Button(buttons_[i].c_str())) {
-        chosen_button_ = static_cast<uint32_t>(i);
-        ImGui::CloseCurrentPopup();
-        Close();
-      }
-      ImGui::SameLine();
-    }
-    ImGui::Spacing();
-    ImGui::Spacing();
-    ImGui::EndPopup();
-  } else {
-    Close();
-  }
-}
-
 void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
   bool first_draw = false;
   if (!has_opened_) {
@@ -347,25 +380,14 @@ static dword_result_t XamShowMessageBoxUi(
     buttons.push_back("OK");
   }
 
-  X_RESULT result;
-  if (cvars::headless) {
-    // Auto-pick the focused button.
-    auto run = [result_ptr, active_button]() -> X_RESULT {
-      result_ptr->ButtonPressed = static_cast<uint32_t>(active_button);
-      return X_ERROR_SUCCESS;
-    };
-
-    result = xeXamDispatchHeadless(run, overlapped);
-  } else {
-    switch (flags & 0xF) {
-      case XMBox_NOICON: {
-      } break;
-      case XMBox_ERRORICON: {
-      } break;
-      case XMBox_WARNINGICON: {
-      } break;
-      case XMBox_ALERTICON: {
-      } break;
+  if (flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE) {
+    if (cvars::headless) {
+      // Auto-pick the focused button.
+      auto run = [result_ptr, active_button]() -> X_RESULT {
+        result_ptr->ButtonPressed = static_cast<uint32_t>(active_button);
+        return X_ERROR_SUCCESS;
+      };
+      return xeXamDispatchHeadless(run, overlapped);
     }
 
     if (kernel_state()->xam_state()->IsUIActive()) {
@@ -377,35 +399,29 @@ static dword_result_t XamShowMessageBoxUi(
     const Emulator* emulator = kernel_state()->emulator();
     xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
 
-    if (flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE) {
-      auto close = [result_ptr,
-                    active_button](ui::ProfilePasscodeUI* dialog) -> X_RESULT {
-        if (dialog->SelectedSignedIn()) {
-          // Logged in
-          return X_ERROR_SUCCESS;
-        } else {
-          return X_ERROR_FUNCTION_FAILED;
-        }
-      };
-
-      result = xeXamDispatchDialog<ui::ProfilePasscodeUI>(
-          new ui::ProfilePasscodeUI(imgui_drawer, title, text, result_ptr),
-          close, overlapped);
-    } else {
-      auto close = [result_ptr](MessageBoxDialog* dialog) -> X_RESULT {
-        result_ptr->ButtonPressed = dialog->chosen_button();
-        kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+    auto close = [result_ptr,
+                  active_button](ui::ProfilePasscodeUI* dialog) -> X_RESULT {
+      if (dialog->SelectedSignedIn()) {
+        // Logged in
         return X_ERROR_SUCCESS;
-      };
+      } else {
+        return X_ERROR_FUNCTION_FAILED;
+      }
+    };
 
-      result = xeXamDispatchDialog<MessageBoxDialog>(
-          new MessageBoxDialog(imgui_drawer, title, text, buttons,
-                               static_cast<uint32_t>(active_button)),
-          close, overlapped);
-    }
+    return xeXamDispatchDialog<ui::ProfilePasscodeUI>(
+        new ui::ProfilePasscodeUI(imgui_drawer, title, text, result_ptr), close,
+        overlapped);
   }
 
-  return result;
+  auto on_answer = [result_ptr](uint32_t button) -> X_RESULT {
+    result_ptr->ButtonPressed = button;
+    return X_ERROR_SUCCESS;
+  };
+  return xeXamShowChoice(
+      {title, text, std::move(buttons), static_cast<uint32_t>(active_button),
+       static_cast<uint32_t>(active_button)},
+      on_answer, overlapped);
 }
 
 dword_result_t XamIsUIActive_entry() {
@@ -562,8 +578,8 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 
   std::vector<const DummyDeviceInfo*> devices = ListStorageDevices();
 
-  if (cvars::headless || !cvars::storage_selection_dialog) {
-    // Default to the first storage device (HDD) if headless.
+  if (!cvars::storage_selection_dialog) {
+    // Default to the first storage device (HDD) without asking.
     return xeXamDispatchHeadless(
         [device_id_ptr, devices]() -> X_RESULT {
           if (devices.empty()) {
@@ -577,8 +593,7 @@ dword_result_t XamShowDeviceSelectorUI_entry(
         overlapped);
   }
 
-  auto close = [device_id_ptr, devices](MessageBoxDialog* dialog) -> X_RESULT {
-    uint32_t button = dialog->chosen_button();
+  auto on_answer = [device_id_ptr, devices](uint32_t button) -> X_RESULT {
     if (button >= devices.size()) {
       return X_ERROR_CANCELLED;
     }
@@ -588,25 +603,14 @@ dword_result_t XamShowDeviceSelectorUI_entry(
     return X_ERROR_SUCCESS;
   };
 
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_ACCESS_DENIED;
-  }
-
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
-  std::string title = "Select storage device";
-  std::string desc = "";
-
-  cxxopts::OptionNames buttons;
+  std::vector<std::string> buttons;
   for (auto& device_info : devices) {
     buttons.push_back(to_utf8(device_info->name));
   }
   buttons.push_back("Cancel");
 
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  return xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, title, desc, buttons, 0), close,
+  return xeXamShowChoice(
+      {"Select storage device", "", std::move(buttons), 0, 0}, on_answer,
       overlapped);
 }
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
@@ -635,16 +639,9 @@ dword_result_t XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   // uses XamIsDataCenterMode & XamShowAndWaitForMessageBoxEx, same as
   // XamShowNuiDirtyDiscErrorUI except flag = 1, user index always set to
   // XUserIndexAny
-  if (cvars::headless) {
-    assert_always();
-    return X_ERROR_SUCCESS;
-  }
-
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, disc_title, disc_desc, {"OK"}, 0),
-      [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
+  xeXamShowChoice(
+      {disc_title, disc_desc, {"OK"}},
+      [](uint32_t) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kStub);
@@ -656,16 +653,9 @@ dword_result_t XamShowNuiDirtyDiscErrorUI_entry(dword_t tracking_id) {
   }
   // XamShowAndWaitForMessageBoxEx, same as XamShowDirtyDiscErrorUI except flag
   // = 0x2001, user index always set to XUserIndexAny
-  if (cvars::headless) {
-    assert_always();
-    return X_ERROR_SUCCESS;
-  }
-
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, disc_title, disc_desc, {"OK"}, 0),
-      [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
+  xeXamShowChoice(
+      {disc_title, disc_desc, {"OK"}},
+      [](uint32_t) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamShowNuiDirtyDiscErrorUI, kUI, kStub);
@@ -703,23 +693,11 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
     return X_ERROR_NO_SUCH_USER;
   }
 
-  if (cvars::headless) {
-    return xeXamDispatchHeadlessAsync([]() {});
-  }
-
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_ACCESS_DENIED;
-  }
-
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
   bool is_xbla_unlock_offer =
       (offer_id == ((uint64_t(kernel_state()->title_id()) << 32) | 1ull));
 
-  auto close = [ui_type,
-                is_xbla_unlock_offer](MessageBoxDialog* dialog) -> void {
+  auto on_answer = [ui_type, is_xbla_unlock_offer](uint32_t button) -> void {
     if (ui_type == 1 && is_xbla_unlock_offer) {
-      uint32_t button = dialog->chosen_button();
       if (button == 0) {
         cvars::license_mask = 1;
 
@@ -731,7 +709,9 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
 
   std::string title = "Xbox Marketplace";
   std::string desc = "";
-  cxxopts::OptionNames buttons;
+  std::vector<std::string> buttons;
+  // Not unlocked unattended.
+  uint32_t unattended_button = 0;
 
   switch (ui_type) {
     case X_MARKETPLACE_ENTRYPOINT::ContentList:
@@ -811,16 +791,15 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
             "*this session*?";
         buttons.push_back("Yes");
         buttons.push_back("No");
+        unattended_button = 1;
       } else {
         buttons.push_back("OK");
       }
       break;
   }
 
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  return xeXamDispatchDialogAsync<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, title, desc, buttons, 0), close);
+  return xeXamShowChoiceAsync(
+      {title, desc, std::move(buttons), 0, unattended_button}, on_answer);
 }
 DECLARE_XAM_EXPORT1(XamShowMarketplaceUIEx, kUI, kSketchy);
 
@@ -849,24 +828,7 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
     return X_ERROR_NO_SUCH_USER;
   }
 
-  if (cvars::headless) {
-    return xeXamDispatchHeadless(
-        [hresult_ptr]() -> X_RESULT {
-          if (hresult_ptr) {
-            *hresult_ptr = X_E_SUCCESS;
-          }
-          return X_ERROR_SUCCESS;
-        },
-        overlapped);
-  }
-
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_ACCESS_DENIED;
-  }
-
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
-  auto close = [hresult_ptr](MessageBoxDialog* dialog) -> X_RESULT {
+  auto on_answer = [hresult_ptr](uint32_t) -> X_RESULT {
     if (hresult_ptr) {
       // TODO
       *hresult_ptr = X_E_SUCCESS;
@@ -876,7 +838,7 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
 
   std::string title = "Xbox Marketplace";
   std::string desc = "";
-  cxxopts::OptionNames buttons = {"OK"};
+  std::vector<std::string> buttons = {"OK"};
 
   switch (ui_type) {
     case X_MARKETPLACE_DOWNLOAD_ITEMS_ENTRYPOINTS::FREEITEMS:
@@ -901,11 +863,8 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
       "must "
       "be installed manually using File -> Install Content.";
 
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  return xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, title, desc, buttons, 0), close,
-      overlapped);
+  return xeXamShowChoice({title, desc, std::move(buttons)}, on_answer,
+                         overlapped);
 }
 DECLARE_XAM_EXPORT1(XamShowMarketplaceDownloadItemsUI, kUI, kSketchy);
 
@@ -1193,26 +1152,11 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(dword_t user_index,
      XamShowNuiTroubleshooterUI(0xff,0,0) if param = -0x7ff8fffe
   */
 
-  if (cvars::headless) {
-    return 0;
-  }
-
-  const Emulator* emulator = kernel_state()->emulator();
-  xe::ui::Window* display_window = emulator->display_window();
-  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  if (display_window && imgui_drawer) {
-    xe::threading::Fence fence;
-    if (display_window->app_context().CallInUIThreadSynchronous([&]() {
-          xe::ui::ImGuiDialog::ShowMessageBox(
-              imgui_drawer, "NUI Troubleshooter",
-              "The game has indicated there is a problem with NUI (Kinect).")
-              ->Then(&fence);
-        })) {
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-      fence.Wait();
-      kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-    }
-  }
+  xeXamShowChoice(
+      {"NUI Troubleshooter",
+       "The game has indicated there is a problem with NUI (Kinect).",
+       {"OK"}},
+      [](uint32_t) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
 
   return X_ERROR_SUCCESS;
 }
