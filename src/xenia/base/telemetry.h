@@ -224,9 +224,12 @@ class Sink {
 };
 void AddSink(std::unique_ptr<Sink> sink);
 
-// Truncates and opens path (readable by other processes while it grows), starts
-// the writer and enables telemetry. Writes nothing itself. Returns false and
-// logs an error on failure.
+// Starts the writer and enables telemetry, writing to the sinks added so far
+// and later. Writes nothing itself. Does nothing if already started.
+void Start();
+// Truncates and opens path (readable by other processes while it grows), adds
+// it as a sink and starts telemetry if needed. Returns false and logs an error
+// on failure, or if a file is already open.
 bool OpenFile(const std::filesystem::path& path);
 
 // The reason written by Shutdown: "shutdown" (default), "title_exit", "crash".

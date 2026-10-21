@@ -307,8 +307,12 @@ X_STATUS Emulator::Setup(
         input_driver_factory) {
   X_STATUS result = X_STATUS_UNSUCCESSFUL;
 
-  if (!cvars::telemetry_file.empty() &&
-      telemetry::OpenFile(cvars::telemetry_file)) {
+  if (!cvars::telemetry_file.empty()) {
+    telemetry::OpenFile(cvars::telemetry_file);
+  }
+  // Started by the file, or already by another sink such as the automation
+  // channel.
+  if (telemetry::enabled()) {
     telemetry::Emit(SessionStartEvent());
   }
 

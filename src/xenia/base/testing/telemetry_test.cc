@@ -9,6 +9,7 @@
 
 #include "xenia/base/telemetry.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -174,6 +175,44 @@ TEST_CASE(
   REQUIRE(first.find(R"("type":"crash")") != std::string::npos);
   xe::telemetry::Shutdown();
   REQUIRE_FALSE(xe::telemetry::enabled());
+}
+
+TEST_CASE("telemetry: Start without a file, then add one", "[telemetry]") {
+  using namespace xe::telemetry;
+  // Lines are read only after Shutdown has joined the writer.
+  class LineSink : public Sink {
+   public:
+    explicit LineSink(std::vector<std::string>* lines) : lines_(lines) {}
+    void Write(std::string_view line) override { lines_->emplace_back(line); }
+
+   private:
+    std::vector<std::string>* lines_;
+  };
+  std::vector<std::string> lines;
+  AddSink(std::make_unique<LineSink>(&lines));
+  Start();
+  REQUIRE(enabled());
+  Start();
+  auto path =
+      std::filesystem::temp_directory_path() / "xe_telemetry_start_test.jsonl";
+  REQUIRE(OpenFile(path));
+  REQUIRE_FALSE(OpenFile(path));
+  EmitNow(Event("both"));
+  Shutdown();
+  REQUIRE_FALSE(enabled());
+  auto has = [](const std::vector<std::string>& in, std::string_view type) {
+    return std::any_of(in.begin(), in.end(), [type](const std::string& line) {
+      return line.find(type) != std::string::npos;
+    });
+  };
+  REQUIRE(has(lines, R"("type":"both")"));
+  REQUIRE(has(lines, R"("type":"exit")"));
+  std::ifstream in(path);
+  std::vector<std::string> file_lines;
+  for (std::string line; std::getline(in, line);) {
+    file_lines.push_back(line);
+  }
+  REQUIRE(has(file_lines, R"("type":"both")"));
 }
 
 TEST_CASE("telemetry: Shutdown writes exit and exited last", "[telemetry]") {

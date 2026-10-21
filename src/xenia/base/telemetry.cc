@@ -100,6 +100,8 @@ struct Globals {
   // Set (under write_mutex) once Shutdown has written exit and exited, so no
   // later synchronous write can follow them.
   bool closed = true;
+  // Under lifecycle_mutex.
+  bool file_open = false;
 
   std::mutex queue_mutex;
   std::condition_variable queue_cv;
@@ -901,27 +903,12 @@ void AddSink(std::unique_ptr<Sink> sink) {
   g.sinks.push_back(std::move(sink));
 }
 
-bool OpenFile(const std::filesystem::path& path) {
-  Globals& g = G();
-  std::lock_guard<std::mutex> lifecycle_lock(g.lifecycle_mutex);
-  if (enabled()) {
-    XELOGE("Telemetry: already writing, not opening {}",
-           xe::path_to_utf8(path));
-    return false;
-  }
-  // Truncate, and let other processes read the file while it grows.
-#if XE_PLATFORM_WIN32
-  FILE* file = _wfsopen(path.c_str(), L"wb", _SH_DENYWR);
-#else
-  FILE* file = std::fopen(path.c_str(), "wb");
-#endif
-  if (!file) {
-    XELOGE("Telemetry: failed to open {} for writing", xe::path_to_utf8(path));
-    return false;
-  }
+namespace {
+
+// Caller holds lifecycle_mutex, with telemetry disabled.
+void StartLocked(Globals& g) {
   {
     std::lock_guard<std::mutex> lock(g.write_mutex);
-    g.sinks.push_back(std::make_unique<FileSink>(file));
     g.closed = false;
   }
   {
@@ -950,6 +937,44 @@ bool OpenFile(const std::filesystem::path& path) {
     exit_handlers_registered = true;
     std::at_quick_exit(Shutdown);
     std::atexit(Shutdown);
+  }
+}
+
+}  // namespace
+
+void Start() {
+  Globals& g = G();
+  std::lock_guard<std::mutex> lifecycle_lock(g.lifecycle_mutex);
+  if (!enabled()) {
+    StartLocked(g);
+  }
+}
+
+bool OpenFile(const std::filesystem::path& path) {
+  Globals& g = G();
+  std::lock_guard<std::mutex> lifecycle_lock(g.lifecycle_mutex);
+  if (g.file_open) {
+    XELOGE("Telemetry: already writing a file, not opening {}",
+           xe::path_to_utf8(path));
+    return false;
+  }
+  // Truncate, and let other processes read the file while it grows.
+#if XE_PLATFORM_WIN32
+  FILE* file = _wfsopen(path.c_str(), L"wb", _SH_DENYWR);
+#else
+  FILE* file = std::fopen(path.c_str(), "wb");
+#endif
+  if (!file) {
+    XELOGE("Telemetry: failed to open {} for writing", xe::path_to_utf8(path));
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g.write_mutex);
+    g.sinks.push_back(std::make_unique<FileSink>(file));
+  }
+  g.file_open = true;
+  if (!enabled()) {
+    StartLocked(g);
   }
   return true;
 }
@@ -1037,6 +1062,7 @@ void Shutdown() {
     std::lock_guard<std::mutex> lock(g.write_mutex);
     g.sinks.clear();
   }
+  g.file_open = false;
   {
     std::lock_guard<std::mutex> lock(g.frame_mutex);
     g.frame_window.reset();
