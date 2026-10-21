@@ -652,6 +652,11 @@ void AutomationChannel::ForwardTelemetry() {
     return;
   }
   for (const auto& client : clients_) {
+    if (client->session.bench) {
+      for (const std::string& line : lines) {
+        AddFrameStats(*client->session.bench, line);
+      }
+    }
     if (!client->session.telemetry || client->closing) {
       continue;
     }

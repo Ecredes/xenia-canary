@@ -142,6 +142,10 @@ example `10.0.26200`, or the kernel release on Linux), `arch` (`x86_64`,
 | `window_vblanks` | vblanks in this window (`telemetry_window`) |
 | `swaps` | swaps in this window |
 | `swap_ms` | swap-to-swap intervals in this window, ms, 2 decimals. An interval belongs to the window of its later swap. The first swap after start or a pause has no interval |
+| `swap_compiles` | for each `swap_ms` interval, the shader and pipeline compiles during it, so a long interval can be told apart as a compile hitch |
+| `presents` | host presents in this window of a guest image not presented before; always 0 headless, where nothing is presented |
+| `present_ms` | intervals between those presents, ms, 2 decimals, counted like `swap_ms`. Measured when the host present call returns, not at scan-out |
+| `present_latency_ms` | for each present, the time from the guest output refresh with its image (at the guest's swap) to the present call's return, ms, 2 decimals |
 | `shader_compiles`, `pipeline_compiles` | guest shaders translated and host pipelines created in this window, on any thread (Vulkan placeholder pipelines are not counted) |
 | `file_read_bytes` | guest file bytes read in this window |
 | `input_polls` | guest controller polls (`XamInputGetState`) in this window |

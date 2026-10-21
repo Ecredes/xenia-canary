@@ -72,6 +72,8 @@ At most 8 connections are open at once.
 | `pad_clear` {`user`} | controller | `ok`; drops the queued states |
 | `frame` {`format`, `max_width`, `quality`} | any | the guest output now, as below, or `no frame yet` before the title has drawn |
 | `frames_watch` {`fps`, `format`, `max_width`, `quality`} | any | `ok`; then `frame` events at up to `fps` a second (1 to 60), replacing any earlier watch; `fps` 0 ends it |
+| `bench_start` | any | `ok`; starts gathering frame times for this client, restarting any bench it had |
+| `bench_stop` {`raw`} | any | the bench's summary, as below, or `no bench running` |
 | `stop` | controller | `ok`; then every client gets an `exit` event and the process ends |
 
 An unknown op is answered with an error; the connection stays open.
@@ -165,5 +167,37 @@ nothing is captured.
   a steady `fps` grid. A client with over 1 MB unsent skips frames rather than
   queueing them, so a slow client sees fresh frames, not a growing backlog.
 - Frames are for seeing the run and timing its reactions (match a frame's
-  `vblank` to a pad event's `at_vblank`). For frame pacing use telemetry's
-  `frame_stats`, which has every swap interval: a capture is a GPU readback.
+  `vblank` to a pad event's `at_vblank`). For frame pacing use a bench, or
+  telemetry's `frame_stats`: a capture is a GPU readback.
+
+### Benches
+
+A bench summarizes frame pacing between `bench_start` and `bench_stop` the way
+a frame time review would. It gathers the `frame_stats` telemetry written in
+between (see [telemetry.md](telemetry.md)), whole windows of
+`--telemetry_window` vblanks, so bench for several seconds. Each client has its
+own bench; no stream subscription is needed.
+
+| Field | Meaning |
+|---|---|
+| `windows` | `frame_stats` windows gathered |
+| `seconds`, `vblank_hz` | host time from the first window's end to the last's, and the guest vblanks per host second over it: 60 at full speed, lower when the emulator can't keep up. Left out with fewer than 2 windows |
+| `swaps` | the guest's frame times (swap intervals), summarized as below |
+| `stutters` | swap intervals at least twice the median |
+| `stutters_with_compiles` | of those, the ones with a shader or pipeline compile during them |
+| `compiles` | shader and pipeline compiles during the swap intervals |
+| `presents` | the host presents' frame times, summarized as below; only when the run presents (windowed) |
+| `present_latency_p50_ms`, `present_latency_p99_ms` | from a guest image's refresh to its host present call's return; only when the run presents |
+| `swap_ms`, `swap_compiles`, `present_ms`, `present_latency_ms` | with `raw`, the samples themselves |
+
+A summary has `frames` (intervals), `avg_fps` (frames over their total time),
+`low_1_fps` and `low_0_1_fps` (1000 over the mean of the slowest 1% and 0.1%
+of intervals, at least one), `p50_ms`, `p95_ms` and `p99_ms` (nearest-rank
+percentiles) and `max_ms`; fps and ms to 2 decimals.
+
+Swaps are the title's own frames, what it renders; presents are what Xenia
+shows on the host, which drops a guest image when a newer one is ready first.
+Input-to-screen latency can be measured from the events: a pad event's
+`at_vblank` (`pad_begin`, then `pad_seen` when the guest read it), then the
+first watched `frame` whose image changes, by its `vblank`. Presents are timed
+at the present call; the display's own latency is not measured.

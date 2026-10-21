@@ -12,13 +12,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -94,6 +97,8 @@ struct Request {
   std::optional<int64_t> max_width;
   std::optional<int64_t> quality;
   std::optional<int64_t> fps;
+  // bench_stop
+  std::optional<bool> raw;
 };
 
 struct ParseResult {
@@ -220,6 +225,14 @@ inline ParseResult ParseRequest(std::string_view line) {
     }
     request.format = format->value.GetString();
   }
+  auto raw = document.FindMember("raw");
+  if (raw != document.MemberEnd()) {
+    if (!raw->value.IsBool()) {
+      result.error = "raw must be true or false";
+      return result;
+    }
+    request.raw = raw->value.GetBool();
+  }
   result.request = std::move(request);
   return result;
 }
@@ -301,6 +314,21 @@ struct FrameWatch {
   std::optional<uint64_t> last_swap;
 };
 
+// A bench's samples, gathered from the frame_stats lines written since
+// bench_start.
+struct BenchSamples {
+  std::vector<double> swap_ms;
+  std::vector<uint64_t> swap_compiles;
+  std::vector<double> present_ms;
+  std::vector<double> present_latency_ms;
+  uint64_t windows = 0;
+  // The envelope ns of the first and last frame_stats, and the vblanks of the
+  // windows after the first: those that ended between the two.
+  uint64_t first_ns = 0;
+  uint64_t last_ns = 0;
+  uint64_t vblanks_after_first = 0;
+};
+
 // One connection's state.
 struct Session {
   Role role = Role::kNone;
@@ -312,6 +340,8 @@ struct Session {
   bool input = false;
   // Watching frames.
   std::optional<FrameWatch> frames;
+  // Benching, since bench_start.
+  std::optional<BenchSamples> bench;
 };
 
 // Telemetry's first line, describing the build, host and settings; a new
@@ -370,6 +400,11 @@ class JsonLine {
     writer_.Bool(value);
     return *this;
   }
+  JsonLine& Double(const char* key, double value) {
+    writer_.Key(key);
+    writer_.Double(value);
+    return *this;
+  }
   // The reply's correlation: re = the request's id, when it had one.
   JsonLine& Re(std::string_view id) {
     return id.empty() ? *this : Raw("re", id);
@@ -417,6 +452,8 @@ inline std::optional<hid::remote::Command> ParsePadCommand(
     const Request& request, std::string* error);
 inline std::optional<FrameOptions> ParseFrameOptions(const Request& request,
                                                      std::string* error);
+inline std::string BenchReply(std::string_view id, const BenchSamples& samples,
+                              bool raw);
 
 // What to do with one request on a connection.
 inline Decision Decide(Session& session, const Request& request,
@@ -453,7 +490,7 @@ inline Decision Decide(Session& session, const Request& request,
                 .Raw("capabilities",
                      R"(["state","stop","subscribe","dialog_answer",)"
                      R"("pad_connect","pad_set","pad_queue","pad_clear",)"
-                     R"("frame","frames_watch"])")
+                     R"("frame","frames_watch","bench_start","bench_stop"])")
                 .Raw("streams", R"(["telemetry","dialogs","input"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
@@ -514,6 +551,19 @@ inline Decision Decide(Session& session, const Request& request,
       return {ErrorLine(request.id, error)};
     }
     return {"", Action::kPad, command};
+  }
+  if (request.op == "bench_start") {
+    session.bench.emplace();
+    return {JsonLine().Re(request.id).Bool("ok", true).Finish()};
+  }
+  if (request.op == "bench_stop") {
+    if (!session.bench) {
+      return {ErrorLine(request.id, "no bench running")};
+    }
+    std::string reply =
+        BenchReply(request.id, *session.bench, request.raw.value_or(false));
+    session.bench.reset();
+    return {std::move(reply)};
   }
   if (request.op == "frame") {
     std::string error;
@@ -1164,6 +1214,203 @@ inline std::string FrameEventLine(const EncodedFrame& frame) {
       .UInt("height", frame.height)
       .Str("data", Base64(frame.bytes.data(), frame.bytes.size()));
   return event.Finish(frame.vblank, frame.swap, frame.ns, frame.state) + "\n";
+}
+
+// Benching. bench_start gathers the frame times telemetry writes from then on;
+// bench_stop summarizes them as a frame time review would: average fps, the
+// 1% and 0.1% lows, percentiles and stutters, and the same for host presents.
+
+// Adds a frame_stats telemetry line to samples; other lines are ignored.
+inline void AddFrameStats(BenchSamples& samples, std::string_view line) {
+  if (!line.starts_with(R"({"type":"frame_stats")")) {
+    return;
+  }
+  rapidjson::Document stats;
+  stats.Parse(line.data(), line.size());
+  if (stats.HasParseError() || !stats.IsObject()) {
+    return;
+  }
+  auto uint_of = [&stats](const char* key) -> uint64_t {
+    auto member = stats.FindMember(key);
+    return member != stats.MemberEnd() && member->value.IsUint64()
+               ? member->value.GetUint64()
+               : 0;
+  };
+  auto append = [&stats](const char* key, auto& values) {
+    auto member = stats.FindMember(key);
+    if (member == stats.MemberEnd() || !member->value.IsArray()) {
+      return;
+    }
+    using Value = typename std::decay_t<decltype(values)>::value_type;
+    for (const auto& value : member->value.GetArray()) {
+      if constexpr (std::is_floating_point_v<Value>) {
+        if (value.IsNumber()) {
+          values.push_back(value.GetDouble());
+        }
+      } else if (value.IsUint64()) {
+        values.push_back(value.GetUint64());
+      }
+    }
+  };
+  append("swap_ms", samples.swap_ms);
+  append("swap_compiles", samples.swap_compiles);
+  append("present_ms", samples.present_ms);
+  append("present_latency_ms", samples.present_latency_ms);
+  uint64_t ns = uint_of("ns");
+  if (samples.windows == 0) {
+    samples.first_ns = ns;
+  } else {
+    samples.vblanks_after_first += uint_of("window_vblanks");
+  }
+  samples.last_ns = ns;
+  ++samples.windows;
+}
+
+// 2 decimals.
+inline double Round2(double value) { return std::round(value * 100.0) / 100.0; }
+
+// The nearest-rank percentile of sorted values, which must not be empty.
+inline double Percentile(const std::vector<double>& sorted, double percent) {
+  size_t rank = size_t(std::ceil(percent / 100.0 * double(sorted.size())));
+  return sorted[std::clamp(rank, size_t(1), sorted.size()) - 1];
+}
+
+struct FrameTimeSummary {
+  size_t frames = 0;
+  double avg_fps = 0;
+  // 1000 / the mean of the slowest 1% and 0.1% of frame times, at least one.
+  double low_1_fps = 0;
+  double low_0_1_fps = 0;
+  double p50_ms = 0;
+  double p95_ms = 0;
+  double p99_ms = 0;
+  double max_ms = 0;
+};
+
+inline FrameTimeSummary SummarizeFrameTimes(std::vector<double> ms) {
+  FrameTimeSummary summary;
+  summary.frames = ms.size();
+  if (ms.empty()) {
+    return summary;
+  }
+  std::sort(ms.begin(), ms.end());
+  double total = std::accumulate(ms.begin(), ms.end(), 0.0);
+  auto low = [&ms](double fraction) {
+    size_t count = std::max(
+        size_t(1), size_t(std::ceil(fraction * double(ms.size()) - 1e-9)));
+    double sum = 0;
+    for (size_t i = ms.size() - count; i < ms.size(); ++i) {
+      sum += ms[i];
+    }
+    return sum > 0 ? 1000.0 * double(count) / sum : 0.0;
+  };
+  summary.avg_fps = total > 0 ? 1000.0 * double(ms.size()) / total : 0;
+  summary.low_1_fps = low(0.01);
+  summary.low_0_1_fps = low(0.001);
+  summary.p50_ms = Percentile(ms, 50);
+  summary.p95_ms = Percentile(ms, 95);
+  summary.p99_ms = Percentile(ms, 99);
+  summary.max_ms = ms.back();
+  return summary;
+}
+
+inline std::string FrameTimeSummaryJson(const FrameTimeSummary& summary) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartObject();
+  writer.Key("frames");
+  writer.Uint64(summary.frames);
+  for (auto [key, value] : {std::pair{"avg_fps", summary.avg_fps},
+                            std::pair{"low_1_fps", summary.low_1_fps},
+                            std::pair{"low_0_1_fps", summary.low_0_1_fps},
+                            std::pair{"p50_ms", summary.p50_ms},
+                            std::pair{"p95_ms", summary.p95_ms},
+                            std::pair{"p99_ms", summary.p99_ms},
+                            std::pair{"max_ms", summary.max_ms}}) {
+    writer.Key(key);
+    writer.Double(Round2(value));
+  }
+  writer.EndObject();
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+// A stutter: a frame time at least twice the median.
+struct Stutters {
+  size_t count = 0;
+  // Of those, the ones with a shader or pipeline compile in their interval.
+  size_t with_compiles = 0;
+};
+
+inline Stutters CountStutters(const std::vector<double>& ms,
+                              const std::vector<uint64_t>& compiles) {
+  Stutters stutters;
+  if (ms.empty()) {
+    return stutters;
+  }
+  std::vector<double> sorted = ms;
+  std::sort(sorted.begin(), sorted.end());
+  double threshold = 2 * Percentile(sorted, 50);
+  for (size_t i = 0; i < ms.size(); ++i) {
+    if (ms[i] >= threshold) {
+      ++stutters.count;
+      if (i < compiles.size() && compiles[i]) {
+        ++stutters.with_compiles;
+      }
+    }
+  }
+  return stutters;
+}
+
+template <typename T>
+std::string NumberListJson(const std::vector<T>& values) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartArray();
+  for (T value : values) {
+    if constexpr (std::is_floating_point_v<T>) {
+      writer.Double(value);
+    } else {
+      writer.Uint64(value);
+    }
+  }
+  writer.EndArray();
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+inline std::string BenchReply(std::string_view id, const BenchSamples& samples,
+                              bool raw) {
+  JsonLine line;
+  line.Re(id).Bool("ok", true).Uint("windows", samples.windows);
+  if (samples.windows >= 2 && samples.last_ns > samples.first_ns) {
+    double seconds = double(samples.last_ns - samples.first_ns) / 1e9;
+    line.Double("seconds", Round2(seconds))
+        .Double("vblank_hz",
+                Round2(double(samples.vblanks_after_first) / seconds));
+  }
+  line.Raw("swaps", FrameTimeSummaryJson(SummarizeFrameTimes(samples.swap_ms)));
+  Stutters stutters = CountStutters(samples.swap_ms, samples.swap_compiles);
+  line.Uint("stutters", stutters.count)
+      .Uint("stutters_with_compiles", stutters.with_compiles);
+  line.Uint("compiles",
+            std::accumulate(samples.swap_compiles.begin(),
+                            samples.swap_compiles.end(), uint64_t(0)));
+  if (!samples.present_ms.empty() || !samples.present_latency_ms.empty()) {
+    line.Raw("presents",
+             FrameTimeSummaryJson(SummarizeFrameTimes(samples.present_ms)));
+    std::vector<double> latency = samples.present_latency_ms;
+    std::sort(latency.begin(), latency.end());
+    if (!latency.empty()) {
+      line.Double("present_latency_p50_ms", Round2(Percentile(latency, 50)))
+          .Double("present_latency_p99_ms", Round2(Percentile(latency, 99)));
+    }
+  }
+  if (raw) {
+    line.Raw("swap_ms", NumberListJson(samples.swap_ms))
+        .Raw("swap_compiles", NumberListJson(samples.swap_compiles))
+        .Raw("present_ms", NumberListJson(samples.present_ms))
+        .Raw("present_latency_ms", NumberListJson(samples.present_latency_ms));
+  }
+  return line.Finish();
 }
 
 // Sent to every client before the process ends at a client's request.

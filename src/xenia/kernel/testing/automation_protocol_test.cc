@@ -494,6 +494,87 @@ TEST_CASE("Frames scale down by averaging", "[automation]") {
   REQUIRE(ScaleToWidth(rgbx.data(), 0, 2, 20, 0).pixels.empty());
 }
 
+TEST_CASE("Frame times summarize as a review would", "[automation]") {
+  // 99 frames of 10 ms and one of 50 ms.
+  std::vector<double> ms(99, 10.0);
+  ms.insert(ms.begin() + 40, 50.0);
+  FrameTimeSummary summary = SummarizeFrameTimes(ms);
+  REQUIRE(summary.frames == 100);
+  REQUIRE(Round2(summary.avg_fps) == 96.15);
+  // The slowest 1% (and 0.1%) is the one 50 ms frame.
+  REQUIRE(summary.low_1_fps == 20.0);
+  REQUIRE(summary.low_0_1_fps == 20.0);
+  REQUIRE(summary.p50_ms == 10.0);
+  REQUIRE(summary.p99_ms == 10.0);
+  REQUIRE(summary.max_ms == 50.0);
+  // Over 1000 frames the 1% low averages the slowest 10.
+  std::vector<double> many(990, 10.0);
+  many.insert(many.end(), 10, 40.0);
+  REQUIRE(SummarizeFrameTimes(many).low_1_fps == 25.0);
+  REQUIRE(SummarizeFrameTimes({}).frames == 0);
+
+  std::vector<uint64_t> compiles(100, 0);
+  compiles[40] = 2;
+  Stutters stutters = CountStutters(ms, compiles);
+  REQUIRE(stutters.count == 1);
+  REQUIRE(stutters.with_compiles == 1);
+  compiles[40] = 0;
+  REQUIRE(CountStutters(ms, compiles).with_compiles == 0);
+}
+
+TEST_CASE("Benches gather frame_stats until stopped", "[automation]") {
+  Session observer{Role::kObserver};
+  REQUIRE(Json(Decide(observer, Parsed(R"({"op":"bench_stop"})"), TestContext())
+                   .reply)["error"] == "no bench running");
+  Decide(observer, Parsed(R"({"op":"bench_start"})"), TestContext());
+  REQUIRE(observer.bench.has_value());
+  // Gathered as the channel would, then handed to the session.
+  BenchSamples samples;
+  AddFrameStats(samples,
+                R"({"type":"frame_stats","vblank":60,"swap":30,)"
+                R"("ns":1000000000,"state":"running","window_vblanks":60,)"
+                R"("swaps":30,"swap_ms":[33.3,33.4],"swap_compiles":[0,0],)"
+                R"("presents":0,"present_ms":[],"present_latency_ms":[]})");
+  AddFrameStats(samples, R"({"type":"state","vblank":61})");
+  AddFrameStats(samples,
+                R"({"type":"frame_stats","vblank":120,"swap":59,)"
+                R"("ns":2000000000,"state":"running","window_vblanks":60,)"
+                R"("swaps":29,"swap_ms":[100.0],"swap_compiles":[4],)"
+                R"("presents":2,"present_ms":[16.7],)"
+                R"("present_latency_ms":[3.5,4.5]})");
+  REQUIRE(samples.windows == 2);
+  REQUIRE(samples.swap_ms == std::vector<double>{33.3, 33.4, 100.0});
+  observer.bench = samples;
+
+  rapidjson::Document bench =
+      Json(Decide(observer, Parsed(R"({"op":"bench_stop","id":3,"raw":true})"),
+                  TestContext())
+               .reply);
+  REQUIRE(!observer.bench);
+  REQUIRE(bench["re"] == 3);
+  REQUIRE(bench["windows"] == 2);
+  REQUIRE(bench["seconds"] == 1.0);
+  REQUIRE(bench["vblank_hz"] == 60.0);
+  REQUIRE(bench["swaps"]["frames"] == 3);
+  REQUIRE(bench["swaps"]["max_ms"] == 100.0);
+  REQUIRE(bench["stutters"] == 1);
+  REQUIRE(bench["stutters_with_compiles"] == 1);
+  REQUIRE(bench["compiles"] == 4);
+  REQUIRE(bench["presents"]["frames"] == 1);
+  REQUIRE(bench["present_latency_p50_ms"] == 3.5);
+  REQUIRE(bench["present_latency_p99_ms"] == 4.5);
+  REQUIRE(bench["swap_ms"].Size() == 3);
+
+  // Without presents (headless) or raw, those are left out.
+  Decide(observer, Parsed(R"({"op":"bench_start"})"), TestContext());
+  bench = Json(
+      Decide(observer, Parsed(R"({"op":"bench_stop"})"), TestContext()).reply);
+  REQUIRE(bench["windows"] == 0);
+  REQUIRE(!bench.HasMember("presents"));
+  REQUIRE(!bench.HasMember("swap_ms"));
+  REQUIRE(!bench.HasMember("vblank_hz"));
+}
+
 TEST_CASE("Frames carry the capture's counters", "[automation]") {
   EncodedFrame frame;
   frame.format = FrameFormat::kPng;

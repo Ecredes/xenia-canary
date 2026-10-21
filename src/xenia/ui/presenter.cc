@@ -13,6 +13,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/ui/window.h"
 
 #if XE_PLATFORM_WIN32
@@ -360,6 +361,8 @@ bool Presenter::RefreshGuestOutput(
   writable_properties.display_aspect_ratio_x = display_aspect_ratio_x;
   writable_properties.display_aspect_ratio_y = display_aspect_ratio_y;
   writable_properties.is_8bpc = false;
+  writable_properties.refresh_ns =
+      telemetry::enabled() ? telemetry::NowNs() : 0;
   bool is_active = writable_properties.IsActive();
   if (is_active) {
     if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_,
@@ -644,6 +647,8 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
       properties.IsActive() ? mailbox_index : UINT32_MAX;
   if (properties_out) {
     *properties_out = properties;
+    // Only painting asks for the properties.
+    paint_refresh_ns_ = properties.IsActive() ? properties.refresh_ns : 0;
   }
   return std::move(consumer_lock);
 }
@@ -1275,7 +1280,14 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ ==
               SurfacePaintConnectionState::kConnectedPaintable);
+  paint_refresh_ns_ = 0;
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  if ((result == PaintResult::kPresented ||
+       result == PaintResult::kPresentedSuboptimal) &&
+      paint_refresh_ns_ && paint_refresh_ns_ != presented_refresh_ns_) {
+    presented_refresh_ns_ = paint_refresh_ns_;
+    telemetry::OnHostPresent(paint_refresh_ns_, telemetry::NowNs());
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;

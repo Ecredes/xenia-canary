@@ -75,6 +75,8 @@ std::atomic<uint8_t> current_state_{uint8_t(State::kStarting)};
 std::atomic<uint64_t> vblank_{0};
 std::atomic<uint64_t> swap_{0};
 std::array<std::atomic<uint64_t>, kCounterCount> counters_{};
+// Shader and pipeline compiles since Start, never reset by a window.
+std::atomic<uint64_t> compiles_total{0};
 std::array<std::atomic<int64_t>, kGaugeCount> gauges_{};
 std::atomic<float> peak_{0.0f};
 
@@ -241,21 +243,35 @@ void EmitFrameStats(const FrameStats& stats) {
   auto gauge = [](Gauge g) {
     return gauges_[size_t(g)].load(std::memory_order_relaxed);
   };
-  std::string swap_ms = "[";
-  for (size_t i = 0; i < stats.swap_ms.size(); ++i) {
-    if (i) {
-      swap_ms += ',';
+  auto doubles = [](const std::vector<double>& values) {
+    std::string json = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i) {
+        json += ',';
+      }
+      json += FormatDouble(values[i]);
     }
-    swap_ms += FormatDouble(stats.swap_ms[i]);
+    return json + ']';
+  };
+  std::string swap_compiles = "[";
+  for (size_t i = 0; i < stats.swap_compiles.size(); ++i) {
+    if (i) {
+      swap_compiles += ',';
+    }
+    swap_compiles += std::to_string(stats.swap_compiles[i]);
   }
-  swap_ms += ']';
+  swap_compiles += ']';
   std::optional<double> peak_db =
       PeakDb(peak_.exchange(0.0f, std::memory_order_relaxed));
 
   Event event("frame_stats");
   event.UInt("window_vblanks", stats.window_vblanks)
       .UInt("swaps", stats.swaps)
-      .Raw("swap_ms", swap_ms)
+      .Raw("swap_ms", doubles(stats.swap_ms))
+      .Raw("swap_compiles", swap_compiles)
+      .UInt("presents", stats.presents)
+      .Raw("present_ms", doubles(stats.present_ms))
+      .Raw("present_latency_ms", doubles(stats.present_latency_ms))
       .UInt("shader_compiles", take(Counter::kShaderCompiles))
       .UInt("pipeline_compiles", take(Counter::kPipelineCompiles))
       .UInt("file_read_bytes", take(Counter::kFileReadBytes))
@@ -360,6 +376,10 @@ namespace detail {
 
 void CountSlow(Counter counter, uint64_t amount) {
   counters_[size_t(counter)].fetch_add(amount, std::memory_order_relaxed);
+  if (counter == Counter::kShaderCompiles ||
+      counter == Counter::kPipelineCompiles) {
+    compiles_total.fetch_add(amount, std::memory_order_relaxed);
+  }
 }
 
 void AddGaugeSlow(Gauge gauge, int64_t delta) {
@@ -507,10 +527,22 @@ void OnSwap(uint64_t swap_count, uint64_t host_ns) {
     Globals& g = G();
     std::lock_guard<std::mutex> lock(g.frame_mutex);
     if (g.frame_window) {
-      g.frame_window->OnSwap(host_ns);
+      g.frame_window->OnSwap(host_ns,
+                             compiles_total.load(std::memory_order_relaxed));
     }
   }
   Notify(Signal::kSwap);
+}
+
+void OnHostPresent(uint64_t refresh_ns, uint64_t present_ns) {
+  if (!enabled()) {
+    return;
+  }
+  Globals& g = G();
+  std::lock_guard<std::mutex> lock(g.frame_mutex);
+  if (g.frame_window) {
+    g.frame_window->OnPresent(refresh_ns, present_ns);
+  }
 }
 
 namespace {
@@ -923,6 +955,7 @@ void StartLocked(Globals& g) {
   for (auto& counter : counters_) {
     counter.store(0, std::memory_order_relaxed);
   }
+  compiles_total.store(0, std::memory_order_relaxed);
   peak_.store(0.0f, std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lock(g.queue_mutex);
@@ -1085,27 +1118,58 @@ void Shutdown() {
 FrameWindow::FrameWindow(uint32_t window_vblanks)
     : window_vblanks_(std::max(window_vblanks, uint32_t(1))) {}
 
-void FrameWindow::OnSwap(uint64_t host_ns) {
+namespace {
+// ns -> ms with 2 decimals.
+double IntervalMs(uint64_t from_ns, uint64_t to_ns) {
+  return std::round(double(to_ns - from_ns) / 10000.0) / 100.0;
+}
+}  // namespace
+
+void FrameWindow::OnSwap(uint64_t host_ns, uint64_t compiles_total) {
   ++swaps_;
   if (last_swap_ns_ && host_ns >= *last_swap_ns_) {
-    // ns -> ms with 2 decimals.
-    double interval_ms =
-        std::round(double(host_ns - *last_swap_ns_) / 10000.0) / 100.0;
-    swap_ms_.push_back(interval_ms);
+    swap_ms_.push_back(IntervalMs(*last_swap_ns_, host_ns));
+    swap_compiles_.push_back(
+        compiles_total >= last_compiles_ ? compiles_total - last_compiles_ : 0);
   }
   last_swap_ns_ = host_ns;
+  last_compiles_ = compiles_total;
 }
 
-void FrameWindow::OnPause() { last_swap_ns_.reset(); }
+void FrameWindow::OnPresent(uint64_t refresh_ns, uint64_t present_ns) {
+  ++presents_;
+  if (last_present_ns_ && present_ns >= *last_present_ns_) {
+    present_ms_.push_back(IntervalMs(*last_present_ns_, present_ns));
+  }
+  if (present_ns >= refresh_ns) {
+    present_latency_ms_.push_back(IntervalMs(refresh_ns, present_ns));
+  }
+  last_present_ns_ = present_ns;
+}
+
+void FrameWindow::OnPause() {
+  last_swap_ns_.reset();
+  last_present_ns_.reset();
+}
 
 std::optional<FrameStats> FrameWindow::OnVblank() {
   if (++vblanks_ < window_vblanks_) {
     return std::nullopt;
   }
-  FrameStats stats{window_vblanks_, swaps_, std::move(swap_ms_)};
+  FrameStats stats{window_vblanks_,
+                   swaps_,
+                   std::move(swap_ms_),
+                   std::move(swap_compiles_),
+                   presents_,
+                   std::move(present_ms_),
+                   std::move(present_latency_ms_)};
   vblanks_ = 0;
   swaps_ = 0;
+  presents_ = 0;
   swap_ms_.clear();
+  swap_compiles_.clear();
+  present_ms_.clear();
+  present_latency_ms_.clear();
   return stats;
 }
 

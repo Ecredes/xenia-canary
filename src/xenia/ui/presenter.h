@@ -369,6 +369,9 @@ class Presenter {
     uint32_t display_aspect_ratio_x;
     uint32_t display_aspect_ratio_y;
     bool is_8bpc;
+    // Host time of the refresh that put this image here, for telemetry; 0
+    // when telemetry is off.
+    uint64_t refresh_ns;
 
     GuestOutputProperties() { SetToInactive(); }
 
@@ -383,6 +386,7 @@ class Presenter {
       display_aspect_ratio_x = 0;
       display_aspect_ratio_y = 0;
       is_8bpc = false;
+      refresh_ns = 0;
     }
   };
 
@@ -960,6 +964,10 @@ class Presenter {
   // Accessible only by refreshing, whether the last refresh contained an image
   // rather than being blank.
   bool guest_output_active_last_refresh_ = false;
+  // Accessible only by painting: refresh_ns of the image the current paint
+  // consumed, and of the last one presented.
+  uint64_t paint_refresh_ns_ = 0;
+  uint64_t presented_refresh_ns_ = 0;
 
   // Ordered by the Z order, and then by the time of addition.
   // Note: All the iteration logic involving this Z ordering must be the same as

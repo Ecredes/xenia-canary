@@ -77,6 +77,30 @@ TEST_CASE("telemetry: FrameWindow intervals and windows", "[telemetry]") {
   REQUIRE(s->window_vblanks == 3);
 }
 
+TEST_CASE("telemetry: FrameWindow compiles per interval and presents",
+          "[telemetry]") {
+  xe::telemetry::FrameWindow w(1);
+  w.OnSwap(0, 5);  // compiles before the first interval aren't counted
+  w.OnSwap(16'000'000, 5);
+  w.OnSwap(66'000'000, 8);
+  w.OnPresent(0, 4'000'000);
+  w.OnPresent(16'000'000, 21'000'000);
+  auto s = w.OnVblank().value_or(xe::telemetry::FrameStats{});
+  REQUIRE(s.swap_ms == std::vector<double>{16.0, 50.0});
+  REQUIRE(s.swap_compiles == std::vector<uint64_t>{0, 3});
+  REQUIRE(s.presents == 2);
+  REQUIRE(s.present_ms == std::vector<double>{17.0});
+  REQUIRE(s.present_latency_ms == std::vector<double>{4.0, 5.0});
+  // A new window starts empty; a pause drops the last present time.
+  w.OnPause();
+  w.OnPresent(100'000'000, 101'000'000);
+  s = w.OnVblank().value_or(xe::telemetry::FrameStats{});
+  REQUIRE(s.swap_compiles.empty());
+  REQUIRE(s.presents == 1);
+  REQUIRE(s.present_ms.empty());
+  REQUIRE(s.present_latency_ms == std::vector<double>{1.0});
+}
+
 TEST_CASE("telemetry: FrameWindow empty window and pause", "[telemetry]") {
   xe::telemetry::FrameWindow w(1);
   auto s = w.OnVblank();

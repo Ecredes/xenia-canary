@@ -141,6 +141,10 @@ class GaugeScope {
 // swap intervals and moves loading -> running on the first swap.
 void OnVblank(uint64_t vblank_count, uint64_t swap_count);
 void OnSwap(uint64_t swap_count, uint64_t host_ns);
+// Called by the presenter when a host present call returns with a guest
+// output image not presented before; refresh_ns is when the guest output was
+// refreshed with that image, at its swap.
+void OnHostPresent(uint64_t refresh_ns, uint64_t present_ns);
 // Who paused the emulator. Each source pauses and resumes on its own; the
 // state stays paused while any source is paused.
 enum class PauseSource : uint8_t {
@@ -254,16 +258,25 @@ struct FrameStats {
   uint32_t window_vblanks;
   uint32_t swaps;
   std::vector<double> swap_ms;
+  // Shader and pipeline compiles during each swap_ms interval.
+  std::vector<uint64_t> swap_compiles;
+  uint32_t presents = 0;
+  // Intervals between host presents of new guest images, and from each
+  // image's refresh to its present.
+  std::vector<double> present_ms;
+  std::vector<double> present_latency_ms;
 };
 
 // Swap-interval accounting for frame_stats. An interval is the gap between two
 // consecutive swaps (ms, 2 decimals) and belongs to the window of the later
-// swap. The first swap after construction or OnPause() has no interval. Not
-// thread-safe.
+// swap. The first swap after construction or OnPause() has no interval. Host
+// presents are counted the same way. Not thread-safe.
 class FrameWindow {
  public:
   explicit FrameWindow(uint32_t window_vblanks);
-  void OnSwap(uint64_t host_ns);
+  // compiles_total: shader and pipeline compiles so far, from any thread.
+  void OnSwap(uint64_t host_ns, uint64_t compiles_total = 0);
+  void OnPresent(uint64_t refresh_ns, uint64_t present_ns);
   void OnPause();
   // Returns the window's stats every window_vblanks-th call and resets it.
   std::optional<FrameStats> OnVblank();
@@ -273,7 +286,13 @@ class FrameWindow {
   uint32_t vblanks_ = 0;
   uint32_t swaps_ = 0;
   std::vector<double> swap_ms_;
+  std::vector<uint64_t> swap_compiles_;
   std::optional<uint64_t> last_swap_ns_;
+  uint64_t last_compiles_ = 0;
+  uint32_t presents_ = 0;
+  std::vector<double> present_ms_;
+  std::vector<double> present_latency_ms_;
+  std::optional<uint64_t> last_present_ns_;
 };
 
 }  // namespace xe::telemetry

@@ -118,7 +118,7 @@ class AutomationChannel : public AnswerSource {
   bool Read(Client& client);
   bool Flush(Client& client);
   void Handle(Client& client, std::string_view line);
-  // Hands queued telemetry to its subscribers.
+  // Hands queued telemetry to its subscribers, and frame_stats to benches.
   void ForwardTelemetry();
   // Sends dialog events, and answers dialogs past their deadline, or all of
   // them when no controller is subscribed any more.
