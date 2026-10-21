@@ -19,6 +19,7 @@
 #include "xenia/app/first_run_disclaimer.h"
 #include "xenia/app/title_launch.h"
 #include "xenia/app/windowed_host.h"
+#include "xenia/automation_channel.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
@@ -38,6 +39,8 @@
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
+
+#include "version.h"
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
@@ -311,6 +314,8 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   std::unique_ptr<Emulator> emulator_;
   // None when headless.
   std::unique_ptr<EmulatorWindow> emulator_window_;
+  // Set up by the emulator thread; none without --automation_port.
+  std::unique_ptr<automation::AutomationChannel> automation_;
   std::atomic<int> exit_code_ = EXIT_SUCCESS;
 
   // Created on demand, used by the emulator.
@@ -669,6 +674,11 @@ void EmulatorApp::EmulatorThread() {
   CallInWindow([](EmulatorWindow& window) {
     window.SetupGraphicsSystemPresenterPainting();
   });
+
+  // Before any title launches, so a client can watch from the start.
+  automation_ = automation::AutomationChannel::Create(
+      *emulator_, {XE_BUILD_BRANCH, XE_BUILD_COMMIT, XE_BUILD_DATE},
+      [this]() { app_context().RequestDeferredQuit(); });
 
   const auto fs = emulator_->file_system();
 

@@ -382,6 +382,9 @@ ICommandVar* define_cmdvar(const char* name, T* default_value,
 #define DEFINE_transient_bool(name, default_value, description, category) \
   DEFINE_CVar(name, default_value, description, category, true, bool)
 
+#define DEFINE_transient_int32(name, default_value, description, category) \
+  DEFINE_CVar(name, default_value, description, category, true, int32_t)
+
 #define DEFINE_transient_string(name, default_value, description, category) \
   DEFINE_CVar(name, default_value, description, category, true, std::string)
 
