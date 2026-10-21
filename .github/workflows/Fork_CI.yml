@@ -8,7 +8,9 @@ name: Fork CI
 # the default branch's copy, so it runs for every push to any branch: it cancels
 # that push's Orchestrator run and lints and builds the same commit with ccache.
 # Runs started this way use the default branch's cache scope, so every branch
-# shares one compiler cache.
+# can restore any branch's compiler cache. Each build restores the cache of
+# the built commit closest to it, so a stacked branch starts from the branch
+# below it rather than from fork-ci (fork issue #63).
 #
 # It builds with copies of upstream's workflows, so it can't see changes to
 # them. Setup warns, and the commit status says so, when the commit's
@@ -50,6 +52,9 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       drift: ${{ steps.drift.outputs.drift }}
       save_cache: ${{ steps.resolve.outputs.save_cache }}
+      linux_cache: ${{ steps.caches.outputs.linux }}
+      windows_cache: ${{ steps.caches.outputs.windows }}
+      fork_ci_sha: ${{ steps.caches.outputs.fork_ci_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -72,8 +77,8 @@ jobs:
             sha=$(gh api "repos/$REPO/commits/$INPUT_REF" -q .sha)
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          # Only fork-ci builds save the compiler caches; every other branch
-          # restores the newest fork-ci entry (fork issue #29).
+          # fork-ci builds always save the compiler caches; other builds save
+          # them only when they compiled much (fork issues #29, #63).
           if [ "$HEAD_BRANCH" = fork-ci ] || [ "$INPUT_REF" = fork-ci ]; then
             echo "save_cache=true" >> "$GITHUB_OUTPUT"
           else
@@ -81,6 +86,38 @@ jobs:
           fi
           gh api "repos/$REPO/statuses/$sha" -f state=pending -f context="Fork CI" \
             -f description="Building" -f target_url="$RUN_URL" > /dev/null
+
+      # The cache of the built commit closest to this one: fewest commits
+      # ahead plus behind, by the compare API. For a stacked branch that is
+      # the branch below it; fork-ci, which diverges from topic branches by its
+      # CI commits, is the fallback.
+      - name: Pick compiler caches
+        id: caches
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |-
+          pick() {
+            local prefix=$1 best= best_score= key cand counts ahead behind score
+            for key in $(gh api "repos/$REPO/actions/caches?key=$prefix&per_page=100" -q '.actions_caches[].key'); do
+              cand=${key#"$prefix"}
+              [ ${#cand} -eq 40 ] || continue
+              counts=$(gh api "repos/$REPO/compare/$cand...$SHA" -q '"\(.ahead_by) \(.behind_by)"' 2>/dev/null) || continue
+              read -r ahead behind <<< "$counts"
+              score=$((ahead + behind))
+              echo "$key: $ahead ahead, $behind behind" >&2
+              if [ -z "$best_score" ] || [ "$score" -lt "$best_score" ]; then
+                best=$key
+                best_score=$score
+              fi
+            done
+            echo "$best"
+          }
+          linux=$(pick Linux-ccache-)
+          windows=$(pick Windows-ccache-v2-)
+          echo "Linux restores ${linux:-the newest entry}, Windows ${windows:-the newest entry}"
+          echo "linux=$linux" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+          echo "fork_ci_sha=$(gh api "repos/$REPO/commits/fork-ci" -q .sha)" >> "$GITHUB_OUTPUT"
 
       - name: Check the Fork_* copies against upstream
         id: drift
@@ -131,6 +168,8 @@ jobs:
     with:
       ref: ${{ needs.setup.outputs.sha }}
       save-cache: ${{ needs.setup.outputs.save_cache == 'true' }}
+      restore-key: ${{ needs.setup.outputs.windows_cache }}
+      keep-ref: ${{ needs.setup.outputs.fork_ci_sha }}
 
   build-linux:
     name: Linux (x86-64)
@@ -139,6 +178,8 @@ jobs:
     with:
       ref: ${{ needs.setup.outputs.sha }}
       save-cache: ${{ needs.setup.outputs.save_cache == 'true' }}
+      restore-key: ${{ needs.setup.outputs.linux_cache }}
+      keep-ref: ${{ needs.setup.outputs.fork_ci_sha }}
 
   report:
     name: Report

@@ -12,9 +12,19 @@ on:
         required: true
         type: string
       save-cache:
-        description: 'Save the compiler cache (fork-ci builds only)'
+        description: 'Always save the compiler cache (fork-ci builds); other builds save it only when cold'
         required: true
         type: boolean
+      restore-key:
+        description: 'Compiler cache to restore, picked by Fork_CI.yml; empty for the newest'
+        required: false
+        type: string
+        default: ''
+      keep-ref:
+        description: "fork-ci's head, whose compiler cache is never deleted"
+        required: false
+        type: string
+        default: ''
     outputs:
       cacheable:
         description: "'false' if the Release flags to rewrite weren't all found"
@@ -83,8 +93,8 @@ jobs:
           $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
           git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
 
-      # Restored by every build, saved only by fork-ci builds (see "Save
-      # compiler output" below, fork issue #29).
+      # The cache Fork_CI.yml picked, the closest built commit's, or else the
+      # newest (fork issues #29, #63).
       - name: Restore compiler output
         uses: actions/cache/restore@v6
         with:
@@ -92,7 +102,7 @@ jobs:
             C:\ccache
             build\bin\Windows\Release\*.iobj
             build\bin\Windows\Release\*.ipdb
-          key: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
+          key: ${{ inputs.restore-key || format('{0}-ccache-v2-{1}', runner.os, inputs.ref) }}
           restore-keys: ${{ runner.os }}-ccache-v2-
 
       - name: Install ccache
@@ -135,6 +145,7 @@ jobs:
           }
 
       - name: Build Xenia
+        id: build
         env:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -146,6 +157,19 @@ jobs:
           python xenia-build.py build --config=Release --target=xenia-app
           $build_result = $LASTEXITCODE
           ccache --show-stats -v
+          # More than a tenth compiled: the cache is worth saving for the
+          # branches built on this one.
+          $stats = @{}
+          ccache --print-stats | ForEach-Object {
+            $name, $value = $_ -split '\s+'
+            $stats[$name] = [int64]$value
+          }
+          $hits = $stats['direct_cache_hit'] + $stats['preprocessed_cache_hit']
+          $misses = [int64]$stats['cache_miss']
+          echo "Compiler cache: $hits hits, $misses misses"
+          if ($misses * 10 -gt $hits + $misses) {
+            echo "cold=true" >> $env:GITHUB_OUTPUT
+          }
           Get-ChildItem build\bin\Windows\Release -ErrorAction SilentlyContinue | Format-Table Name, Length
           exit $build_result
 
@@ -182,11 +206,11 @@ jobs:
           --target xenia-gpu-vulkan-trace-dump
           --target xenia-gpu-vulkan-trace-viewer
 
-      # Only entries this build used are kept, so the cache doesn't grow with
-      # every upstream change, and the entries it replaces are deleted to stay
-      # under the repository's 10 GB cache limit.
+      # fork-ci builds and cold builds save. Only entries this build used are
+      # kept, so the cache doesn't grow with every upstream change, and older
+      # entries are deleted to stay under the repository's 10 GB cache limit.
       - name: Trim compiler output
-        if: ${{ inputs.save-cache }}
+        if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
         env:
           CCACHE_DIR: C:\ccache
         run: |-
@@ -195,7 +219,7 @@ jobs:
           ccache --show-stats
 
       - name: Save compiler output
-        if: ${{ inputs.save-cache }}
+        if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
         uses: actions/cache/save@v6
         with:
           path: |
@@ -205,18 +229,27 @@ jobs:
           key: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
 
       - name: Delete replaced compiler output
-        if: ${{ inputs.save-cache }}
+        if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PREFIX: ${{ runner.os }}-ccache-v2-
           KEY: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
+          KEEP: ${{ runner.os }}-ccache-v2-${{ inputs.keep-ref }}
         run: |-
-          gh api "repos/$REPO/actions/caches?key=$PREFIX&per_page=100" \
-            -q ".actions_caches[] | select(.key != \"$KEY\") | .id" |
-            while read -r id; do
-              gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+          # Keeps this entry, fork-ci's, and the 3 newest others.
+          kept=0
+          gh api "repos/$REPO/actions/caches?key=$PREFIX&per_page=100&sort=created_at&direction=desc" \
+            -q '.actions_caches[] | "\(.id) \(.key)"' |
+            while read -r id key; do
+              if [ "$key" = "$KEY" ] || [ "$key" = "$KEEP" ]; then
+                continue
+              fi
+              kept=$((kept + 1))
+              if [ "$kept" -gt 3 ]; then
+                gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+              fi
             done
 
       - name: Prepare artifacts

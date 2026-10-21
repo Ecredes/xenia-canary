@@ -12,9 +12,19 @@ on:
         required: true
         type: string
       save-cache:
-        description: 'Save the compiler cache (fork-ci builds only)'
+        description: 'Always save the compiler cache (fork-ci builds); other builds save it only when cold'
         required: true
         type: boolean
+      restore-key:
+        description: 'Compiler cache to restore, picked by Fork_CI.yml; empty for the newest'
+        required: false
+        type: string
+        default: ''
+      keep-ref:
+        description: "fork-ci's head, whose compiler cache is never deleted"
+        required: false
+        type: string
+        default: ''
 
 env:
   LLVM_VERSION: 20
@@ -38,15 +48,15 @@ jobs:
           path: ~/vulkan-sdk
           key: ${{ runner.os }}-vulkan-sdk-latest
 
-      # Restored by every build, saved only by fork-ci builds (see "Save
-      # compiler output" below, fork issue #29).
+      # The cache Fork_CI.yml picked, the closest built commit's, or else the
+      # newest (fork issues #29, #63).
       - name: Restore compiler output
         uses: actions/cache/restore@v6
         with:
           path: |
             ~/.ccache
             ~/.cache/thinlto
-          key: ${{ runner.os }}-ccache-${{ inputs.ref }}
+          key: ${{ inputs.restore-key || format('{0}-ccache-{1}', runner.os, inputs.ref) }}
           restore-keys: ${{ runner.os }}-ccache-
 
       - name: Cache linuxdeploy tools
@@ -105,6 +115,7 @@ jobs:
           git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $SUBMODULES
 
       - name: Build Xenia
+        id: build
         env:
           CC: clang-${{ env.LLVM_VERSION }}
           CXX: clang++-${{ env.LLVM_VERSION }}
@@ -122,6 +133,15 @@ jobs:
           ./xenia-build.py build --config=Release
           ccache --show-stats
           du -sh ~/.ccache ~/.cache/thinlto || true
+          # More than a tenth compiled: the cache is worth saving for the
+          # branches built on this one.
+          stats=$(ccache --print-stats)
+          hits=$(awk '$1 == "direct_cache_hit" || $1 == "preprocessed_cache_hit" { n += $2 } END { print n + 0 }' <<< "$stats")
+          misses=$(awk '$1 == "cache_miss" { n += $2 } END { print n + 0 }' <<< "$stats")
+          echo "Compiler cache: $hits hits, $misses misses"
+          if [ $((misses * 10)) -gt $((hits + misses)) ]; then
+            echo "cold=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # Fork-only until upstream runs tests (fork issue #5, branch ci/run-tests).
       # PhysicalHeap vE0000000 AllocRange alignment is excluded: it fails on
@@ -162,17 +182,17 @@ jobs:
             --target xenia-gpu-vulkan-trace-dump \
             --target xenia-gpu-vulkan-trace-viewer
 
-      # Only entries this build used are kept, and the entries this save
-      # replaces are deleted, as in Fork_Windows_x86.yml.
+      # fork-ci builds and cold builds save. Only entries this build used are
+      # kept, and older entries are deleted, as in Fork_Windows_x86.yml.
       - name: Trim compiler output
-        if: ${{ inputs.save-cache }}
+        if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
         run: |-
           export CCACHE_DIR=$HOME/.ccache
           ccache --evict-older-than "$(( $(date +%s) - BUILD_START + 300 ))s"
           ccache --show-stats
 
       - name: Save compiler output
-        if: ${{ inputs.save-cache }}
+        if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
         uses: actions/cache/save@v6
         with:
           path: |
@@ -181,17 +201,26 @@ jobs:
           key: ${{ runner.os }}-ccache-${{ inputs.ref }}
 
       - name: Delete replaced compiler output
-        if: ${{ inputs.save-cache }}
+        if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PREFIX: ${{ runner.os }}-ccache-
           KEY: ${{ runner.os }}-ccache-${{ inputs.ref }}
+          KEEP: ${{ runner.os }}-ccache-${{ inputs.keep-ref }}
         run: |-
-          gh api "repos/$REPO/actions/caches?key=$PREFIX&per_page=100" \
-            -q ".actions_caches[] | select(.key != \"$KEY\") | .id" |
-            while read -r id; do
-              gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+          # Keeps this entry, fork-ci's, and the 3 newest others.
+          kept=0
+          gh api "repos/$REPO/actions/caches?key=$PREFIX&per_page=100&sort=created_at&direction=desc" \
+            -q '.actions_caches[] | "\(.id) \(.key)"' |
+            while read -r id key; do
+              if [ "$key" = "$KEY" ] || [ "$key" = "$KEEP" ]; then
+                continue
+              fi
+              kept=$((kept + 1))
+              if [ "$kept" -gt 3 ]; then
+                gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+              fi
             done
 
       - name: Prepare AppImage
