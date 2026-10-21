@@ -39,6 +39,8 @@ namespace automation {
 constexpr uint32_t kProtocolVersion = 1;
 // A longer line drops the client.
 constexpr size_t kMaxLineLength = 16 * 1024 * 1024;
+// The guest's vblank rate: no title swaps faster.
+constexpr int64_t kMaxWatchFps = 60;
 
 // Splits a byte stream into lines, without the terminator (\n or \r\n).
 class LineSplitter {
@@ -87,6 +89,11 @@ struct Request {
   std::optional<int64_t> frames;
   // The pad object as JSON text.
   std::string pad;
+  // frame, frames_watch: unchecked until ParseFrameOptions.
+  std::optional<std::string> format;
+  std::optional<int64_t> max_width;
+  std::optional<int64_t> quality;
+  std::optional<int64_t> fps;
 };
 
 struct ParseResult {
@@ -176,7 +183,10 @@ inline ParseResult ParseRequest(std::string_view line) {
   }
   for (auto [key, field] :
        {std::pair{"user", &request.user}, std::pair{"input", &request.input},
-        std::pair{"frames", &request.frames}}) {
+        std::pair{"frames", &request.frames},
+        std::pair{"max_width", &request.max_width},
+        std::pair{"quality", &request.quality},
+        std::pair{"fps", &request.fps}}) {
     auto member = document.FindMember(key);
     if (member != document.MemberEnd()) {
       if (!member->value.IsInt64()) {
@@ -201,6 +211,14 @@ inline ParseResult ParseRequest(std::string_view line) {
       return result;
     }
     request.pad = ToJson(pad->value);
+  }
+  auto format = document.FindMember("format");
+  if (format != document.MemberEnd()) {
+    if (!format->value.IsString()) {
+      result.error = "format must be a string";
+      return result;
+    }
+    request.format = format->value.GetString();
   }
   result.request = std::move(request);
   return result;
@@ -263,6 +281,26 @@ struct Context {
   Snapshot snapshot;
 };
 
+enum class FrameFormat { kJpeg, kPng };
+
+// How a frame is encoded. A max_width of 0 keeps the guest output's width.
+struct FrameOptions {
+  FrameFormat format = FrameFormat::kJpeg;
+  uint32_t max_width = 0;
+  uint32_t quality = 85;
+  bool operator==(const FrameOptions&) const = default;
+};
+
+// A frames_watch: frames at up to fps a second, each of a new swap.
+struct FrameWatch {
+  FrameOptions options;
+  uint32_t fps = 0;
+  // When the next frame is due, in host ns; 0 for now.
+  uint64_t next_ns = 0;
+  // The swap of the last frame sent, none before the first.
+  std::optional<uint64_t> last_swap;
+};
+
 // One connection's state.
 struct Session {
   Role role = Role::kNone;
@@ -272,6 +310,8 @@ struct Session {
   bool dialogs = false;
   // Subscribed to pad events.
   bool input = false;
+  // Watching frames.
+  std::optional<FrameWatch> frames;
 };
 
 // Telemetry's first line, describing the build, host and settings; a new
@@ -290,12 +330,15 @@ enum class Action {
   kAnswerDialog,
   // Apply pad, and reply with PadReply.
   kPad,
+  // Capture a frame with frame_options, and reply with FrameReply.
+  kFrame,
 };
 
 struct Decision {
   std::string reply;
   Action action = Action::kNone;
   std::optional<hid::remote::Command> pad;
+  FrameOptions frame_options;
 };
 
 class JsonLine {
@@ -372,6 +415,8 @@ inline std::string SnapshotJson(const Snapshot& snapshot) {
 inline std::string StringListJson(const std::vector<std::string>& values);
 inline std::optional<hid::remote::Command> ParsePadCommand(
     const Request& request, std::string* error);
+inline std::optional<FrameOptions> ParseFrameOptions(const Request& request,
+                                                     std::string* error);
 
 // What to do with one request on a connection.
 inline Decision Decide(Session& session, const Request& request,
@@ -407,7 +452,8 @@ inline Decision Decide(Session& session, const Request& request,
                 .Raw("xenia", xenia)
                 .Raw("capabilities",
                      R"(["state","stop","subscribe","dialog_answer",)"
-                     R"("pad_connect","pad_set","pad_queue","pad_clear"])")
+                     R"("pad_connect","pad_set","pad_queue","pad_clear",)"
+                     R"("frame","frames_watch"])")
                 .Raw("streams", R"(["telemetry","dialogs","input"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
@@ -468,6 +514,36 @@ inline Decision Decide(Session& session, const Request& request,
       return {ErrorLine(request.id, error)};
     }
     return {"", Action::kPad, command};
+  }
+  if (request.op == "frame") {
+    std::string error;
+    std::optional<FrameOptions> options = ParseFrameOptions(request, &error);
+    if (!options) {
+      return {ErrorLine(request.id, error)};
+    }
+    Decision decision{"", Action::kFrame};
+    decision.frame_options = *options;
+    return decision;
+  }
+  if (request.op == "frames_watch") {
+    if (!request.fps || *request.fps < 0 || *request.fps > kMaxWatchFps) {
+      return {ErrorLine(
+          request.id, "fps must be from 0 to " + std::to_string(kMaxWatchFps))};
+    }
+    std::string error;
+    std::optional<FrameOptions> options = ParseFrameOptions(request, &error);
+    if (!options) {
+      return {ErrorLine(request.id, error)};
+    }
+    if (*request.fps == 0) {
+      session.frames.reset();
+    } else {
+      FrameWatch watch;
+      watch.options = *options;
+      watch.fps = uint32_t(*request.fps);
+      session.frames = watch;
+    }
+    return {JsonLine().Re(request.id).Bool("ok", true).Finish()};
   }
   if (request.op == "dialog_answer") {
     if (session.role != Role::kController) {
@@ -921,6 +997,173 @@ inline telemetry::Event PadEvent(const hid::remote::PadEvent& pad_event) {
       .UInt("input", pad_event.id)
       .UInt("at_vblank", pad_event.vblank);
   return event;
+}
+
+// Frames. frame captures the guest output once; frames_watch sends frame events
+// at up to fps a second. Both scale to max_width and encode as JPEG or PNG.
+
+inline std::optional<FrameOptions> ParseFrameOptions(const Request& request,
+                                                     std::string* error) {
+  FrameOptions options;
+  if (request.format) {
+    if (*request.format == "jpeg") {
+      options.format = FrameFormat::kJpeg;
+    } else if (*request.format == "png") {
+      options.format = FrameFormat::kPng;
+    } else {
+      *error = "format must be jpeg or png";
+      return std::nullopt;
+    }
+  }
+  if (request.max_width) {
+    if (*request.max_width < 0 || *request.max_width > 8192) {
+      *error = "max_width must be from 0 to 8192";
+      return std::nullopt;
+    }
+    options.max_width = uint32_t(*request.max_width);
+  }
+  if (request.quality) {
+    if (*request.quality < 1 || *request.quality > 100) {
+      *error = "quality must be from 1 to 100";
+      return std::nullopt;
+    }
+    options.quality = uint32_t(*request.quality);
+  }
+  return options;
+}
+
+inline const char* FrameFormatName(FrameFormat format) {
+  return format == FrameFormat::kPng ? "png" : "jpeg";
+}
+
+// A watch wants a frame now: its interval has passed and the guest has
+// swapped since its last one.
+inline bool FrameDue(const FrameWatch& watch, uint64_t now_ns, uint64_t swap) {
+  return now_ns >= watch.next_ns && watch.last_swap != swap;
+}
+
+// After a frame of swap was taken for watch at now_ns. The next is due one
+// interval after this one was, so the rate holds; after a stall longer than an
+// interval, one interval from now, so no burst follows.
+inline void AdvanceWatch(FrameWatch& watch, uint64_t now_ns, uint64_t swap) {
+  uint64_t interval = 1000000000 / std::max(watch.fps, uint32_t(1));
+  uint64_t next = watch.next_ns + interval;
+  watch.next_ns = next > now_ns ? next : now_ns + interval;
+  watch.last_swap = swap;
+}
+
+inline std::string Base64(const uint8_t* data, size_t size) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string text;
+  text.reserve((size + 2) / 3 * 4);
+  size_t i = 0;
+  for (; i + 3 <= size; i += 3) {
+    uint32_t bits = uint32_t(data[i]) << 16 | uint32_t(data[i + 1]) << 8 |
+                    uint32_t(data[i + 2]);
+    text.push_back(kAlphabet[bits >> 18]);
+    text.push_back(kAlphabet[(bits >> 12) & 63]);
+    text.push_back(kAlphabet[(bits >> 6) & 63]);
+    text.push_back(kAlphabet[bits & 63]);
+  }
+  if (i < size) {
+    uint32_t bits = uint32_t(data[i]) << 16;
+    if (i + 1 < size) {
+      bits |= uint32_t(data[i + 1]) << 8;
+    }
+    text.push_back(kAlphabet[bits >> 18]);
+    text.push_back(kAlphabet[(bits >> 12) & 63]);
+    text.push_back(i + 1 < size ? kAlphabet[(bits >> 6) & 63] : '=');
+    text.push_back('=');
+  }
+  return text;
+}
+
+struct RgbImage {
+  uint32_t width = 0;
+  uint32_t height = 0;
+  // R8 G8 B8, rows packed.
+  std::vector<uint8_t> pixels;
+};
+
+// R8 G8 B8 X8 rows (as ui::RawImage) as R8 G8 B8, scaled down to max_width
+// keeping the aspect ratio, each pixel the average of the source pixels it
+// touches. A max_width of 0 or at least width keeps the size.
+inline RgbImage ScaleToWidth(const uint8_t* rgbx, uint32_t width,
+                             uint32_t height, size_t stride,
+                             uint32_t max_width) {
+  RgbImage image;
+  if (!width || !height) {
+    return image;
+  }
+  image.width = max_width && max_width < width ? max_width : width;
+  image.height = std::max(
+      uint32_t((uint64_t(height) * image.width + width / 2) / width), 1u);
+  image.pixels.resize(size_t(image.width) * image.height * 3);
+  for (uint32_t y = 0; y < image.height; ++y) {
+    // Never upscaled, so each output pixel touches at least one source pixel.
+    uint32_t y0 = uint32_t(uint64_t(y) * height / image.height);
+    uint32_t y1 =
+        uint32_t((uint64_t(y + 1) * height + image.height - 1) / image.height);
+    for (uint32_t x = 0; x < image.width; ++x) {
+      uint32_t x0 = uint32_t(uint64_t(x) * width / image.width);
+      uint32_t x1 =
+          uint32_t((uint64_t(x + 1) * width + image.width - 1) / image.width);
+      std::array<uint32_t, 3> sum = {};
+      for (uint32_t sy = y0; sy < y1; ++sy) {
+        const uint8_t* row = rgbx + sy * stride;
+        for (uint32_t sx = x0; sx < x1; ++sx) {
+          for (size_t c = 0; c < 3; ++c) {
+            sum[c] += row[sx * 4 + c];
+          }
+        }
+      }
+      uint32_t count = (y1 - y0) * (x1 - x0);
+      uint8_t* out = &image.pixels[(size_t(y) * image.width + x) * 3];
+      for (size_t c = 0; c < 3; ++c) {
+        out[c] = uint8_t((sum[c] + count / 2) / count);
+      }
+    }
+  }
+  return image;
+}
+
+// An encoded frame and the guest's counters when it was captured. It shows
+// swap's image, or rarely the next one's, which the GPU makes visible just
+// before counting it.
+struct EncodedFrame {
+  FrameFormat format = FrameFormat::kJpeg;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint64_t vblank = 0;
+  uint64_t swap = 0;
+  uint64_t ns = 0;
+  telemetry::State state = telemetry::State::kStarting;
+  std::vector<uint8_t> bytes;
+};
+
+inline std::string FrameReply(std::string_view id, const EncodedFrame& frame) {
+  return JsonLine()
+      .Re(id)
+      .Bool("ok", true)
+      .String("format", FrameFormatName(frame.format))
+      .Uint("width", frame.width)
+      .Uint("height", frame.height)
+      .Uint("vblank", frame.vblank)
+      .Uint("swap", frame.swap)
+      .Uint("ns", frame.ns)
+      .String("data", Base64(frame.bytes.data(), frame.bytes.size()))
+      .Finish();
+}
+
+// A frames_watch frame. The envelope is the capture's, not the send's.
+inline std::string FrameEventLine(const EncodedFrame& frame) {
+  telemetry::Event event("frame");
+  event.Str("format", FrameFormatName(frame.format))
+      .UInt("width", frame.width)
+      .UInt("height", frame.height)
+      .Str("data", Base64(frame.bytes.data(), frame.bytes.size()));
+  return event.Finish(frame.vblank, frame.swap, frame.ns, frame.state) + "\n";
 }
 
 // Sent to every client before the process ends at a client's request.

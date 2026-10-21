@@ -64,6 +64,8 @@ class AutomationChannel : public AnswerSource {
 
  private:
   struct Client {
+    // Names the client to frames captured for it, which may outlive it.
+    uint64_t id;
     SocketHandle socket;
     LineSplitter splitter;
     Session session;
@@ -92,11 +94,22 @@ class AutomationChannel : public AnswerSource {
     // Its dialog event, for clients subscribing while it is open.
     std::string event;
   };
+  class FrameWorker;
+  // Who gets one encoding of a frame being captured: the reply to a frame
+  // request (re), or a watch's frame event.
+  struct FrameRecipient {
+    uint64_t client;
+    bool watch;
+    std::string re;
+    FrameOptions options;
+  };
 
-  AutomationChannel(SocketHandle listen_socket, std::string token,
-                    BuildInfo build, std::shared_ptr<SnapshotSource> snapshot,
+  AutomationChannel(Emulator& emulator, SocketHandle listen_socket,
+                    std::string token, BuildInfo build,
+                    std::shared_ptr<SnapshotSource> snapshot,
                     std::shared_ptr<TelemetryFeed> telemetry,
                     std::shared_ptr<hid::remote::RemotePads> pads,
+                    std::unique_ptr<FrameWorker> frames,
                     std::function<void()> stop);
 
   void ServerLoop();
@@ -114,6 +127,11 @@ class AutomationChannel : public AnswerSource {
   void CloseAllDialogs();
   // Sends pad events to their subscribers.
   void ForwardPadEvents();
+  // Delivers the captured frame, then starts capturing the next if a request
+  // waits or a watch is due.
+  void ServiceFrames();
+  // A watch or a capture needs the loop to come round sooner.
+  bool FramesBusy() const;
   void Stop();
 
   SocketHandle listen_socket_;
@@ -122,8 +140,17 @@ class AutomationChannel : public AnswerSource {
   std::shared_ptr<SnapshotSource> snapshot_;
   std::shared_ptr<TelemetryFeed> telemetry_;
   std::shared_ptr<hid::remote::RemotePads> pads_;
+  Emulator& emulator_;
+  std::unique_ptr<FrameWorker> frames_;
   std::function<void()> stop_;
   std::vector<std::unique_ptr<Client>> clients_;
+  uint64_t next_client_ = 1;
+  // Frame requests waiting for the next capture, and the recipients of the
+  // one in progress.
+  std::vector<FrameRecipient> frame_requests_;
+  std::vector<FrameRecipient> frame_recipients_;
+  // The capture's encodings, as the worker returns them.
+  std::vector<FrameOptions> frame_encodings_;
   bool stopping_ = false;
   std::atomic<bool> running_{true};
 

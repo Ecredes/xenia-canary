@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <fstream>
 #include <random>
@@ -23,6 +24,9 @@
 #include "xenia/base/threading.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/ui/presenter.h"
+
+#include "third_party/stb/stb_image_write.h"
 
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
@@ -104,6 +108,11 @@ constexpr auto kStopFlushTime = std::chrono::seconds(1);
 constexpr size_t kMaxClientBacklog = 16 * 1024 * 1024;
 // Telemetry lines kept for the channel thread between its rounds.
 constexpr size_t kMaxQueuedTelemetry = 65536;
+// The round time while frames are watched or captured, so they leave soon
+// after they are due or ready.
+constexpr int32_t kFramePollMicroseconds = 2000;
+// A watcher with this much unsent skips frames rather than queueing them.
+constexpr size_t kMaxFrameBacklog = 1024 * 1024;
 
 // std::random_device draws from the OS's secure source with MSVC, libstdc++
 // and libc++.
@@ -155,6 +164,118 @@ class AutomationChannel::TelemetrySink : public telemetry::Sink {
 
  private:
   std::shared_ptr<TelemetryFeed> feed_;
+};
+
+// Captures the guest output and encodes it on its own thread, so neither the
+// GPU's thread nor the channel's waits for the readback. One capture at a
+// time, encoded once per distinct FrameOptions.
+class AutomationChannel::FrameWorker {
+ public:
+  // Fills the image and the guest's counters just before the capture; false
+  // when there is no guest output.
+  using Capture = std::function<bool(ui::RawImage& image, uint64_t& vblank,
+                                     uint64_t& swap)>;
+  // One per requested encoding, empty when there was nothing to capture.
+  using Result = std::vector<std::optional<EncodedFrame>>;
+
+  explicit FrameWorker(Capture capture) : capture_(std::move(capture)) {
+    thread_ = std::thread([this]() { Loop(); });
+  }
+  ~FrameWorker() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      running_ = false;
+    }
+    wake_.notify_one();
+    thread_.join();
+  }
+
+  // Captured and not yet taken, or capturing.
+  bool busy() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return job_ || result_;
+  }
+  // Only when not busy.
+  void Submit(std::vector<FrameOptions> encodings) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      job_ = std::move(encodings);
+    }
+    wake_.notify_one();
+  }
+  std::optional<Result> TakeResult() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::optional<Result> result = std::move(result_);
+    if (result) {
+      result_.reset();
+      job_.reset();
+    }
+    return result;
+  }
+
+ private:
+  void Loop() {
+    xe::threading::set_name("Automation Frames");
+    while (true) {
+      std::vector<FrameOptions> encodings;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait(lock, [this]() { return !running_ || (job_ && !result_); });
+        if (!running_ || !job_) {
+          return;
+        }
+        encodings = *job_;
+      }
+      Result result = Run(encodings);
+      std::lock_guard<std::mutex> lock(mutex_);
+      result_ = std::move(result);
+    }
+  }
+
+  Result Run(const std::vector<FrameOptions>& encodings) {
+    Result result(encodings.size());
+    ui::RawImage image;
+    EncodedFrame captured;
+    captured.ns = telemetry::NowNs();
+    captured.state = telemetry::CurrentState();
+    if (!capture_(image, captured.vblank, captured.swap)) {
+      return result;
+    }
+    for (size_t i = 0; i < encodings.size(); ++i) {
+      const FrameOptions& options = encodings[i];
+      RgbImage rgb = ScaleToWidth(image.data.data(), image.width, image.height,
+                                  image.stride, options.max_width);
+      EncodedFrame frame = captured;
+      frame.format = options.format;
+      frame.width = rgb.width;
+      frame.height = rgb.height;
+      stbi_write_func* append = [](void* context, void* data, int size) {
+        auto* bytes = static_cast<std::vector<uint8_t>*>(context);
+        auto* begin = static_cast<const uint8_t*>(data);
+        bytes->insert(bytes->end(), begin, begin + size);
+      };
+      int written =
+          options.format == FrameFormat::kPng
+              ? stbi_write_png_to_func(append, &frame.bytes, int(rgb.width),
+                                       int(rgb.height), 3, rgb.pixels.data(),
+                                       int(rgb.width * 3))
+              : stbi_write_jpg_to_func(append, &frame.bytes, int(rgb.width),
+                                       int(rgb.height), 3, rgb.pixels.data(),
+                                       int(options.quality));
+      if (written && rgb.width) {
+        result[i] = std::move(frame);
+      }
+    }
+    return result;
+  }
+
+  Capture capture_;
+  std::mutex mutex_;
+  std::condition_variable wake_;
+  bool running_ = true;
+  std::optional<std::vector<FrameOptions>> job_;
+  std::optional<Result> result_;
+  std::thread thread_;
 };
 
 std::unique_ptr<AutomationChannel> AutomationChannel::Create(
@@ -251,23 +372,40 @@ std::unique_ptr<AutomationChannel> AutomationChannel::Create(
     return counters;
   });
 
+  auto frames = std::make_unique<FrameWorker>(
+      [&emulator](ui::RawImage& image, uint64_t& vblank, uint64_t& swap) {
+        gpu::GraphicsSystem* graphics_system = emulator.graphics_system();
+        ui::Presenter* presenter =
+            graphics_system ? graphics_system->presenter() : nullptr;
+        if (!presenter) {
+          return false;
+        }
+        vblank = graphics_system->vblank_count();
+        swap = graphics_system->swap_count();
+        return presenter->CaptureGuestOutput(image);
+      });
+
   XELOGI("Automation: listening on 127.0.0.1:{}", port);
   return std::unique_ptr<AutomationChannel>(new AutomationChannel(
-      listen_socket, std::move(token), std::move(build), std::move(snapshot),
-      std::move(telemetry_feed), std::move(pads), std::move(stop)));
+      emulator, listen_socket, std::move(token), std::move(build),
+      std::move(snapshot), std::move(telemetry_feed), std::move(pads),
+      std::move(frames), std::move(stop)));
 }
 
 AutomationChannel::AutomationChannel(
-    SocketHandle listen_socket, std::string token, BuildInfo build,
-    std::shared_ptr<SnapshotSource> snapshot,
+    Emulator& emulator, SocketHandle listen_socket, std::string token,
+    BuildInfo build, std::shared_ptr<SnapshotSource> snapshot,
     std::shared_ptr<TelemetryFeed> telemetry,
-    std::shared_ptr<hid::remote::RemotePads> pads, std::function<void()> stop)
+    std::shared_ptr<hid::remote::RemotePads> pads,
+    std::unique_ptr<FrameWorker> frames, std::function<void()> stop)
     : listen_socket_(listen_socket),
       token_(std::move(token)),
       build_(std::move(build)),
       snapshot_(std::move(snapshot)),
       telemetry_(std::move(telemetry)),
       pads_(std::move(pads)),
+      emulator_(emulator),
+      frames_(std::move(frames)),
       stop_(std::move(stop)),
       dialog_timeout_(
           std::chrono::seconds(std::max(cvars::automation_dialog_timeout, 1))) {
@@ -307,7 +445,8 @@ void AutomationChannel::ServerLoop() {
       }
       max_socket = std::max(max_socket, client->socket);
     }
-    timeval timeout = {0, kPollMicroseconds};
+    timeval timeout = {
+        0, FramesBusy() ? kFramePollMicroseconds : kPollMicroseconds};
     if (select(int(max_socket + 1), &read_set, &write_set, nullptr, &timeout) <
         0) {
       // Interrupted; the next round starts over.
@@ -319,6 +458,7 @@ void AutomationChannel::ServerLoop() {
     ForwardTelemetry();
     ServiceDialogs();
     ForwardPadEvents();
+    ServiceFrames();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -361,6 +501,7 @@ void AutomationChannel::Accept() {
       continue;
     }
     auto client = std::make_unique<Client>();
+    client->id = next_client_++;
     client->socket = socket;
     clients_.push_back(std::move(client));
   }
@@ -484,6 +625,10 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
       if (decision.pad) {
         client.out += PadReply(parsed.request->id, pads_->Apply(*decision.pad));
       }
+      break;
+    case Action::kFrame:
+      frame_requests_.push_back(
+          {client.id, false, parsed.request->id, decision.frame_options});
       break;
     case Action::kStop:
       stopping_ = true;
@@ -618,6 +763,73 @@ void AutomationChannel::ForwardPadEvents() {
       client->out += '\n';
     }
   }
+}
+
+bool AutomationChannel::FramesBusy() const {
+  if (!frame_requests_.empty() || !frame_recipients_.empty()) {
+    return true;
+  }
+  return std::any_of(clients_.begin(), clients_.end(), [](const auto& client) {
+    return client->session.frames.has_value();
+  });
+}
+
+void AutomationChannel::ServiceFrames() {
+  if (std::optional<FrameWorker::Result> result = frames_->TakeResult()) {
+    for (const FrameRecipient& recipient : frame_recipients_) {
+      auto client = std::find_if(
+          clients_.begin(), clients_.end(),
+          [&recipient](const auto& c) { return c->id == recipient.client; });
+      if (client == clients_.end() || (*client)->closing) {
+        continue;
+      }
+      size_t encoding =
+          size_t(std::find(frame_encodings_.begin(), frame_encodings_.end(),
+                           recipient.options) -
+                 frame_encodings_.begin());
+      const std::optional<EncodedFrame>& frame = (*result)[encoding];
+      if (recipient.watch) {
+        if (frame) {
+          (*client)->out += FrameEventLine(*frame);
+        }
+      } else {
+        (*client)->out += frame ? FrameReply(recipient.re, *frame)
+                                : ErrorLine(recipient.re, "no frame yet");
+      }
+    }
+    frame_recipients_.clear();
+  }
+  if (frames_->busy()) {
+    return;
+  }
+  std::vector<FrameRecipient> recipients;
+  recipients.swap(frame_requests_);
+  uint64_t now_ns = telemetry::NowNs();
+  gpu::GraphicsSystem* graphics_system = emulator_.graphics_system();
+  uint64_t swap = graphics_system ? graphics_system->swap_count() : 0;
+  for (const auto& client : clients_) {
+    std::optional<FrameWatch>& watch = client->session.frames;
+    if (!watch || client->closing || !FrameDue(*watch, now_ns, swap)) {
+      continue;
+    }
+    // A client still sending the last one gets a later frame instead.
+    if (client->out.size() < kMaxFrameBacklog) {
+      recipients.push_back({client->id, true, "", watch->options});
+    }
+    AdvanceWatch(*watch, now_ns, swap);
+  }
+  if (recipients.empty()) {
+    return;
+  }
+  frame_encodings_.clear();
+  for (const FrameRecipient& recipient : recipients) {
+    if (std::find(frame_encodings_.begin(), frame_encodings_.end(),
+                  recipient.options) == frame_encodings_.end()) {
+      frame_encodings_.push_back(recipient.options);
+    }
+  }
+  frame_recipients_ = std::move(recipients);
+  frames_->Submit(frame_encodings_);
 }
 
 void AutomationChannel::Stop() {

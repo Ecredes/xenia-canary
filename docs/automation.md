@@ -52,7 +52,7 @@ answered with:
 | `protocol` | The protocol version, currently 1. |
 | `xenia` | The build: `branch`, `commit`, `date`. |
 | `capabilities` | The ops this build supports, beyond `hello`. |
-| `streams` | The event streams `subscribe` accepts: `telemetry`, `dialogs`, `input`. |
+| `streams` | The event streams `subscribe` accepts: `telemetry`, `dialogs`, `input`. Frames come from `frames_watch` instead. |
 | `role` | `controller` for the first client while no other has it, otherwise `observer`. |
 | `state` | As the `state` op returns it. |
 
@@ -70,6 +70,8 @@ At most 8 connections are open at once.
 | `pad_set` {`user`, `pad`} | controller | `ok`; holds `pad` until changed |
 | `pad_queue` {`user`, `input`, `frames`, `pad`} | controller | `ok`, or `queue full` (256); holds `pad` for `frames` vblanks (1 to 3600) after what is queued |
 | `pad_clear` {`user`} | controller | `ok`; drops the queued states |
+| `frame` {`format`, `max_width`, `quality`} | any | the guest output now, as below, or `no frame yet` before the title has drawn |
+| `frames_watch` {`fps`, `format`, `max_width`, `quality`} | any | `ok`; then `frame` events at up to `fps` a second (1 to 60), replacing any earlier watch; `fps` 0 ends it |
 | `stop` | controller | `ok`; then every client gets an `exit` event and the process ends |
 
 An unknown op is answered with an error; the connection stays open.
@@ -143,3 +145,25 @@ each queued state, `user`, `input` (its number from `pad_queue`) and
 | `pad_begin` | it became visible to the guest |
 | `pad_seen` | the guest first read it |
 | `pad_end` | it stopped being visible |
+
+### Frames
+
+`frame` and `frames_watch` capture the guest output: the image the window
+would show, before window scaling and overlays, in windowed and headless runs.
+Capture and encoding run on a thread of their own; with no request or watch,
+nothing is captured.
+
+- `format`: `jpeg` (the default) or `png`. `quality`: JPEG quality, 1 to 100,
+  default 85. `max_width`: scale down to at most this width keeping the aspect
+  ratio, averaging pixels; 0 or left out keeps the full size.
+- The image is in `data`, base64, with `format`, `width` and `height`. A
+  `frame` reply also carries `vblank`, `swap` and `ns`; a `frame` event has
+  them in its envelope. They are the guest's counters and the host time when
+  the frame was captured, not when it was sent: the image is that swap's, or
+  rarely the next one's.
+- A watch sends a frame only when the guest has swapped since its last one, on
+  a steady `fps` grid. A client with over 1 MB unsent skips frames rather than
+  queueing them, so a slow client sees fresh frames, not a growing backlog.
+- Frames are for seeing the run and timing its reactions (match a frame's
+  `vblank` to a pad event's `at_vblank`). For frame pacing use telemetry's
+  `frame_stats`, which has every swap interval: a capture is a GPU readback.

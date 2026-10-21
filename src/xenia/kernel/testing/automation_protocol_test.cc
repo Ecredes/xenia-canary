@@ -396,6 +396,130 @@ TEST_CASE("Pad events name the user, input and vblank", "[automation]") {
   REQUIRE(event["vblank"] == 121);
 }
 
+TEST_CASE("Frame ops take a format, width and quality", "[automation]") {
+  Session observer{Role::kObserver};
+  Decision decision = Decide(
+      observer,
+      Parsed(R"({"op":"frame","format":"png","max_width":320,"quality":50})"),
+      TestContext());
+  REQUIRE(decision.action == Action::kFrame);
+  REQUIRE(decision.frame_options == FrameOptions{FrameFormat::kPng, 320, 50});
+  decision = Decide(observer, Parsed(R"({"op":"frame"})"), TestContext());
+  REQUIRE(decision.frame_options == FrameOptions{});
+  auto error = [&observer](std::string_view line) {
+    Decision decision = Decide(observer, Parsed(line), TestContext());
+    REQUIRE(decision.action == Action::kNone);
+    return std::string(Json(decision.reply)["error"].GetString());
+  };
+  REQUIRE(error(R"({"op":"frame","format":"bmp"})") ==
+          "format must be jpeg or png");
+  REQUIRE(error(R"({"op":"frame","max_width":-1})") ==
+          "max_width must be from 0 to 8192");
+  REQUIRE(error(R"({"op":"frame","quality":0})") ==
+          "quality must be from 1 to 100");
+  REQUIRE(error(R"({"op":"frames_watch"})") == "fps must be from 0 to 60");
+  REQUIRE(error(R"({"op":"frames_watch","fps":61})") ==
+          "fps must be from 0 to 60");
+}
+
+TEST_CASE("Frames watches start and stop", "[automation]") {
+  Session observer{Role::kObserver};
+  REQUIRE(Json(Decide(observer,
+                      Parsed(R"({"op":"frames_watch","fps":10,)"
+                             R"("max_width":640})"),
+                      TestContext())
+                   .reply)["ok"] == true);
+  FrameWatch watch = observer.frames.value_or(FrameWatch());
+  REQUIRE(watch.fps == 10);
+  REQUIRE(watch.options.max_width == 640);
+  Decide(observer, Parsed(R"({"op":"frames_watch","fps":0})"), TestContext());
+  REQUIRE(!observer.frames);
+}
+
+TEST_CASE("Watched frames keep their rate and need a new swap",
+          "[automation]") {
+  FrameWatch watch;
+  watch.fps = 10;
+  REQUIRE(FrameDue(watch, 0, 1));
+  AdvanceWatch(watch, 0, 1);
+  // The same swap again, or before the interval: not due.
+  REQUIRE(!FrameDue(watch, 200000000, 1));
+  REQUIRE(!FrameDue(watch, 99999999, 2));
+  REQUIRE(FrameDue(watch, 105000000, 2));
+  // Taken late, the next stays on the 100 ms grid.
+  AdvanceWatch(watch, 105000000, 2);
+  REQUIRE(watch.next_ns == 200000000);
+  // After a stall, one interval from now rather than a burst.
+  AdvanceWatch(watch, 950000000, 3);
+  REQUIRE(watch.next_ns == 1050000000);
+}
+
+TEST_CASE("Base64 pads to whole quads", "[automation]") {
+  auto encode = [](std::string_view text) {
+    return Base64(reinterpret_cast<const uint8_t*>(text.data()), text.size());
+  };
+  REQUIRE(encode("") == "");
+  REQUIRE(encode("f") == "Zg==");
+  REQUIRE(encode("fo") == "Zm8=");
+  REQUIRE(encode("foo") == "Zm9v");
+  REQUIRE(encode("foobar") == "Zm9vYmFy");
+  const uint8_t high[] = {0xFF, 0xFE};
+  REQUIRE(Base64(high, 2) == "//4=");
+}
+
+TEST_CASE("Frames scale down by averaging", "[automation]") {
+  // 4x2 RGBX with a row stride of 20: left half 0, right half 200.
+  std::vector<uint8_t> rgbx(20 * 2, 0xAA);
+  for (uint32_t y = 0; y < 2; ++y) {
+    for (uint32_t x = 0; x < 4; ++x) {
+      uint8_t value = x < 2 ? 0 : 200;
+      for (uint32_t c = 0; c < 3; ++c) {
+        rgbx[y * 20 + x * 4 + c] = uint8_t(value + c);
+      }
+    }
+  }
+  RgbImage same = ScaleToWidth(rgbx.data(), 4, 2, 20, 0);
+  REQUIRE(same.width == 4);
+  REQUIRE(same.height == 2);
+  REQUIRE(same.pixels[3 * 3 + 2] == 202);
+  RgbImage half = ScaleToWidth(rgbx.data(), 4, 2, 20, 2);
+  REQUIRE(half.width == 2);
+  REQUIRE(half.height == 1);
+  REQUIRE(half.pixels == std::vector<uint8_t>{0, 1, 2, 200, 201, 202});
+  RgbImage odd = ScaleToWidth(rgbx.data(), 4, 2, 20, 3);
+  REQUIRE(odd.width == 3);
+  REQUIRE(odd.height == 2);
+  // The middle pixel covers one dark and one light column.
+  REQUIRE(odd.pixels[3] == 100);
+  REQUIRE(ScaleToWidth(rgbx.data(), 0, 2, 20, 0).pixels.empty());
+}
+
+TEST_CASE("Frames carry the capture's counters", "[automation]") {
+  EncodedFrame frame;
+  frame.format = FrameFormat::kPng;
+  frame.width = 2;
+  frame.height = 1;
+  frame.vblank = 70;
+  frame.swap = 35;
+  frame.ns = 123;
+  frame.state = telemetry::State::kRunning;
+  frame.bytes = {'f', 'o', 'o'};
+  rapidjson::Document reply = Json(FrameReply("7", frame));
+  REQUIRE(reply["re"] == 7);
+  REQUIRE(reply["ok"] == true);
+  REQUIRE(reply["format"] == "png");
+  REQUIRE(reply["swap"] == 35);
+  REQUIRE(reply["data"] == "Zm9v");
+  rapidjson::Document event = Json(FrameEventLine(frame));
+  REQUIRE(event["type"] == "frame");
+  REQUIRE(event["vblank"] == 70);
+  REQUIRE(event["swap"] == 35);
+  REQUIRE(event["ns"] == 123);
+  REQUIRE(event["state"] == "running");
+  REQUIRE(event["width"] == 2);
+  REQUIRE(event["data"] == "Zm9v");
+}
+
 }  // namespace test
 }  // namespace automation
 }  // namespace xe
