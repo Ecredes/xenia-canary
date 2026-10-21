@@ -105,23 +105,39 @@ jobs:
           key: ${{ inputs.restore-key || format('{0}-ccache-v2-{1}', runner.os, inputs.ref) }}
           restore-keys: ${{ runner.os }}-ccache-v2-
 
-      # Incremental LTCG state (.iobj/.ipdb) written on another runner image
-      # can crash this image's linker (C1001 and LNK1000 in IMAGE::BuildImage)
-      # even with the same toolset version: on 2026-10-21 three builds on
-      # win25-vs2026 20261007.264 crashed this way with caches from 20261018.275.
-      # It is dropped unless the image matches; the ccache objects stay. The
-      # stamp lives in C:\ccache so the cache's paths, and its entries, don't
-      # change.
-      - name: Drop LTCG state from another runner image
+      # The cache is only as good as the toolchain that wrote it, and runner
+      # images report the same MSVC version (14.51.36231 on win25-vs2026
+      # 20261007.264 and 20261018.275) with different files. On 2026-10-21:
+      # - ccache's default compiler check (cl.exe's mtime) missed every object
+      #   across the two images (0 of 907), so such builds compiled cold.
+      # - Incremental LTCG state (.iobj/.ipdb) from the other image crashed
+      #   the linker (C1001 and LNK1000 in IMAGE::BuildImage) in three builds.
+      # So the toolchain is identified by the contents of its compiler, code
+      # generator and linker: ccache's compiler_check is that fingerprint, and
+      # LTCG state from another fingerprint is dropped (the objects stay). Both
+      # live in C:\ccache, so the cache's paths, and its entries, don't change.
+      - name: Fingerprint the toolchain
         run: |-
-          $stamp = 'C:\ccache\ltcg-image.txt'
-          $saved = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
-          if ($saved -ne $env:ImageVersion) {
-            Remove-Item build\bin\Windows\Release\*.iobj, build\bin\Windows\Release\*.ipdb -ErrorAction SilentlyContinue
-            echo "Dropped LTCG state from runner image '$saved'; this is '$env:ImageVersion'"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $version = (Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt").Trim()
+          $bin = "$vs\VC\Tools\MSVC\$version\bin\Hostx64\x64"
+          $hashes = foreach ($file in 'cl.exe', 'c1.dll', 'c1xx.dll', 'c2.dll', 'link.exe') {
+            (Get-FileHash -Algorithm SHA256 "$bin\$file").Hash
           }
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $bytes = [Text.Encoding]::ASCII.GetBytes($hashes -join ' ')
+          $fingerprint = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+          echo "MSVC $version on ${env:ImageVersion}: toolchain $fingerprint"
           New-Item -ItemType Directory -Force C:\ccache | Out-Null
-          Set-Content -NoNewline $stamp $env:ImageVersion
+          $stamp = 'C:\ccache\ltcg-toolchain.txt'
+          $saved = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
+          if ($saved -ne $fingerprint) {
+            Remove-Item build\bin\Windows\Release\*.iobj, build\bin\Windows\Release\*.ipdb -ErrorAction SilentlyContinue
+            echo "Dropped LTCG state from toolchain '$saved'"
+          }
+          Set-Content -NoNewline $stamp $fingerprint
+          Remove-Item C:\ccache\ltcg-image.txt -ErrorAction SilentlyContinue
+          Set-Content C:\ccache\ccache.conf "compiler_check = string:$fingerprint"
 
       - name: Install ccache
         env:
