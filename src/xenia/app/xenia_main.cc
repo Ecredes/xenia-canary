@@ -311,6 +311,8 @@ class EmulatorApp final : public xe::ui::WindowedApp {
 
   // Before the emulator, which uses it until destroyed.
   std::unique_ptr<EmulatorHost> host_;
+  // host_, when headless.
+  HeadlessHost* headless_host_ = nullptr;
   std::unique_ptr<Emulator> emulator_;
   // None when headless.
   std::unique_ptr<EmulatorWindow> emulator_window_;
@@ -575,7 +577,9 @@ bool EmulatorApp::OnInitialize() {
 
   WindowedHost* windowed_host = nullptr;
   if (cvars::headless) {
-    host_ = std::make_unique<HeadlessHost>();
+    auto host = std::make_unique<HeadlessHost>();
+    headless_host_ = host.get();
+    host_ = std::move(host);
   } else {
     ShowFirstRunDisclaimer();
     auto host = std::make_unique<WindowedHost>(app_context());
@@ -662,6 +666,11 @@ void EmulatorApp::EmulatorThread() {
   automation_ = automation::AutomationChannel::Create(
       *emulator_, {XE_BUILD_BRANCH, XE_BUILD_COMMIT, XE_BUILD_DATE},
       [this]() { app_context().RequestDeferredQuit(); });
+  // A client may answer the title's prompts. The channel is never destroyed
+  // before the host: the app ends with std::quick_exit.
+  if (automation_ && headless_host_) {
+    headless_host_->set_answer_source(automation_.get());
+  }
 
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.

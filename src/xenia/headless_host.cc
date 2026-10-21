@@ -28,38 +28,63 @@ void HeadlessHost::ReportError(ErrorReport report) {
 
 void HeadlessHost::RequestDiscImage(
     std::string prompt, std::function<void(std::filesystem::path)> done) {
-  XELOGW("No disc image to swap in without a UI: {}", prompt);
-  done({});
+  answer_source().Answer(
+      DiscRequest{prompt}, [prompt, done](DialogAnswer answer) {
+        DiscAnswer path = std::get<4>(std::move(answer));
+        if (path.empty()) {
+          XELOGW("No disc image to swap in without a UI: {}", prompt);
+        } else {
+          XELOGI("{}: swapping in {}", prompt, path);
+        }
+        done(std::move(path));
+      });
 }
 
 void HeadlessHost::RequestChoice(ChoiceRequest request,
                                  std::function<void(uint32_t button)> done) {
-  uint32_t button = HeadlessChoice(request);
-  XELOGI("{}: answered \"{}\" without a UI", request.title,
-         request.buttons.empty() ? "" : request.buttons[button]);
-  done(button);
+  std::string title = request.title;
+  std::vector<std::string> buttons = request.buttons;
+  answer_source().Answer(
+      std::move(request), [title, buttons, done](DialogAnswer answer) {
+        uint32_t button = std::get<0>(answer);
+        XELOGI("{}: answered \"{}\" without a UI", title,
+               button < buttons.size() ? buttons[button] : "");
+        done(button);
+      });
 }
 
 void HeadlessHost::RequestText(
     TextRequest request,
     std::function<void(std::optional<std::string> text)> done) {
-  std::optional<std::string> text = HeadlessText(request);
-  XELOGI("{}: entered \"{}\" without a UI", request.title, text.value_or(""));
-  done(std::move(text));
+  std::string title = request.title;
+  answer_source().Answer(
+      std::move(request), [title, done](DialogAnswer answer) {
+        std::optional<std::string> text = std::get<1>(std::move(answer));
+        XELOGI("{}: entered \"{}\" without a UI", title, text.value_or(""));
+        done(std::move(text));
+      });
 }
 
 void HeadlessHost::RequestSignIn(SignInRequest request,
                                  std::function<void(SignInAnswer)> done) {
-  std::map<uint8_t, uint64_t> chosen = HeadlessSignIn(request);
-  XELOGI("Sign-in without a UI: {} of {} profiles", chosen.size(),
-         request.users_needed);
-  done(std::move(chosen));
+  uint32_t users_needed = request.users_needed;
+  answer_source().Answer(std::move(request),
+                         [users_needed, done](DialogAnswer answer) {
+                           SignInAnswer chosen = std::get<2>(std::move(answer));
+                           XELOGI("Sign-in without a UI: {} of {} profiles",
+                                  chosen ? chosen->size() : 0, users_needed);
+                           done(std::move(chosen));
+                         });
 }
 
 void HeadlessHost::RequestPasscode(PasscodeRequest request,
                                    std::function<void(PasscodeAnswer)> done) {
-  XELOGI("{}: pass code entered without a UI", request.title);
-  done(HeadlessPasscode(request));
+  std::string title = request.title;
+  answer_source().Answer(std::move(request),
+                         [title, done](DialogAnswer answer) {
+                           XELOGI("{}: pass code entered without a UI", title);
+                           done(std::get<3>(std::move(answer)));
+                         });
 }
 
 void HeadlessHost::RequestProfileCreation(std::function<void()> done) {

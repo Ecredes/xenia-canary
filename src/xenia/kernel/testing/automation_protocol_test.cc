@@ -167,24 +167,27 @@ TEST_CASE("State and unknown ops", "[automation]") {
                    .reply)["error"] == "unknown op");
 }
 
-TEST_CASE("Subscribing to telemetry", "[automation]") {
+TEST_CASE("Subscribing replaces the streams", "[automation]") {
   Session session{Role::kObserver};
   Context context = TestContext();
   Decision first =
       Decide(session, Parsed(R"({"op":"subscribe","streams":["telemetry"]})"),
              context);
-  REQUIRE(first.action == Action::kStartTelemetry);
   REQUIRE(session.telemetry);
+  REQUIRE(!session.dialogs);
   REQUIRE(Json(first.reply)["streams"][0] == "telemetry");
-  // Again: nothing to replay.
-  REQUIRE(Decide(session,
-                 Parsed(R"({"op":"subscribe","streams":["telemetry"]})"),
-                 context)
-              .action == Action::kNone);
+  Decision both =
+      Decide(session,
+             Parsed(R"({"op":"subscribe","streams":["dialogs","telemetry"]})"),
+             context);
+  REQUIRE(session.telemetry);
+  REQUIRE(session.dialogs);
+  REQUIRE(Json(both.reply)["streams"].Size() == 2);
   Decision none =
       Decide(session, Parsed(R"({"op":"subscribe","streams":[]})"), context);
   REQUIRE(none.action == Action::kNone);
   REQUIRE(!session.telemetry);
+  REQUIRE(!session.dialogs);
 }
 
 TEST_CASE("Subscribing needs known streams", "[automation]") {
@@ -205,6 +208,119 @@ TEST_CASE("Subscribing needs known streams", "[automation]") {
 TEST_CASE("The session_start line is recognized", "[automation]") {
   REQUIRE(IsSessionStart(R"({"type":"session_start","vblank":0})"));
   REQUIRE(!IsSessionStart(R"({"type":"state","vblank":0})"));
+}
+
+namespace {
+
+std::string AnswerError(const DialogRequest& request, std::string_view json) {
+  std::string error;
+  REQUIRE(!ParseDialogAnswer(request, json, &error));
+  return error;
+}
+
+DialogAnswer Answered(const DialogRequest& request, std::string_view json) {
+  std::string error;
+  std::optional<DialogAnswer> answer = ParseDialogAnswer(request, json, &error);
+  INFO(error);
+  REQUIRE(answer.has_value());
+  return answer.value_or(DialogAnswer());
+}
+
+}  // namespace
+
+TEST_CASE("Only the controller answers dialogs", "[automation]") {
+  Session observer{Role::kObserver};
+  REQUIRE(Json(Decide(observer,
+                      Parsed(R"({"op":"dialog_answer","dialog":1,)"
+                             R"("answer":{"button":0}})"),
+                      TestContext())
+                   .reply)["error"] == "needs the controller role");
+  Session controller{Role::kController};
+  REQUIRE(Decide(controller,
+                 Parsed(R"({"op":"dialog_answer","dialog":1,)"
+                        R"("answer":{"button":0}})"),
+                 TestContext())
+              .action == Action::kAnswerDialog);
+  REQUIRE(Json(Decide(controller, Parsed(R"({"op":"dialog_answer"})"),
+                      TestContext())
+                   .reply)["error"] == "missing dialog or answer");
+  REQUIRE(ParseRequest(R"({"op":"dialog_answer","answer":1})").error ==
+          "answer must be an object");
+}
+
+TEST_CASE("Dialog events carry the request and the default", "[automation]") {
+  ChoiceRequest choice{"Save", "Overwrite?", {"Yes", "No"}, 1, 1};
+  std::string line = DialogEvent(7, choice, PolicyAnswer(choice), 30000)
+                         .Finish(10, 2, 99, telemetry::State::kSystemUi);
+  rapidjson::Document event = Json(line + "\n");
+  REQUIRE(event["type"] == "dialog");
+  REQUIRE(event["vblank"] == 10);
+  REQUIRE(event["dialog"] == 7);
+  REQUIRE(event["kind"] == "choice");
+  REQUIRE(event["buttons"][1] == "No");
+  REQUIRE(event["default"]["button"] == 1);
+  REQUIRE(event["timeout_ms"] == 30000);
+
+  SignInRequest sign_in{2, 0, {{1, 0xE000000012345678ull}}};
+  rapidjson::Document signed_in =
+      Json(DialogEvent(8, sign_in, PolicyAnswer(sign_in), 30000)
+               .Finish(0, 0, 0, telemetry::State::kRunning) +
+           "\n");
+  REQUIRE(signed_in["signed_in"][0]["xuid"] == "E000000012345678");
+  REQUIRE(signed_in["default"]["profiles"][0]["slot"] == 1);
+
+  rapidjson::Document closed =
+      Json(DialogClosedEvent(7, "timeout")
+               .Finish(0, 0, 0, telemetry::State::kRunning) +
+           "\n");
+  REQUIRE(closed["by"] == "timeout");
+}
+
+TEST_CASE("Choice and text answers are checked", "[automation]") {
+  ChoiceRequest choice{"", "", {"A", "B"}, 0, 0};
+  REQUIRE(std::get<0>(Answered(choice, R"({"button":1})")) == 1u);
+  REQUIRE(AnswerError(choice, R"({"button":2})") ==
+          "button must be one of the buttons' indexes");
+  REQUIRE(AnswerError(choice, R"({"cancel":true})") ==
+          "a choice can't be cancelled");
+  TextRequest text{"", "", "", 4};
+  REQUIRE(std::get<1>(Answered(text, R"({"text":"abcd"})")) == "abcd");
+  REQUIRE(!std::get<1>(Answered(text, R"({"cancel":true})")));
+  REQUIRE(AnswerError(text, R"({"text":"abcde"})") ==
+          "text is longer than max_length");
+}
+
+TEST_CASE("Sign-in, pass code and disc answers are checked", "[automation]") {
+  SignInRequest sign_in{1, 0, {}};
+  SignInAnswer chosen = std::get<2>(Answered(
+      sign_in, R"({"profiles":[{"slot":2,"xuid":"e0000000000000aa"}]})"));
+  REQUIRE(chosen.value_or(std::map<uint8_t, uint64_t>()) ==
+          std::map<uint8_t, uint64_t>{{2, 0xE0000000000000AAull}});
+  REQUIRE(AnswerError(sign_in, R"({"profiles":[{"slot":4,"xuid":"1"}]})") ==
+          "each profile needs a slot below 4 and a hex xuid");
+  REQUIRE(AnswerError(sign_in, R"({"profiles":[{"slot":0,"xuid":"1"},)"
+                               R"({"slot":1,"xuid":"2"}]})") ==
+          "more profiles than users_needed");
+  PasscodeRequest passcode{"", "", 4};
+  REQUIRE(std::get<3>(Answered(passcode, R"({"keys":[1,2,3,4]})")) ==
+          std::vector<uint16_t>{1, 2, 3, 4});
+  REQUIRE(AnswerError(passcode, R"({"keys":[1,2]})") ==
+          "keys must be a list of length keys, or cancel true");
+  DiscRequest disc{"Insert disc 2"};
+  REQUIRE(std::get<4>(Answered(disc, R"({"path":"d2.iso"})")) == "d2.iso");
+  REQUIRE(std::get<4>(Answered(disc, R"({"cancel":true})")).empty());
+}
+
+TEST_CASE("Answering an open dialog", "[automation]") {
+  Request request = Parsed(R"({"op":"dialog_answer","id":5,"dialog":3,)"
+                           R"("answer":{"button":0}})");
+  DialogAnswerDecision missing = DecideDialogAnswer(request, nullptr);
+  REQUIRE(!missing.answer);
+  REQUIRE(Json(missing.reply)["error"] == "no such open dialog");
+  DialogRequest pending = ChoiceRequest{"", "", {"OK"}, 0, 0};
+  DialogAnswerDecision answered = DecideDialogAnswer(request, &pending);
+  REQUIRE(answered.answer);
+  REQUIRE(Json(answered.reply)["re"] == 5);
 }
 
 }  // namespace test

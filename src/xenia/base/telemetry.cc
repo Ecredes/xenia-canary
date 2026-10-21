@@ -847,13 +847,17 @@ std::string Event::Finish(uint64_t vblank, uint64_t swap, uint64_t ns,
   return line;
 }
 
+std::string FinishNow(const Event& event) {
+  return event.Finish(vblank_.load(std::memory_order_relaxed),
+                      swap_.load(std::memory_order_relaxed), NowNs(),
+                      CurrentState());
+}
+
 void Emit(Event event) {
   if (!enabled()) {
     return;
   }
-  Enqueue(event.Finish(vblank_.load(std::memory_order_relaxed),
-                       swap_.load(std::memory_order_relaxed), NowNs(),
-                       CurrentState()));
+  Enqueue(FinishNow(event));
 }
 
 void EmitNow(Event event) {

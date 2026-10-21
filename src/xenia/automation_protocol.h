@@ -10,17 +10,23 @@
 #ifndef XENIA_AUTOMATION_PROTOCOL_H_
 #define XENIA_AUTOMATION_PROTOCOL_H_
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "third_party/rapidjson/include/rapidjson/document.h"
 #include "third_party/rapidjson/include/rapidjson/stringbuffer.h"
 #include "third_party/rapidjson/include/rapidjson/writer.h"
+#include "xenia/answer_source.h"
+#include "xenia/base/telemetry.h"
 
 // The automation channel's protocol, kept free of sockets and threads: JSON
 // lines in, decisions and JSON lines out. AutomationChannel carries them out.
@@ -70,6 +76,9 @@ struct Request {
   std::string token;
   // subscribe
   std::optional<std::vector<std::string>> streams;
+  // dialog_answer: the dialog's id, and the answer object as JSON text.
+  std::optional<uint64_t> dialog;
+  std::string answer;
 };
 
 struct ParseResult {
@@ -141,6 +150,22 @@ inline ParseResult ParseRequest(std::string_view line) {
       request.streams->emplace_back(stream.GetString());
     }
   }
+  auto dialog = document.FindMember("dialog");
+  if (dialog != document.MemberEnd()) {
+    if (!dialog->value.IsUint64()) {
+      result.error = "dialog must be a number";
+      return result;
+    }
+    request.dialog = dialog->value.GetUint64();
+  }
+  auto answer = document.FindMember("answer");
+  if (answer != document.MemberEnd()) {
+    if (!answer->value.IsObject()) {
+      result.error = "answer must be an object";
+      return result;
+    }
+    request.answer = ToJson(answer->value);
+  }
   result.request = std::move(request);
   return result;
 }
@@ -207,6 +232,8 @@ struct Session {
   Role role = Role::kNone;
   // Subscribed to telemetry events.
   bool telemetry = false;
+  // Subscribed to dialog events; the controller answers them.
+  bool dialogs = false;
 };
 
 // Telemetry's first line, describing the build, host and settings; a new
@@ -221,8 +248,8 @@ enum class Action {
   kClose,
   // Send the reply and the exit event, then end the process.
   kStop,
-  // Send the reply, then the session_start line, then telemetry as it comes.
-  kStartTelemetry,
+  // Look up the dialog and reply with DecideDialogAnswer.
+  kAnswerDialog,
 };
 
 struct Decision {
@@ -332,8 +359,9 @@ inline Decision Decide(Session& session, const Request& request,
                 .Bool("ok", true)
                 .Uint("protocol", kProtocolVersion)
                 .Raw("xenia", xenia)
-                .Raw("capabilities", R"(["state","stop","subscribe"])")
-                .Raw("streams", R"(["telemetry"])")
+                .Raw("capabilities",
+                     R"(["state","stop","subscribe","dialog_answer"])")
+                .Raw("streams", R"(["telemetry","dialogs"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
                 .Finish()};
@@ -352,21 +380,40 @@ inline Decision Decide(Session& session, const Request& request,
     if (!request.streams) {
       return {ErrorLine(request.id, "missing streams")};
     }
-    bool telemetry = false;
+    bool telemetry = false, dialogs = false;
     for (const std::string& stream : *request.streams) {
-      if (stream != "telemetry") {
+      if (stream == "telemetry") {
+        telemetry = true;
+      } else if (stream == "dialogs") {
+        dialogs = true;
+      } else {
         return {ErrorLine(request.id, "unknown stream " + stream)};
       }
-      telemetry = true;
     }
-    bool started = telemetry && !session.telemetry;
     session.telemetry = telemetry;
+    session.dialogs = dialogs;
+    std::string streams = "[";
+    if (telemetry) {
+      streams += R"("telemetry")";
+    }
+    if (dialogs) {
+      streams += telemetry ? R"(,"dialogs")" : R"("dialogs")";
+    }
+    streams += "]";
     return {JsonLine()
                 .Re(request.id)
                 .Bool("ok", true)
-                .Raw("streams", telemetry ? R"(["telemetry"])" : "[]")
-                .Finish(),
-            started ? Action::kStartTelemetry : Action::kNone};
+                .Raw("streams", streams)
+                .Finish()};
+  }
+  if (request.op == "dialog_answer") {
+    if (session.role != Role::kController) {
+      return {ErrorLine(request.id, "needs the controller role")};
+    }
+    if (!request.dialog || request.answer.empty()) {
+      return {ErrorLine(request.id, "missing dialog or answer")};
+    }
+    return {"", Action::kAnswerDialog};
   }
   if (request.op == "stop") {
     if (session.role != Role::kController) {
@@ -375,6 +422,321 @@ inline Decision Decide(Session& session, const Request& request,
     return {JsonLine().Re(request.id).Bool("ok", true).Finish(), Action::kStop};
   }
   return {ErrorLine(request.id, "unknown op")};
+}
+
+// Dialogs. Each open dialog is announced with a dialog event carrying the
+// request and the policy's answer as its default; the controller may answer it
+// before its timeout, then dialog_closed says who answered.
+
+// Controller slots, as XUserMaxUserCount.
+constexpr uint32_t kMaxUsers = 4;
+
+inline const char* DialogKind(const DialogRequest& request) {
+  static constexpr const char* kKinds[] = {"choice", "text", "sign_in",
+                                           "passcode", "disc"};
+  return kKinds[request.index()];
+}
+
+// XUIDs travel as 16 hex digits: JSON numbers lose 64-bit precision in many
+// clients.
+inline std::string XuidText(uint64_t xuid) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string text(16, '0');
+  for (int i = 15; i >= 0; --i, xuid >>= 4) {
+    text[i] = kHex[xuid & 0xF];
+  }
+  return text;
+}
+
+inline std::optional<uint64_t> ParseXuid(std::string_view text) {
+  if (text.empty() || text.size() > 16) {
+    return std::nullopt;
+  }
+  uint64_t xuid = 0;
+  for (char c : text) {
+    uint64_t digit;
+    if (c >= '0' && c <= '9') {
+      digit = uint64_t(c) - '0';
+    } else if (c >= 'A' && c <= 'F') {
+      digit = uint64_t(c) - 'A' + 10;
+    } else if (c >= 'a' && c <= 'f') {
+      digit = uint64_t(c) - 'a' + 10;
+    } else {
+      return std::nullopt;
+    }
+    xuid = (xuid << 4) | digit;
+  }
+  return xuid;
+}
+
+inline std::string PathText(const std::filesystem::path& path) {
+  std::u8string text = path.u8string();
+  return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+}
+
+inline std::string StringListJson(const std::vector<std::string>& values) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartArray();
+  for (const std::string& value : values) {
+    writer.String(value.data(), rapidjson::SizeType(value.size()));
+  }
+  writer.EndArray();
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+inline std::string ProfilesJson(const std::map<uint8_t, uint64_t>& profiles) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartArray();
+  for (const auto& [slot, xuid] : profiles) {
+    writer.StartObject();
+    writer.Key("slot");
+    writer.Uint(slot);
+    writer.Key("xuid");
+    std::string text = XuidText(xuid);
+    writer.String(text.data(), rapidjson::SizeType(text.size()));
+    writer.EndObject();
+  }
+  writer.EndArray();
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+// An answer as the protocol writes it: the dialog event's default, and what a
+// client sends back.
+inline std::string AnswerJson(const DialogAnswer& answer) {
+  JsonLine line;
+  switch (answer.index()) {
+    case 0:
+      line.Uint("button", std::get<0>(answer));
+      break;
+    case 1:
+      if (const auto& text = std::get<1>(answer)) {
+        line.String("text", *text);
+      } else {
+        line.Bool("cancel", true);
+      }
+      break;
+    case 2:
+      if (const auto& profiles = std::get<2>(answer)) {
+        line.Raw("profiles", ProfilesJson(*profiles));
+      } else {
+        line.Bool("cancel", true);
+      }
+      break;
+    case 3:
+      if (const auto& keys = std::get<3>(answer)) {
+        std::string list = "[";
+        for (size_t i = 0; i < keys->size(); ++i) {
+          list += (i ? "," : "") + std::to_string((*keys)[i]);
+        }
+        line.Raw("keys", list + "]");
+      } else {
+        line.Bool("cancel", true);
+      }
+      break;
+    default:
+      if (std::get<4>(answer).empty()) {
+        line.Bool("cancel", true);
+      } else {
+        line.String("path", PathText(std::get<4>(answer)));
+      }
+      break;
+  }
+  std::string json = line.Finish();
+  json.pop_back();
+  return json;
+}
+
+inline telemetry::Event DialogEvent(uint64_t id, const DialogRequest& request,
+                                    const DialogAnswer& default_answer,
+                                    uint32_t timeout_ms) {
+  telemetry::Event event("dialog");
+  event.UInt("dialog", id).Str("kind", DialogKind(request));
+  switch (request.index()) {
+    case 0: {
+      const ChoiceRequest& choice = std::get<0>(request);
+      event.Str("title", choice.title)
+          .Str("text", choice.text)
+          .Raw("buttons", StringListJson(choice.buttons));
+      break;
+    }
+    case 1: {
+      const TextRequest& text = std::get<1>(request);
+      event.Str("title", text.title)
+          .Str("description", text.description)
+          .Str("default_text", text.default_text)
+          .UInt("max_length", text.max_length);
+      break;
+    }
+    case 2: {
+      const SignInRequest& sign_in = std::get<2>(request);
+      event.UInt("users_needed", sign_in.users_needed)
+          .UInt("last_used_slot", sign_in.last_used_slot)
+          .Raw("signed_in", ProfilesJson(sign_in.signed_in));
+      break;
+    }
+    case 3: {
+      const PasscodeRequest& passcode = std::get<3>(request);
+      event.Str("title", passcode.title)
+          .Str("description", passcode.description)
+          .UInt("length", passcode.length);
+      break;
+    }
+    default:
+      event.Str("prompt", std::get<4>(request).prompt);
+      break;
+  }
+  event.Raw("default", AnswerJson(default_answer))
+      .UInt("timeout_ms", timeout_ms);
+  return event;
+}
+
+// by: "client", "timeout" or "policy" (no controller to ask any more).
+inline telemetry::Event DialogClosedEvent(uint64_t id, std::string_view by) {
+  telemetry::Event event("dialog_closed");
+  event.UInt("dialog", id).Str("by", by);
+  return event;
+}
+
+// Checks a client's answer against the open request: what a real dialog
+// would let a person pick.
+inline std::optional<DialogAnswer> ParseDialogAnswer(
+    const DialogRequest& request, std::string_view json, std::string* error) {
+  rapidjson::Document answer;
+  answer.Parse(json.data(), json.size());
+  if (answer.HasParseError() || !answer.IsObject()) {
+    *error = "answer must be an object";
+    return std::nullopt;
+  }
+  auto cancel = answer.FindMember("cancel");
+  if (cancel != answer.MemberEnd() && cancel->value.IsBool() &&
+      cancel->value.GetBool()) {
+    switch (request.index()) {
+      case 0:
+        *error = "a choice can't be cancelled";
+        return std::nullopt;
+      case 1:
+        return DialogAnswer(std::in_place_index<1>);
+      case 2:
+        return DialogAnswer(std::in_place_index<2>);
+      case 3:
+        return DialogAnswer(std::in_place_index<3>);
+      default:
+        return DialogAnswer(std::in_place_index<4>);
+    }
+  }
+  switch (request.index()) {
+    case 0: {
+      auto button = answer.FindMember("button");
+      size_t count = std::get<0>(request).buttons.size();
+      if (button == answer.MemberEnd() || !button->value.IsUint() ||
+          button->value.GetUint() >= std::max<size_t>(count, 1)) {
+        *error = "button must be one of the buttons' indexes";
+        return std::nullopt;
+      }
+      return DialogAnswer(std::in_place_index<0>, button->value.GetUint());
+    }
+    case 1: {
+      auto text = answer.FindMember("text");
+      if (text == answer.MemberEnd() || !text->value.IsString()) {
+        *error = "text must be a string, or cancel true";
+        return std::nullopt;
+      }
+      size_t max_length = std::get<1>(request).max_length;
+      if (max_length && text->value.GetStringLength() > max_length) {
+        *error = "text is longer than max_length";
+        return std::nullopt;
+      }
+      return DialogAnswer(
+          std::in_place_index<1>,
+          std::string(text->value.GetString(), text->value.GetStringLength()));
+    }
+    case 2: {
+      auto profiles = answer.FindMember("profiles");
+      if (profiles == answer.MemberEnd() || !profiles->value.IsArray()) {
+        *error = "profiles must be a list, or cancel true";
+        return std::nullopt;
+      }
+      std::map<uint8_t, uint64_t> chosen;
+      for (const auto& profile : profiles->value.GetArray()) {
+        auto slot = profile.IsObject() ? profile.FindMember("slot")
+                                       : profile.MemberEnd();
+        auto xuid = profile.IsObject() ? profile.FindMember("xuid")
+                                       : profile.MemberEnd();
+        std::optional<uint64_t> parsed_xuid;
+        if (xuid != profile.MemberEnd() && xuid->value.IsString()) {
+          parsed_xuid = ParseXuid(xuid->value.GetString());
+        }
+        if (slot == profile.MemberEnd() || !slot->value.IsUint() ||
+            slot->value.GetUint() >= kMaxUsers || !parsed_xuid) {
+          *error = "each profile needs a slot below 4 and a hex xuid";
+          return std::nullopt;
+        }
+        if (!chosen.emplace(uint8_t(slot->value.GetUint()), *parsed_xuid)
+                 .second) {
+          *error = "a slot is given twice";
+          return std::nullopt;
+        }
+      }
+      if (chosen.size() > std::get<2>(request).users_needed) {
+        *error = "more profiles than users_needed";
+        return std::nullopt;
+      }
+      return DialogAnswer(std::in_place_index<2>, std::move(chosen));
+    }
+    case 3: {
+      auto keys = answer.FindMember("keys");
+      if (keys == answer.MemberEnd() || !keys->value.IsArray() ||
+          keys->value.Size() != std::get<3>(request).length) {
+        *error = "keys must be a list of length keys, or cancel true";
+        return std::nullopt;
+      }
+      std::vector<uint16_t> values;
+      for (const auto& key : keys->value.GetArray()) {
+        if (!key.IsUint() || key.GetUint() > 0xFFFF) {
+          *error = "each key must be a number up to 65535";
+          return std::nullopt;
+        }
+        values.push_back(uint16_t(key.GetUint()));
+      }
+      return DialogAnswer(std::in_place_index<3>, std::move(values));
+    }
+    default: {
+      auto path = answer.FindMember("path");
+      if (path == answer.MemberEnd() || !path->value.IsString() ||
+          !path->value.GetStringLength()) {
+        *error = "path must be a host path, or cancel true";
+        return std::nullopt;
+      }
+      std::u8string text(
+          reinterpret_cast<const char8_t*>(path->value.GetString()),
+          path->value.GetStringLength());
+      return DialogAnswer(std::in_place_index<4>, std::filesystem::path(text));
+    }
+  }
+}
+
+struct DialogAnswerDecision {
+  std::string reply;
+  // Present when the dialog should close with it.
+  std::optional<DialogAnswer> answer;
+};
+
+// pending: the open dialog the request names, or null if none is open.
+inline DialogAnswerDecision DecideDialogAnswer(const Request& request,
+                                               const DialogRequest* pending) {
+  if (!pending) {
+    return {ErrorLine(request.id, "no such open dialog")};
+  }
+  std::string error;
+  std::optional<DialogAnswer> answer =
+      ParseDialogAnswer(*pending, request.answer, &error);
+  if (!answer) {
+    return {ErrorLine(request.id, error)};
+  }
+  return {JsonLine().Re(request.id).Bool("ok", true).Finish(),
+          std::move(answer)};
 }
 
 // Sent to every client before the process ends at a client's request.

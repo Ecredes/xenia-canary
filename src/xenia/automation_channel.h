@@ -11,14 +11,17 @@
 #define XENIA_AUTOMATION_CHANNEL_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "xenia/answer_source.h"
 #include "xenia/automation_protocol.h"
 #include "xenia/base/platform.h"
 
@@ -38,7 +41,10 @@ using SocketHandle = int;
 // Lets a tool watch and control this process over a loopback TCP socket
 // (--automation_port), speaking automation_protocol.h. Carries out the
 // protocol's decisions; decides nothing itself.
-class AutomationChannel {
+//
+// As an answer source, asks the controller when one is subscribed to dialogs,
+// and otherwise, at the timeout or when the controller goes, the policies.
+class AutomationChannel : public AnswerSource {
  public:
   // Null when --automation_port is 0 or the port can't be opened. stop ends
   // the process; it's called once, on the channel's thread, after the clients
@@ -46,7 +52,11 @@ class AutomationChannel {
   static std::unique_ptr<AutomationChannel> Create(Emulator& emulator,
                                                    BuildInfo build,
                                                    std::function<void()> stop);
-  ~AutomationChannel();
+  ~AutomationChannel() override;
+
+  // From any thread.
+  void Answer(DialogRequest request,
+              std::function<void(DialogAnswer)> done) override;
 
  private:
   struct Client {
@@ -70,6 +80,14 @@ class AutomationChannel {
     std::vector<std::string> lines;
   };
   class TelemetrySink;
+  struct OpenDialog {
+    DialogRequest request;
+    DialogAnswer default_answer;
+    std::function<void(DialogAnswer)> done;
+    std::chrono::steady_clock::time_point deadline;
+    // Its dialog event, for clients subscribing while it is open.
+    std::string event;
+  };
 
   AutomationChannel(SocketHandle listen_socket, std::string token,
                     BuildInfo build, std::shared_ptr<SnapshotSource> snapshot,
@@ -84,6 +102,11 @@ class AutomationChannel {
   void Handle(Client& client, std::string_view line);
   // Hands queued telemetry to its subscribers.
   void ForwardTelemetry();
+  // Sends dialog events, and answers dialogs past their deadline, or all of
+  // them when no controller is subscribed any more.
+  void ServiceDialogs();
+  // Answers every open dialog with the policies.
+  void CloseAllDialogs();
   void Stop();
 
   SocketHandle listen_socket_;
@@ -95,6 +118,15 @@ class AutomationChannel {
   std::vector<std::unique_ptr<Client>> clients_;
   bool stopping_ = false;
   std::atomic<bool> running_{true};
+
+  std::chrono::milliseconds dialog_timeout_;
+  // A controller is subscribed to dialogs. Set by the channel's thread.
+  std::atomic<bool> controller_answers_{false};
+  std::mutex dialogs_mutex_;
+  std::map<uint64_t, OpenDialog> open_dialogs_;
+  uint64_t next_dialog_ = 1;
+  // Dialog lines for the channel's thread to send.
+  std::vector<std::string> dialog_lines_;
   std::thread thread_;
 };
 

@@ -44,6 +44,11 @@ DEFINE_transient_int32(
     "Listen for an automation client on this loopback TCP port, 0 for none. "
     "See docs/automation.md.",
     "Automation");
+DEFINE_transient_int32(
+    automation_dialog_timeout, 30,
+    "Seconds an automation client subscribed to dialogs has to answer one "
+    "before the default answers it.",
+    "Automation");
 DEFINE_transient_string(
     automation_token, "",
     "The token an automation client must send. Without one, a random token "
@@ -250,7 +255,9 @@ AutomationChannel::AutomationChannel(SocketHandle listen_socket,
       build_(std::move(build)),
       snapshot_(std::move(snapshot)),
       telemetry_(std::move(telemetry)),
-      stop_(std::move(stop)) {
+      stop_(std::move(stop)),
+      dialog_timeout_(
+          std::chrono::seconds(std::max(cvars::automation_dialog_timeout, 1))) {
   thread_ = std::thread([this]() { ServerLoop(); });
 }
 
@@ -259,6 +266,8 @@ AutomationChannel::~AutomationChannel() {
   if (thread_.joinable()) {
     thread_.join();
   }
+  controller_answers_ = false;
+  CloseAllDialogs();
   for (const auto& client : clients_) {
     CloseSocket(client->socket);
   }
@@ -295,6 +304,7 @@ void AutomationChannel::ServerLoop() {
       Accept();
     }
     ForwardTelemetry();
+    ServiceDialogs();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -395,11 +405,25 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
     context.snapshot = snapshot_->snapshot;
   }
   Role role_before = client.session.role;
+  bool had_telemetry = client.session.telemetry;
+  bool had_dialogs = client.session.dialogs;
   Decision decision = Decide(client.session, *parsed.request, context);
   client.out += decision.reply;
   if (role_before == Role::kNone && client.session.role != Role::kNone) {
     XELOGI("Automation: a client connected as {}",
            RoleName(client.session.role));
+  }
+  if (!had_telemetry && client.session.telemetry) {
+    std::lock_guard<std::mutex> lock(telemetry_->mutex);
+    if (!telemetry_->session_start.empty()) {
+      client.out += telemetry_->session_start + "\n";
+    }
+  }
+  if (!had_dialogs && client.session.dialogs) {
+    std::lock_guard<std::mutex> lock(dialogs_mutex_);
+    for (const auto& [id, dialog] : open_dialogs_) {
+      client.out += dialog.event + "\n";
+    }
   }
   switch (decision.action) {
     case Action::kNone:
@@ -410,15 +434,36 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
         XELOGW("Automation: refused a client: {}", decision.reply);
       }
       break;
-    case Action::kStartTelemetry: {
-      std::lock_guard<std::mutex> lock(telemetry_->mutex);
-      if (!telemetry_->session_start.empty()) {
-        client.out += telemetry_->session_start + "\n";
+    case Action::kAnswerDialog: {
+      // Decide checked that the request names a dialog.
+      if (!parsed.request->dialog) {
+        break;
+      }
+      std::function<void(DialogAnswer)> done;
+      std::optional<DialogAnswer> answer;
+      {
+        std::lock_guard<std::mutex> lock(dialogs_mutex_);
+        auto it = open_dialogs_.find(*parsed.request->dialog);
+        DialogAnswerDecision answered = DecideDialogAnswer(
+            *parsed.request,
+            it == open_dialogs_.end() ? nullptr : &it->second.request);
+        client.out += answered.reply;
+        if (answered.answer) {
+          done = std::move(it->second.done);
+          answer = std::move(answered.answer);
+          dialog_lines_.push_back(
+              telemetry::FinishNow(DialogClosedEvent(it->first, "client")));
+          open_dialogs_.erase(it);
+        }
+      }
+      if (done && answer) {
+        done(std::move(*answer));
       }
       break;
     }
     case Action::kStop:
       stopping_ = true;
+      controller_answers_ = false;
       for (const auto& other : clients_) {
         if (other->session.role != Role::kNone) {
           other->out += ExitEvent(EXIT_SUCCESS);
@@ -453,6 +498,84 @@ void AutomationChannel::ForwardTelemetry() {
   }
 }
 
+void AutomationChannel::Answer(DialogRequest request,
+                               std::function<void(DialogAnswer)> done) {
+  DialogAnswer default_answer = PolicyAnswer(request);
+  std::unique_lock<std::mutex> lock(dialogs_mutex_);
+  // Checked under the lock: CloseAllDialogs clears it first, then empties the
+  // open dialogs under the lock, so none is left behind.
+  if (!controller_answers_.load(std::memory_order_acquire)) {
+    lock.unlock();
+    done(std::move(default_answer));
+    return;
+  }
+  uint64_t id = next_dialog_++;
+  std::string event = telemetry::FinishNow(DialogEvent(
+      id, request, default_answer, uint32_t(dialog_timeout_.count())));
+  dialog_lines_.push_back(event);
+  open_dialogs_.emplace(
+      id,
+      OpenDialog{std::move(request), std::move(default_answer), std::move(done),
+                 std::chrono::steady_clock::now() + dialog_timeout_,
+                 std::move(event)});
+}
+
+void AutomationChannel::ServiceDialogs() {
+  bool answers = false;
+  for (const auto& client : clients_) {
+    if (client->session.role == Role::kController && client->session.dialogs &&
+        !client->closing) {
+      answers = true;
+    }
+  }
+  controller_answers_.store(answers && !stopping_, std::memory_order_release);
+  std::vector<std::string> lines;
+  std::vector<std::pair<std::function<void(DialogAnswer)>, DialogAnswer>>
+      to_answer;
+  {
+    std::lock_guard<std::mutex> lock(dialogs_mutex_);
+    lines.swap(dialog_lines_);
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = open_dialogs_.begin(); it != open_dialogs_.end();) {
+      if (answers && now < it->second.deadline) {
+        ++it;
+        continue;
+      }
+      lines.push_back(telemetry::FinishNow(
+          DialogClosedEvent(it->first, answers ? "timeout" : "policy")));
+      to_answer.emplace_back(std::move(it->second.done),
+                             std::move(it->second.default_answer));
+      it = open_dialogs_.erase(it);
+    }
+  }
+  for (auto& [done, answer] : to_answer) {
+    done(std::move(answer));
+  }
+  if (lines.empty()) {
+    return;
+  }
+  for (const auto& client : clients_) {
+    if (!client->session.dialogs || client->closing) {
+      continue;
+    }
+    for (const std::string& line : lines) {
+      client->out += line;
+      client->out += '\n';
+    }
+  }
+}
+
+void AutomationChannel::CloseAllDialogs() {
+  std::map<uint64_t, OpenDialog> closing;
+  {
+    std::lock_guard<std::mutex> lock(dialogs_mutex_);
+    closing.swap(open_dialogs_);
+  }
+  for (auto& [id, dialog] : closing) {
+    dialog.done(std::move(dialog.default_answer));
+  }
+}
+
 void AutomationChannel::Stop() {
   XELOGI("Automation: stopping at a client's request");
   auto deadline = std::chrono::steady_clock::now() + kStopFlushTime;
@@ -473,6 +596,7 @@ void AutomationChannel::Stop() {
   }
   clients_.clear();
   running_ = false;
+  CloseAllDialogs();
   auto stop = std::move(stop_);
   stop();
 }

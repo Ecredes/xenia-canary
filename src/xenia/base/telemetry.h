@@ -200,6 +200,9 @@ class Event {
   std::string fields_;
 };
 
+// The line as Emit would write it now, with the current envelope, without
+// writing it. For other channels that share the format.
+std::string FinishNow(const Event& event);
 // Queues an event for the writer thread. No-op when disabled.
 void Emit(Event event);
 // Writes everything queued, then this event, and flushes all sinks before
