@@ -1,0 +1,35 @@
+# Headless Xenia for automation (fork-only): the Linux build, the libraries
+# it links against, Mesa's Vulkan drivers, and ffmpeg with VA-API drivers to
+# encode the automation channel's video stream on the GPU. game-mcp runs it
+# with the GPU's render node and the session folder mounted; see
+# README.md beside this file.
+#
+# Build context: a folder holding the xenia_canary binary.
+FROM ubuntu:24.04
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates tini ffmpeg \
+      libvulkan1 mesa-vulkan-drivers \
+      intel-media-va-driver-non-free mesa-va-drivers \
+      libasound2t64 libatk1.0-0t64 libcairo2 libfontconfig1 \
+      libgdk-pixbuf-2.0-0 libglib2.0-0t64 libgtk-3-0t64 libharfbuzz0b \
+      liblz4-1 libpango-1.0-0 libpangocairo-1.0-0 libpulse0 \
+      libsdl2-2.0-0 libstdc++6 libx11-6 libx11-xcb1 libxau6 libxcb1 \
+      libxdmcp6 zlib1g \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY xenia_canary /opt/xenia/xenia_canary
+# Fails the build if a library the binary needs is missing.
+RUN chmod 755 /opt/xenia/xenia_canary \
+ && ! ldd /opt/xenia/xenia_canary | grep "not found"
+
+ENV PATH=/opt/xenia:$PATH
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["xenia_canary", "--help"]
+
+LABEL org.opencontainers.image.title="xenia-headless" \
+      org.opencontainers.image.description="Headless Xenia (Ecredes fork automation builds) with Vulkan and VA-API" \
+      org.opencontainers.image.source="https://github.com/Ecredes/xenia-canary" \
+      org.opencontainers.image.licenses="BSD-3-Clause"

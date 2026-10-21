@@ -50,6 +50,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      branch: ${{ github.event.workflow_run.head_branch || inputs.ref }}
       drift: ${{ steps.drift.outputs.drift }}
       save_cache: ${{ steps.resolve.outputs.save_cache }}
       linux_cache: ${{ steps.caches.outputs.linux }}
@@ -181,9 +182,55 @@ jobs:
       restore-key: ${{ needs.setup.outputs.linux_cache }}
       keep-ref: ${{ needs.setup.outputs.fork_ci_sha }}
 
+  # The headless automation image (.github/container) for automation/*
+  # branches: their Linux build in ghcr.io/ecredes/xenia-headless, tagged with
+  # the branch (slashes as dashes) and the commit. The package is private.
+  image:
+    name: Image
+    needs: [setup, build-linux]
+    if: startsWith(needs.setup.outputs.branch, 'automation/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/ecredes/xenia-headless
+      BRANCH: ${{ needs.setup.outputs.branch }}
+      SHA: ${{ needs.setup.outputs.sha }}
+    steps:
+      # This workflow's own branch (fork-ci), where the Containerfile lives.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: .github/container
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: xenia_canary_linux.AppImage
+          path: appimage
+      - name: Extract the binary
+        run: |-
+          cd appimage
+          chmod +x xenia_canary_linux.AppImage
+          ./xenia_canary_linux.AppImage --appimage-extract usr/bin/xenia_canary > /dev/null
+          mkdir -p ../context
+          mv squashfs-root/usr/bin/xenia_canary ../context/
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |-
+          tag=$(printf '%s' "$BRANCH" | tr '/' '-' | tr -c 'A-Za-z0-9_.-' '-')
+          docker build -f .github/container/Containerfile \
+            --label "org.opencontainers.image.revision=$SHA" \
+            -t "$IMAGE:$tag" -t "$IMAGE:$SHA" context
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker push "$IMAGE:$tag"
+          docker push "$IMAGE:$SHA"
+          echo "Pushed $IMAGE:$tag and $IMAGE:$SHA" >> "$GITHUB_STEP_SUMMARY"
+
   report:
     name: Report
-    needs: [setup, lint, build-windows, build-linux]
+    needs: [setup, lint, build-windows, build-linux, image]
     if: ${{ always() && needs.setup.result == 'success' }}
     runs-on: ubuntu-24.04
     env:
@@ -191,8 +238,9 @@ jobs:
       REPO: ${{ github.repository }}
       SHA: ${{ needs.setup.outputs.sha }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      RESULTS: ${{ needs.lint.result }} ${{ needs.build-windows.result }} ${{ needs.build-linux.result }}
+      RESULTS: ${{ needs.lint.result }} ${{ needs.build-windows.result }} ${{ needs.build-linux.result }} ${{ needs.image.result }}
       DRIFT: ${{ needs.setup.outputs.drift }}
+      IMAGE_RESULT: ${{ needs.image.result }}
       WINDOWS_CACHEABLE: ${{ needs.build-windows.outputs.cacheable }}
     steps:
       - name: Set commit status
@@ -202,6 +250,9 @@ jobs:
             *" cancelled "*) state=error; description="Cancelled" ;;
             *) state=success; description="Lint and builds passed" ;;
           esac
+          if [ "$IMAGE_RESULT" = success ]; then
+            description="$description; image pushed"
+          fi
           if [ -n "$DRIFT" ]; then
             description="$description; untested workflow changes: $DRIFT"
           fi
