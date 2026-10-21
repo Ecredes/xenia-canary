@@ -601,6 +601,133 @@ TEST_CASE("Frames carry the capture's counters", "[automation]") {
   REQUIRE(event["data"] == "Zm9v");
 }
 
+TEST_CASE("Video starts with a port, an even size and a rate", "[automation]") {
+  Session observer{Role::kObserver};
+  Decision decision = Decide(observer,
+                             Parsed(R"({"op":"video_start","port":5000,)"
+                                    R"("width":1280,"height":720,"fps":60})"),
+                             TestContext());
+  REQUIRE(decision.action == Action::kVideoStart);
+  REQUIRE(decision.video_options.port == 5000);
+  REQUIRE(decision.video_options.width == 1280);
+  REQUIRE(decision.video_options.height == 720);
+  REQUIRE(decision.video_options.fps == 60);
+  REQUIRE(Decide(observer, Parsed(R"({"op":"video_stop"})"), TestContext())
+              .action == Action::kVideoStop);
+  auto error = [&observer](std::string_view line) {
+    Decision decision = Decide(observer, Parsed(line), TestContext());
+    REQUIRE(decision.action == Action::kNone);
+    return std::string(Json(decision.reply)["error"].GetString());
+  };
+  REQUIRE(error(R"({"op":"video_start","width":640,"height":360,"fps":30})") ==
+          "port must be from 1024 to 65535");
+  REQUIRE(error(R"({"op":"video_start","port":80,"width":640,"height":360,)"
+                R"("fps":30})") == "port must be from 1024 to 65535");
+  REQUIRE(error(R"({"op":"video_start","port":5000,"width":641,)"
+                R"("height":360,"fps":30})") ==
+          "width and height must be even, from 16 to 8192");
+  REQUIRE(error(R"({"op":"video_start","port":5000,"width":640,"fps":30})") ==
+          "width and height must be even, from 16 to 8192");
+  REQUIRE(error(R"({"op":"video_start","port":5000,"width":640,)"
+                R"("height":360,"fps":61})") == "fps must be from 1 to 60");
+}
+
+TEST_CASE("Video keeps a constant rate, repeating and dropping",
+          "[automation]") {
+  VideoClock clock;
+  clock.fps = 10;
+  clock.start_ns = 1000;
+  REQUIRE(!NextVideoStep(clock, 999, 1, 5).send);
+  // The first tick captures.
+  VideoStep step = NextVideoStep(clock, 1000, 1, 5);
+  REQUIRE(step.send);
+  REQUIRE(step.capture);
+  REQUIRE(step.repeats == 0);
+  REQUIRE(clock.ticks == 1);
+  REQUIRE(VideoTickNs(clock, clock.ticks) == 100001000);
+  // Not due before the next tick.
+  REQUIRE(!NextVideoStep(clock, 50001000, 2, 5).send);
+  // No swap since: the tick repeats the frame.
+  step = NextVideoStep(clock, 100001000, 1, 5);
+  REQUIRE(step.send);
+  REQUIRE(!step.capture);
+  // Two ticks late: the missed one repeats, then a new capture.
+  step = NextVideoStep(clock, 350001000, 2, 5);
+  REQUIRE(step.repeats == 1);
+  REQUIRE(step.capture);
+  REQUIRE(step.dropped == 0);
+  REQUIRE(clock.ticks == 4);
+  // Further behind than max_late: those ticks drop.
+  step = NextVideoStep(clock, 1300001000, 3, 5);
+  REQUIRE(step.dropped == 9);
+  REQUIRE(step.repeats == 0);
+  REQUIRE(step.send);
+  REQUIRE(clock.ticks == 14);
+}
+
+TEST_CASE("Video fits the guest output with black bars", "[automation]") {
+  // 4x2 RGBX, stride 16, every pixel 100.
+  std::vector<uint8_t> wide(16 * 2, 100);
+  // Into 4x4: full width, a black row above and below.
+  RgbImage tall = FitInto(wide.data(), 4, 2, 16, 4, 4);
+  REQUIRE(tall.width == 4);
+  REQUIRE(tall.height == 4);
+  REQUIRE(tall.pixels[0] == 0);
+  REQUIRE(tall.pixels[1 * 12] == 100);
+  REQUIRE(tall.pixels[2 * 12 + 11] == 100);
+  REQUIRE(tall.pixels[3 * 12] == 0);
+  // Into 8x2: full height, black columns either side.
+  RgbImage wider = FitInto(wide.data(), 4, 2, 16, 8, 2);
+  REQUIRE(wider.pixels[0] == 0);
+  REQUIRE(wider.pixels[2 * 3] == 100);
+  REQUIRE(wider.pixels[5 * 3] == 100);
+  REQUIRE(wider.pixels[6 * 3] == 0);
+  // Scaled up, each output pixel takes its nearest source pixels.
+  const uint8_t pair[] = {0, 0, 0, 0, 200, 200, 200, 0};
+  RgbImage up = FitInto(pair, 2, 1, 8, 4, 2);
+  REQUIRE(up.pixels[0] == 0);
+  REQUIRE(up.pixels[1 * 3] == 0);
+  REQUIRE(up.pixels[2 * 3] == 200);
+  REQUIRE(up.pixels[4 * 3 + 9] == 200);
+  // Black without an image.
+  RgbImage black = FitInto(nullptr, 0, 0, 0, 4, 2);
+  REQUIRE(black.pixels == std::vector<uint8_t>(4 * 2 * 3, 0));
+}
+
+TEST_CASE("Video replies and events describe the stream", "[automation]") {
+  VideoOptions options;
+  options.port = 5000;
+  options.width = 640;
+  options.height = 360;
+  options.fps = 30;
+  rapidjson::Document start = Json(VideoStartReply("4", options, 777));
+  REQUIRE(start["re"] == 4);
+  REQUIRE(start["pix_fmt"] == "rgb24");
+  REQUIRE(start["width"] == 640);
+  REQUIRE(start["fps"] == 30);
+  REQUIRE(start["ns"] == 777);
+  VideoCounts counts{90, 40, 2};
+  rapidjson::Document stop = Json(VideoStopReply("5", counts));
+  REQUIRE(stop["frames"] == 90);
+  REQUIRE(stop["captures"] == 40);
+  REQUIRE(stop["dropped"] == 2);
+  EncodedFrame frame;
+  frame.vblank = 70;
+  frame.swap = 35;
+  frame.ns = 123;
+  frame.capture_ns = 5250000;
+  rapidjson::Document event = Json(VideoFrameLine(12, frame));
+  REQUIRE(event["type"] == "video_frame");
+  REQUIRE(event["n"] == 12);
+  REQUIRE(event["swap"] == 35);
+  REQUIRE(event["capture_ms"] == 5.25);
+  rapidjson::Document end =
+      Json(telemetry::FinishNow(VideoEndEvent("gone", counts)) + "\n");
+  REQUIRE(end["type"] == "video_end");
+  REQUIRE(end["reason"] == "gone");
+  REQUIRE(end["frames"] == 90);
+}
+
 }  // namespace test
 }  // namespace automation
 }  // namespace xe

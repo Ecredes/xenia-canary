@@ -113,6 +113,12 @@ constexpr size_t kMaxQueuedTelemetry = 65536;
 constexpr int32_t kFramePollMicroseconds = 2000;
 // A watcher with this much unsent skips frames rather than queueing them.
 constexpr size_t kMaxFrameBacklog = 1024 * 1024;
+// The most a video stream asks the OS to buffer.
+constexpr size_t kMaxVideoSendBuffer = 64 * 1024 * 1024;
+// The longest a video stream sleeps between looks at the clock.
+constexpr uint64_t kVideoSleepNs = 5000000;
+// A video listener reading nothing for this long ends the stream.
+constexpr auto kVideoStallTime = std::chrono::seconds(10);
 
 // std::random_device draws from the OS's secure source with MSVC, libstdc++
 // and libc++.
@@ -283,6 +289,182 @@ class AutomationChannel::FrameWorker {
   std::thread thread_;
 };
 
+// Sends a video_start's frames on its own thread, so neither the channel's
+// thread nor the GPU's waits for the listener.
+class AutomationChannel::VideoStream {
+ public:
+  using Capture = FrameWorker::Capture;
+
+  // Null, with error set, when nothing listens on the port.
+  static std::unique_ptr<VideoStream> Connect(
+      const VideoOptions& options, Capture capture,
+      std::function<uint64_t()> swap_count, std::string* error) {
+    SocketHandle socket_handle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (socket_handle == kInvalidSocket) {
+      *error = "unable to open a socket";
+      return nullptr;
+    }
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(options.port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(socket_handle, reinterpret_cast<sockaddr*>(&address),
+                sizeof(address)) != 0 ||
+        !SetNonBlocking(socket_handle)) {
+      CloseSocket(socket_handle);
+      *error = "nothing listens on 127.0.0.1:" + std::to_string(options.port);
+      return nullptr;
+    }
+    // A few frames of slack, so one slow read doesn't cost a tick.
+    int buffer = int(std::min(size_t(options.width) * options.height * 3 * 4,
+                              kMaxVideoSendBuffer));
+    setsockopt(socket_handle, SOL_SOCKET, SO_SNDBUF,
+               reinterpret_cast<const char*>(&buffer), sizeof(buffer));
+    return std::unique_ptr<VideoStream>(new VideoStream(
+        options, socket_handle, std::move(capture), std::move(swap_count)));
+  }
+  ~VideoStream() {
+    Stop();
+    CloseSocket(socket_);
+  }
+
+  // Ends the stream; counts are final after.
+  void Stop() {
+    running_ = false;
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+  // video_frame lines for the client that started it.
+  std::vector<std::string> TakeLines() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> lines;
+    lines.swap(lines_);
+    return lines;
+  }
+  // Why it ended by itself, empty while it runs.
+  std::string end_reason() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return end_reason_;
+  }
+  VideoCounts counts() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return counts_;
+  }
+  // When frame 0 is due, in host ns.
+  uint64_t start_ns() const { return start_ns_; }
+
+ private:
+  VideoStream(const VideoOptions& options, SocketHandle socket_handle,
+              Capture capture, std::function<uint64_t()> swap_count)
+      : options_(options),
+        socket_(socket_handle),
+        capture_(std::move(capture)),
+        swap_count_(std::move(swap_count)),
+        start_ns_(telemetry::NowNs()) {
+    thread_ = std::thread([this]() { Loop(); });
+  }
+
+  void Loop() {
+    xe::threading::set_name("Automation Video");
+    VideoClock clock;
+    clock.fps = options_.fps;
+    clock.start_ns = start_ns_;
+    // Black until the guest has output.
+    RgbImage last = FitInto(nullptr, 0, 0, 0, options_.width, options_.height);
+    while (running_) {
+      uint64_t now_ns = telemetry::NowNs();
+      uint64_t next_ns = VideoTickNs(clock, clock.ticks);
+      if (now_ns < next_ns) {
+        std::this_thread::sleep_for(std::chrono::nanoseconds(
+            std::min(next_ns - now_ns, kVideoSleepNs)));
+        continue;
+      }
+      VideoStep step =
+          NextVideoStep(clock, now_ns, swap_count_(), options_.fps / 2);
+      for (uint64_t i = 0; i < step.repeats; ++i) {
+        if (!Send(last.pixels)) {
+          return;
+        }
+      }
+      std::string line;
+      if (step.capture) {
+        ui::RawImage image;
+        EncodedFrame frame;
+        frame.ns = telemetry::NowNs();
+        frame.state = telemetry::CurrentState();
+        if (capture_(image, frame.vblank, frame.swap)) {
+          frame.capture_ns = telemetry::NowNs() - frame.ns;
+          last = FitInto(image.data.data(), image.width, image.height,
+                         image.stride, options_.width, options_.height);
+          line = VideoFrameLine(clock.ticks - 1, frame);
+        }
+      }
+      if (!Send(last.pixels)) {
+        return;
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      counts_.frames += step.repeats + 1;
+      counts_.dropped += step.dropped;
+      if (!line.empty()) {
+        ++counts_.captures;
+        lines_.push_back(std::move(line));
+      }
+    }
+  }
+
+  // False when the stream is stopping or has ended.
+  bool Send(const std::vector<uint8_t>& bytes) {
+    size_t sent = 0;
+    auto progress = std::chrono::steady_clock::now();
+    while (sent < bytes.size()) {
+      if (!running_) {
+        return false;
+      }
+      int count =
+          SendSome(socket_, reinterpret_cast<const char*>(bytes.data()) + sent,
+                   bytes.size() - sent);
+      if (count > 0) {
+        sent += size_t(count);
+        progress = std::chrono::steady_clock::now();
+        continue;
+      }
+      if (count < 0 && WouldBlock()) {
+        if (std::chrono::steady_clock::now() - progress > kVideoStallTime) {
+          End("the listener stopped reading");
+          return false;
+        }
+        fd_set write_set;
+        FD_ZERO(&write_set);
+        FD_SET(socket_, &write_set);
+        timeval timeout = {0, kPollMicroseconds};
+        select(int(socket_ + 1), nullptr, &write_set, nullptr, &timeout);
+        continue;
+      }
+      End("the listener closed the connection");
+      return false;
+    }
+    return true;
+  }
+
+  void End(std::string reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    end_reason_ = std::move(reason);
+  }
+
+  VideoOptions options_;
+  SocketHandle socket_;
+  Capture capture_;
+  std::function<uint64_t()> swap_count_;
+  uint64_t start_ns_;
+  std::atomic<bool> running_{true};
+  std::mutex mutex_;
+  std::vector<std::string> lines_;
+  std::string end_reason_;
+  VideoCounts counts_;
+  std::thread thread_;
+};
+
 std::unique_ptr<AutomationChannel> AutomationChannel::Create(
     Emulator& emulator, BuildInfo build, std::function<void()> stop) {
   int32_t port = cvars::automation_port;
@@ -377,24 +559,40 @@ std::unique_ptr<AutomationChannel> AutomationChannel::Create(
     return counters;
   });
 
-  auto frames = std::make_unique<FrameWorker>(
-      [&emulator](ui::RawImage& image, uint64_t& vblank, uint64_t& swap) {
-        gpu::GraphicsSystem* graphics_system = emulator.graphics_system();
-        ui::Presenter* presenter =
-            graphics_system ? graphics_system->presenter() : nullptr;
-        if (!presenter) {
-          return false;
-        }
-        vblank = graphics_system->vblank_count();
-        swap = graphics_system->swap_count();
-        return presenter->CaptureGuestOutput(image);
-      });
+  // Frames and video capture one at a time, so their readbacks of the guest
+  // output don't interleave.
+  auto capture_mutex = std::make_shared<std::mutex>();
+  FrameWorker::Capture capture = [&emulator, capture_mutex](ui::RawImage& image,
+                                                            uint64_t& vblank,
+                                                            uint64_t& swap) {
+    gpu::GraphicsSystem* graphics_system = emulator.graphics_system();
+    ui::Presenter* presenter =
+        graphics_system ? graphics_system->presenter() : nullptr;
+    if (!presenter) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(*capture_mutex);
+    vblank = graphics_system->vblank_count();
+    swap = graphics_system->swap_count();
+    return presenter->CaptureGuestOutput(image);
+  };
+  auto frames = std::make_unique<FrameWorker>(capture);
+  VideoStarter start_video = [&emulator, capture](const VideoOptions& options,
+                                                  std::string* error) {
+    return VideoStream::Connect(
+        options, capture,
+        [&emulator]() {
+          gpu::GraphicsSystem* graphics_system = emulator.graphics_system();
+          return graphics_system ? graphics_system->swap_count() : 0;
+        },
+        error);
+  };
 
   XELOGI("Automation: listening on 127.0.0.1:{}", port);
   return std::unique_ptr<AutomationChannel>(new AutomationChannel(
       emulator, listen_socket, std::move(token), std::move(build),
       std::move(snapshot), std::move(telemetry_feed), std::move(pads),
-      std::move(frames), std::move(stop)));
+      std::move(frames), std::move(start_video), std::move(stop)));
 }
 
 AutomationChannel::AutomationChannel(
@@ -402,7 +600,8 @@ AutomationChannel::AutomationChannel(
     BuildInfo build, std::shared_ptr<SnapshotSource> snapshot,
     std::shared_ptr<TelemetryFeed> telemetry,
     std::shared_ptr<hid::remote::RemotePads> pads,
-    std::unique_ptr<FrameWorker> frames, std::function<void()> stop)
+    std::unique_ptr<FrameWorker> frames, VideoStarter start_video,
+    std::function<void()> stop)
     : listen_socket_(listen_socket),
       token_(std::move(token)),
       build_(std::move(build)),
@@ -411,6 +610,7 @@ AutomationChannel::AutomationChannel(
       pads_(std::move(pads)),
       emulator_(emulator),
       frames_(std::move(frames)),
+      start_video_(std::move(start_video)),
       stop_(std::move(stop)),
       dialog_timeout_(
           std::chrono::seconds(std::max(cvars::automation_dialog_timeout, 1))) {
@@ -422,6 +622,7 @@ AutomationChannel::~AutomationChannel() {
   if (thread_.joinable()) {
     thread_.join();
   }
+  video_.reset();
   controller_answers_ = false;
   CloseAllDialogs();
   for (const auto& client : clients_) {
@@ -464,6 +665,7 @@ void AutomationChannel::ServerLoop() {
     ServiceDialogs();
     ForwardPadEvents();
     ServiceFrames();
+    ServiceVideo();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -634,6 +836,35 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
     case Action::kFrame:
       frame_requests_.push_back(
           {client.id, false, parsed.request->id, decision.frame_options});
+      break;
+    case Action::kVideoStart: {
+      if (video_) {
+        client.out +=
+            ErrorLine(parsed.request->id, "video is already streaming");
+        break;
+      }
+      std::string error;
+      video_ = start_video_(decision.video_options, &error);
+      if (!video_) {
+        client.out += ErrorLine(parsed.request->id, error);
+        break;
+      }
+      video_client_ = client.id;
+      client.out += VideoStartReply(parsed.request->id, decision.video_options,
+                                    video_->start_ns());
+      break;
+    }
+    case Action::kVideoStop:
+      if (!video_ || video_client_ != client.id) {
+        client.out += ErrorLine(parsed.request->id, "no video streaming");
+        break;
+      }
+      video_->Stop();
+      for (const std::string& line : video_->TakeLines()) {
+        client.out += line;
+      }
+      client.out += VideoStopReply(parsed.request->id, video_->counts());
+      video_.reset();
       break;
     case Action::kStop:
       stopping_ = true;
@@ -842,8 +1073,32 @@ void AutomationChannel::ServiceFrames() {
   frames_->Submit(frame_encodings_);
 }
 
+void AutomationChannel::ServiceVideo() {
+  if (!video_) {
+    return;
+  }
+  auto owner = std::find_if(
+      clients_.begin(), clients_.end(),
+      [this](const auto& client) { return client->id == video_client_; });
+  if (owner == clients_.end() || (*owner)->closing) {
+    video_.reset();
+    return;
+  }
+  for (const std::string& line : video_->TakeLines()) {
+    (*owner)->out += line;
+  }
+  std::string reason = video_->end_reason();
+  if (!reason.empty()) {
+    video_->Stop();
+    (*owner)->out +=
+        telemetry::FinishNow(VideoEndEvent(reason, video_->counts())) + "\n";
+    video_.reset();
+  }
+}
+
 void AutomationChannel::Stop() {
   XELOGI("Automation: stopping at a client's request");
+  video_.reset();
   auto deadline = std::chrono::steady_clock::now() + kStopFlushTime;
   bool pending = true;
   while (pending && std::chrono::steady_clock::now() < deadline) {

@@ -72,6 +72,8 @@ At most 8 connections are open at once.
 | `pad_clear` {`user`} | controller | `ok`; drops the queued states |
 | `frame` {`format`, `max_width`, `quality`} | any | the guest output now, as below, or `no frame yet` before the title has drawn |
 | `frames_watch` {`fps`, `format`, `max_width`, `quality`} | any | `ok`; then `frame` events at up to `fps` a second (1 to 60), replacing any earlier watch; `fps` 0 ends it |
+| `video_start` {`port`, `width`, `height`, `fps`} | any | `ok` with `pix_fmt` and `ns`, when frame 0 is due; raw video to the listener on loopback `port`, as below; `video is already streaming`, or `nothing listens on 127.0.0.1:port` |
+| `video_stop` | the client that started it | `ok` with `frames`, `captures` and `dropped`, or `no video streaming` |
 | `bench_start` | any | `ok`; starts gathering frame times for this client, restarting any bench it had |
 | `bench_stop` {`raw`} | any | the bench's summary, as below, or `no bench running` |
 | `stop` | controller | `ok`; then every client gets an `exit` event and the process ends |
@@ -169,6 +171,40 @@ nothing is captured.
 - Frames are for seeing the run and timing its reactions (match a frame's
   `vblank` to a pad event's `at_vblank`). For frame pacing use a bench, or
   telemetry's `frame_stats`: a capture is a GPU readback.
+
+### Video
+
+`video_start` streams the guest output as raw video for an encoder, so a
+recording keeps the game's own frame rate without encoding images on the CPU.
+Xenia connects to a listener on `127.0.0.1:port` and sends it bare frames,
+nothing else: `width` x `height` (even, 16 to 8192) `rgb24`, top row first,
+`fps` (1 to 60) a second. One stream runs at a time.
+
+- Each frame is the guest output scaled to fit and centered, with black bars on
+  the other axis. Before the title draws, frames are black.
+- The rate is constant. A tick the guest hasn't swapped since repeats the last
+  frame, so a 30 fps title at `fps` 60 shows each image twice and the stream's
+  time stays the guest's. Ticks missed while sending are repeated; over half a
+  second behind, they are dropped and counted instead, and the stream shortens.
+- Each new image comes with a `video_frame` event to the client that started
+  the stream: `n`, the stream frame it starts at, and `capture_ms`, with the
+  capture's `vblank`, `swap` and `ns` in the envelope. Frames between two
+  events repeat the first one.
+- When the listener closes or reads nothing for 10 seconds, the stream ends
+  with a `video_end` event (`reason`, `frames`, `captures`, `dropped`). It also
+  ends when the client that started it disconnects.
+
+With ffmpeg as the listener, encoding on the GPU through VA-API:
+
+```sh
+ffmpeg -vaapi_device /dev/dri/renderD128 -f rawvideo -pix_fmt rgb24 \
+  -s 1280x720 -framerate 60 -i "tcp://127.0.0.1:5000?listen=1" \
+  -vf format=bgr0,hwupload,scale_vaapi=format=nv12 -c:v h264_vaapi out.mp4
+```
+
+then `{"op":"video_start","port":5000,"width":1280,"height":720,"fps":60}`.
+On Windows, `-c:v h264_amf`, `h264_nvenc` or `h264_qsv` take the frames
+directly. A capture costs a few milliseconds of a host thread per new image.
 
 ### Benches
 

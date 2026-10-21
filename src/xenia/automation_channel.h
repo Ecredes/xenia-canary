@@ -95,6 +95,10 @@ class AutomationChannel : public AnswerSource {
     std::string event;
   };
   class FrameWorker;
+  class VideoStream;
+  // Connects a video_start's stream; null, with error set, when it can't.
+  using VideoStarter = std::function<std::unique_ptr<VideoStream>(
+      const VideoOptions& options, std::string* error)>;
   // Who gets one encoding of a frame being captured: the reply to a frame
   // request (re), or a watch's frame event.
   struct FrameRecipient {
@@ -110,7 +114,7 @@ class AutomationChannel : public AnswerSource {
                     std::shared_ptr<TelemetryFeed> telemetry,
                     std::shared_ptr<hid::remote::RemotePads> pads,
                     std::unique_ptr<FrameWorker> frames,
-                    std::function<void()> stop);
+                    VideoStarter start_video, std::function<void()> stop);
 
   void ServerLoop();
   void Accept();
@@ -130,6 +134,9 @@ class AutomationChannel : public AnswerSource {
   // Delivers the captured frame, then starts capturing the next if a request
   // waits or a watch is due.
   void ServiceFrames();
+  // Sends video_frame events to the video's client, and ends the video when
+  // its listener or its client goes.
+  void ServiceVideo();
   // A watch or a capture needs the loop to come round sooner.
   bool FramesBusy() const;
   void Stop();
@@ -142,6 +149,10 @@ class AutomationChannel : public AnswerSource {
   std::shared_ptr<hid::remote::RemotePads> pads_;
   Emulator& emulator_;
   std::unique_ptr<FrameWorker> frames_;
+  VideoStarter start_video_;
+  // At most one video stream, and the client that started it.
+  std::unique_ptr<VideoStream> video_;
+  uint64_t video_client_ = 0;
   std::function<void()> stop_;
   std::vector<std::unique_ptr<Client>> clients_;
   uint64_t next_client_ = 1;

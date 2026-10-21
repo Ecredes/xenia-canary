@@ -98,6 +98,10 @@ struct Request {
   std::optional<int64_t> max_width;
   std::optional<int64_t> quality;
   std::optional<int64_t> fps;
+  // video_start: unchecked until ParseVideoOptions.
+  std::optional<int64_t> port;
+  std::optional<int64_t> width;
+  std::optional<int64_t> height;
   // bench_stop
   std::optional<bool> raw;
 };
@@ -191,8 +195,9 @@ inline ParseResult ParseRequest(std::string_view line) {
        {std::pair{"user", &request.user}, std::pair{"input", &request.input},
         std::pair{"frames", &request.frames},
         std::pair{"max_width", &request.max_width},
-        std::pair{"quality", &request.quality},
-        std::pair{"fps", &request.fps}}) {
+        std::pair{"quality", &request.quality}, std::pair{"fps", &request.fps},
+        std::pair{"port", &request.port}, std::pair{"width", &request.width},
+        std::pair{"height", &request.height}}) {
     auto member = document.FindMember(key);
     if (member != document.MemberEnd()) {
       if (!member->value.IsInt64()) {
@@ -315,6 +320,23 @@ struct FrameWatch {
   std::optional<uint64_t> last_swap;
 };
 
+// A video_start: fps frames a second of width x height rgb24, sent to the
+// listener on a loopback port.
+struct VideoOptions {
+  uint16_t port = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t fps = 0;
+};
+
+// What a video stream has sent: every frame, the new captures among them,
+// the rest repeats, and the ticks dropped when it fell too far behind.
+struct VideoCounts {
+  uint64_t frames = 0;
+  uint64_t captures = 0;
+  uint64_t dropped = 0;
+};
+
 // A bench's samples, gathered from the frame_stats lines written since
 // bench_start.
 struct BenchSamples {
@@ -363,6 +385,10 @@ enum class Action {
   kPad,
   // Capture a frame with frame_options, and reply with FrameReply.
   kFrame,
+  // Connect to the listener in video_options, and reply with VideoStartReply.
+  kVideoStart,
+  // End this client's video stream, and reply with VideoStopReply.
+  kVideoStop,
 };
 
 struct Decision {
@@ -370,6 +396,7 @@ struct Decision {
   Action action = Action::kNone;
   std::optional<hid::remote::Command> pad;
   FrameOptions frame_options;
+  VideoOptions video_options;
 };
 
 class JsonLine {
@@ -453,6 +480,8 @@ inline std::optional<hid::remote::Command> ParsePadCommand(
     const Request& request, std::string* error);
 inline std::optional<FrameOptions> ParseFrameOptions(const Request& request,
                                                      std::string* error);
+inline std::optional<VideoOptions> ParseVideoOptions(const Request& request,
+                                                     std::string* error);
 inline std::string BenchReply(std::string_view id, const BenchSamples& samples,
                               bool raw);
 
@@ -491,7 +520,8 @@ inline Decision Decide(Session& session, const Request& request,
                 .Raw("capabilities",
                      R"(["state","stop","subscribe","dialog_answer",)"
                      R"("pad_connect","pad_set","pad_queue","pad_clear",)"
-                     R"("frame","frames_watch","bench_start","bench_stop"])")
+                     R"("frame","frames_watch","bench_start","bench_stop",)"
+                     R"("video_start","video_stop"])")
                 .Raw("streams", R"(["telemetry","dialogs","input"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
@@ -595,6 +625,19 @@ inline Decision Decide(Session& session, const Request& request,
       session.frames = watch;
     }
     return {JsonLine().Re(request.id).Bool("ok", true).Finish()};
+  }
+  if (request.op == "video_start") {
+    std::string error;
+    std::optional<VideoOptions> options = ParseVideoOptions(request, &error);
+    if (!options) {
+      return {ErrorLine(request.id, error)};
+    }
+    Decision decision{"", Action::kVideoStart};
+    decision.video_options = *options;
+    return decision;
+  }
+  if (request.op == "video_stop") {
+    return {"", Action::kVideoStop};
   }
   if (request.op == "dialog_answer") {
     if (session.role != Role::kController) {
@@ -1137,9 +1180,68 @@ struct RgbImage {
   std::vector<uint8_t> pixels;
 };
 
+// R8 G8 B8 X8 rows (as ui::RawImage) scaled to out_width x out_height and
+// written as R8 G8 B8 to out, out_stride bytes a row. Each output pixel is the
+// average of the source pixels it touches.
+inline void ScaleInto(const uint8_t* rgbx, uint32_t width, uint32_t height,
+                      size_t stride, uint8_t* out, size_t out_stride,
+                      uint32_t out_width, uint32_t out_height) {
+  if (!width || !height || !out_width || !out_height) {
+    return;
+  }
+  if (out_width == width && out_height == height) {
+    for (uint32_t y = 0; y < height; ++y) {
+      const uint8_t* row = rgbx + size_t(y) * stride;
+      uint8_t* pixel = out + size_t(y) * out_stride;
+      for (uint32_t x = 0; x < width; ++x, row += 4, pixel += 3) {
+        pixel[0] = row[0];
+        pixel[1] = row[1];
+        pixel[2] = row[2];
+      }
+    }
+    return;
+  }
+  // Each output pixel touches at least one source pixel, one or two when
+  // scaling up. The source columns of each output column, computed once.
+  std::vector<uint32_t> x0s(out_width), x1s(out_width);
+  for (uint32_t x = 0; x < out_width; ++x) {
+    x0s[x] = uint32_t(uint64_t(x) * width / out_width);
+    x1s[x] = uint32_t((uint64_t(x + 1) * width + out_width - 1) / out_width);
+  }
+  // The source rows of one output row, summed per column and channel.
+  std::vector<uint32_t> rows(size_t(width) * 3);
+  for (uint32_t y = 0; y < out_height; ++y) {
+    uint32_t y0 = uint32_t(uint64_t(y) * height / out_height);
+    uint32_t y1 =
+        uint32_t((uint64_t(y + 1) * height + out_height - 1) / out_height);
+    std::fill(rows.begin(), rows.end(), 0);
+    for (uint32_t sy = y0; sy < y1; ++sy) {
+      const uint8_t* row = rgbx + size_t(sy) * stride;
+      uint32_t* sum = rows.data();
+      for (uint32_t sx = 0; sx < width; ++sx, row += 4, sum += 3) {
+        sum[0] += row[0];
+        sum[1] += row[1];
+        sum[2] += row[2];
+      }
+    }
+    uint8_t* pixel = out + size_t(y) * out_stride;
+    for (uint32_t x = 0; x < out_width; ++x, pixel += 3) {
+      std::array<uint32_t, 3> sum = {};
+      for (uint32_t sx = x0s[x]; sx < x1s[x]; ++sx) {
+        for (size_t c = 0; c < 3; ++c) {
+          sum[c] += rows[size_t(sx) * 3 + c];
+        }
+      }
+      uint32_t count = (y1 - y0) * (x1s[x] - x0s[x]);
+      for (size_t c = 0; c < 3; ++c) {
+        pixel[c] = uint8_t((sum[c] + count / 2) / count);
+      }
+    }
+  }
+}
+
 // R8 G8 B8 X8 rows (as ui::RawImage) as R8 G8 B8, scaled down to max_width
-// keeping the aspect ratio, each pixel the average of the source pixels it
-// touches. A max_width of 0 or at least width keeps the size.
+// keeping the aspect ratio. A max_width of 0 or at least width keeps the size.
 inline RgbImage ScaleToWidth(const uint8_t* rgbx, uint32_t width,
                              uint32_t height, size_t stride,
                              uint32_t max_width) {
@@ -1151,55 +1253,42 @@ inline RgbImage ScaleToWidth(const uint8_t* rgbx, uint32_t width,
   image.height = std::max(
       uint32_t((uint64_t(height) * image.width + width / 2) / width), 1u);
   image.pixels.resize(size_t(image.width) * image.height * 3);
-  uint8_t* out = image.pixels.data();
-  if (image.width == width && image.height == height) {
-    for (uint32_t y = 0; y < height; ++y) {
-      const uint8_t* row = rgbx + size_t(y) * stride;
-      for (uint32_t x = 0; x < width; ++x, row += 4, out += 3) {
-        out[0] = row[0];
-        out[1] = row[1];
-        out[2] = row[2];
-      }
-    }
+  ScaleInto(rgbx, width, height, stride, image.pixels.data(),
+            size_t(image.width) * 3, image.width, image.height);
+  return image;
+}
+
+// R8 G8 B8 X8 rows (as ui::RawImage) as exactly out_width x out_height
+// R8 G8 B8, scaled up or down to fit keeping the aspect ratio, centered, with
+// black bars on the other axis. Black without a source image.
+inline RgbImage FitInto(const uint8_t* rgbx, uint32_t width, uint32_t height,
+                        size_t stride, uint32_t out_width,
+                        uint32_t out_height) {
+  RgbImage image;
+  image.width = out_width;
+  image.height = out_height;
+  image.pixels.assign(size_t(out_width) * out_height * 3, 0);
+  if (!width || !height || !out_width || !out_height) {
     return image;
   }
-  // Never upscaled, so each output pixel touches at least one source pixel.
-  // The source columns of each output column, computed once.
-  std::vector<uint32_t> x0s(image.width), x1s(image.width);
-  for (uint32_t x = 0; x < image.width; ++x) {
-    x0s[x] = uint32_t(uint64_t(x) * width / image.width);
-    x1s[x] =
-        uint32_t((uint64_t(x + 1) * width + image.width - 1) / image.width);
+  // Full width unless that makes it too tall, then full height.
+  uint32_t fit_width = out_width;
+  uint64_t fit_height =
+      (uint64_t(height) * out_width + width / 2) / uint64_t(width);
+  if (fit_height > out_height) {
+    fit_height = out_height;
+    fit_width = uint32_t(
+        std::min((uint64_t(width) * out_height + height / 2) / uint64_t(height),
+                 uint64_t(out_width)));
   }
-  // The source rows of one output row, summed per column and channel.
-  std::vector<uint32_t> rows(size_t(width) * 3);
-  for (uint32_t y = 0; y < image.height; ++y) {
-    uint32_t y0 = uint32_t(uint64_t(y) * height / image.height);
-    uint32_t y1 =
-        uint32_t((uint64_t(y + 1) * height + image.height - 1) / image.height);
-    std::fill(rows.begin(), rows.end(), 0);
-    for (uint32_t sy = y0; sy < y1; ++sy) {
-      const uint8_t* row = rgbx + size_t(sy) * stride;
-      uint32_t* sum = rows.data();
-      for (uint32_t sx = 0; sx < width; ++sx, row += 4, sum += 3) {
-        sum[0] += row[0];
-        sum[1] += row[1];
-        sum[2] += row[2];
-      }
-    }
-    for (uint32_t x = 0; x < image.width; ++x, out += 3) {
-      std::array<uint32_t, 3> sum = {};
-      for (uint32_t sx = x0s[x]; sx < x1s[x]; ++sx) {
-        for (size_t c = 0; c < 3; ++c) {
-          sum[c] += rows[size_t(sx) * 3 + c];
-        }
-      }
-      uint32_t count = (y1 - y0) * (x1s[x] - x0s[x]);
-      for (size_t c = 0; c < 3; ++c) {
-        out[c] = uint8_t((sum[c] + count / 2) / count);
-      }
-    }
-  }
+  fit_width = std::max(fit_width, 1u);
+  fit_height = std::max(fit_height, uint64_t(1));
+  size_t x = (out_width - fit_width) / 2;
+  size_t y = (out_height - size_t(fit_height)) / 2;
+  size_t out_stride = size_t(out_width) * 3;
+  ScaleInto(rgbx, width, height, stride,
+            image.pixels.data() + y * out_stride + x * 3, out_stride, fit_width,
+            uint32_t(fit_height));
   return image;
 }
 
@@ -1262,6 +1351,139 @@ inline std::string FrameEventLine(const EncodedFrame& frame) {
       .Raw("encode_ms", CostText(frame.encode_ns))
       .Str("data", Base64(frame.bytes.data(), frame.bytes.size()));
   return event.Finish(frame.vblank, frame.swap, frame.ns, frame.state) + "\n";
+}
+
+// Video. video_start connects to a listener on a loopback port, such as
+// ffmpeg's tcp://127.0.0.1:port?listen=1, and sends it raw rgb24 frames of
+// width x height at fps a second, the guest output fitted into them. A tick
+// the guest hasn't swapped since repeats the last frame, so the stream keeps
+// the guest's timing at a constant rate. Each new image comes with a
+// video_frame event, to the client that started the stream.
+
+// Encoders want even sizes for 4:2:0 chroma.
+constexpr int64_t kMinVideoSize = 16;
+constexpr int64_t kMaxVideoSize = 8192;
+
+inline std::optional<VideoOptions> ParseVideoOptions(const Request& request,
+                                                     std::string* error) {
+  if (!request.port || *request.port < 1024 || *request.port > 65535) {
+    *error = "port must be from 1024 to 65535";
+    return std::nullopt;
+  }
+  for (int64_t size : {request.width.value_or(0), request.height.value_or(0)}) {
+    if (size < kMinVideoSize || size > kMaxVideoSize || size % 2) {
+      *error = "width and height must be even, from " +
+               std::to_string(kMinVideoSize) + " to " +
+               std::to_string(kMaxVideoSize);
+      return std::nullopt;
+    }
+  }
+  if (!request.fps || *request.fps < 1 || *request.fps > kMaxWatchFps) {
+    *error = "fps must be from 1 to " + std::to_string(kMaxWatchFps);
+    return std::nullopt;
+  }
+  VideoOptions options;
+  options.port = uint16_t(*request.port);
+  options.width = uint32_t(request.width.value_or(0));
+  options.height = uint32_t(request.height.value_or(0));
+  options.fps = uint32_t(*request.fps);
+  return options;
+}
+
+// A stream's ticks: tick n is due at start_ns + n / fps seconds.
+struct VideoClock {
+  uint32_t fps = 1;
+  uint64_t start_ns = 0;
+  // Ticks handled, sent or dropped.
+  uint64_t ticks = 0;
+  // The swap of the last capture, none before the first.
+  std::optional<uint64_t> last_swap;
+};
+
+inline uint64_t VideoTickNs(const VideoClock& clock, uint64_t tick) {
+  return clock.start_ns + tick * 1000000000 / std::max(clock.fps, 1u);
+}
+
+// What to send now, oldest first: repeats of the last frame for the ticks
+// missed, then the current tick's frame, a new capture if the guest swapped.
+struct VideoStep {
+  // Ticks so far behind they are skipped: the stream shortens.
+  uint64_t dropped = 0;
+  uint64_t repeats = 0;
+  bool send = false;
+  bool capture = false;
+};
+
+// The step at now_ns, with the guest at swap. A stream more than max_late
+// ticks behind drops them rather than sending them all at once.
+inline VideoStep NextVideoStep(VideoClock& clock, uint64_t now_ns,
+                               uint64_t swap, uint64_t max_late) {
+  VideoStep step;
+  if (now_ns < clock.start_ns) {
+    return step;
+  }
+  uint64_t due =
+      (now_ns - clock.start_ns) * std::max(clock.fps, 1u) / 1000000000 + 1;
+  if (due <= clock.ticks) {
+    return step;
+  }
+  uint64_t late = due - clock.ticks - 1;
+  if (late > max_late) {
+    step.dropped = late;
+  } else {
+    step.repeats = late;
+  }
+  step.send = true;
+  step.capture = clock.last_swap != swap;
+  clock.last_swap = swap;
+  clock.ticks = due;
+  return step;
+}
+
+// start_ns: when frame 0 is due, in host ns; frame n is due n / fps seconds
+// after.
+inline std::string VideoStartReply(std::string_view id,
+                                   const VideoOptions& options,
+                                   uint64_t start_ns) {
+  return JsonLine()
+      .Re(id)
+      .Bool("ok", true)
+      .String("pix_fmt", "rgb24")
+      .Uint("width", options.width)
+      .Uint("height", options.height)
+      .Uint("fps", options.fps)
+      .Uint("ns", start_ns)
+      .Finish();
+}
+
+inline std::string VideoStopReply(std::string_view id,
+                                  const VideoCounts& counts) {
+  return JsonLine()
+      .Re(id)
+      .Bool("ok", true)
+      .Uint("frames", counts.frames)
+      .Uint("captures", counts.captures)
+      .Uint("dropped", counts.dropped)
+      .Finish();
+}
+
+// A new image starting at stream frame n. The envelope is the capture's.
+inline std::string VideoFrameLine(uint64_t n, const EncodedFrame& frame) {
+  telemetry::Event event("video_frame");
+  event.UInt("n", n).Raw("capture_ms", CostText(frame.capture_ns));
+  return event.Finish(frame.vblank, frame.swap, frame.ns, frame.state) + "\n";
+}
+
+// The stream ended without a video_stop: the listener went or stopped
+// reading.
+inline telemetry::Event VideoEndEvent(std::string_view reason,
+                                      const VideoCounts& counts) {
+  telemetry::Event event("video_end");
+  event.Str("reason", reason)
+      .UInt("frames", counts.frames)
+      .UInt("captures", counts.captures)
+      .UInt("dropped", counts.dropped);
+  return event;
 }
 
 // Benching. bench_start gathers the frame times telemetry writes from then on;
