@@ -62,9 +62,18 @@ class AutomationChannel {
     std::mutex mutex;
     Snapshot snapshot;
   };
+  // Telemetry lines from its writer thread, waiting for the channel's.
+  // Shared with the telemetry sink, which telemetry owns.
+  struct TelemetryFeed {
+    std::mutex mutex;
+    std::string session_start;
+    std::vector<std::string> lines;
+  };
+  class TelemetrySink;
 
   AutomationChannel(SocketHandle listen_socket, std::string token,
                     BuildInfo build, std::shared_ptr<SnapshotSource> snapshot,
+                    std::shared_ptr<TelemetryFeed> telemetry,
                     std::function<void()> stop);
 
   void ServerLoop();
@@ -73,12 +82,15 @@ class AutomationChannel {
   bool Read(Client& client);
   bool Flush(Client& client);
   void Handle(Client& client, std::string_view line);
+  // Hands queued telemetry to its subscribers.
+  void ForwardTelemetry();
   void Stop();
 
   SocketHandle listen_socket_;
   std::string token_;
   BuildInfo build_;
   std::shared_ptr<SnapshotSource> snapshot_;
+  std::shared_ptr<TelemetryFeed> telemetry_;
   std::function<void()> stop_;
   std::vector<std::unique_ptr<Client>> clients_;
   bool stopping_ = false;

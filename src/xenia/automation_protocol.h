@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "third_party/rapidjson/include/rapidjson/document.h"
 #include "third_party/rapidjson/include/rapidjson/stringbuffer.h"
@@ -67,6 +68,8 @@ struct Request {
   // hello
   std::optional<uint32_t> protocol;
   std::string token;
+  // subscribe
+  std::optional<std::vector<std::string>> streams;
 };
 
 struct ParseResult {
@@ -122,6 +125,21 @@ inline ParseResult ParseRequest(std::string_view line) {
       return result;
     }
     request.token = token->value.GetString();
+  }
+  auto streams = document.FindMember("streams");
+  if (streams != document.MemberEnd()) {
+    if (!streams->value.IsArray()) {
+      result.error = "streams must be a list";
+      return result;
+    }
+    request.streams.emplace();
+    for (const auto& stream : streams->value.GetArray()) {
+      if (!stream.IsString()) {
+        result.error = "streams must be a list of names";
+        return result;
+      }
+      request.streams->emplace_back(stream.GetString());
+    }
   }
   result.request = std::move(request);
   return result;
@@ -187,7 +205,15 @@ struct Context {
 // One connection's state.
 struct Session {
   Role role = Role::kNone;
+  // Subscribed to telemetry events.
+  bool telemetry = false;
 };
+
+// Telemetry's first line, describing the build, host and settings; a new
+// telemetry subscriber gets it first, however late it subscribes.
+inline bool IsSessionStart(std::string_view telemetry_line) {
+  return telemetry_line.starts_with(R"({"type":"session_start")");
+}
 
 enum class Action {
   kNone,
@@ -195,6 +221,8 @@ enum class Action {
   kClose,
   // Send the reply and the exit event, then end the process.
   kStop,
+  // Send the reply, then the session_start line, then telemetry as it comes.
+  kStartTelemetry,
 };
 
 struct Decision {
@@ -304,7 +332,8 @@ inline Decision Decide(Session& session, const Request& request,
                 .Bool("ok", true)
                 .Uint("protocol", kProtocolVersion)
                 .Raw("xenia", xenia)
-                .Raw("capabilities", R"(["state","stop"])")
+                .Raw("capabilities", R"(["state","stop","subscribe"])")
+                .Raw("streams", R"(["telemetry"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
                 .Finish()};
@@ -318,6 +347,26 @@ inline Decision Decide(Session& session, const Request& request,
                 .Bool("ok", true)
                 .Raw("state", SnapshotJson(context.snapshot))
                 .Finish()};
+  }
+  if (request.op == "subscribe") {
+    if (!request.streams) {
+      return {ErrorLine(request.id, "missing streams")};
+    }
+    bool telemetry = false;
+    for (const std::string& stream : *request.streams) {
+      if (stream != "telemetry") {
+        return {ErrorLine(request.id, "unknown stream " + stream)};
+      }
+      telemetry = true;
+    }
+    bool started = telemetry && !session.telemetry;
+    session.telemetry = telemetry;
+    return {JsonLine()
+                .Re(request.id)
+                .Bool("ok", true)
+                .Raw("streams", telemetry ? R"(["telemetry"])" : "[]")
+                .Finish(),
+            started ? Action::kStartTelemetry : Action::kNone};
   }
   if (request.op == "stop") {
     if (session.role != Role::kController) {

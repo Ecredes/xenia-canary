@@ -657,6 +657,12 @@ void EmulatorApp::EmulatorThread() {
   xe::threading::set_name("Emulator");
   Profiler::ThreadEnter("Emulator");
 
+  // Before setup, so its telemetry starts with the session, and a client can
+  // watch from the start.
+  automation_ = automation::AutomationChannel::Create(
+      *emulator_, {XE_BUILD_BRANCH, XE_BUILD_COMMIT, XE_BUILD_DATE},
+      [this]() { app_context().RequestDeferredQuit(); });
+
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.
   ui::Window* window = emulator_window_ ? emulator_window_->window() : nullptr;
@@ -674,11 +680,6 @@ void EmulatorApp::EmulatorThread() {
   CallInWindow([](EmulatorWindow& window) {
     window.SetupGraphicsSystemPresenterPainting();
   });
-
-  // Before any title launches, so a client can watch from the start.
-  automation_ = automation::AutomationChannel::Create(
-      *emulator_, {XE_BUILD_BRANCH, XE_BUILD_COMMIT, XE_BUILD_DATE},
-      [this]() { app_context().RequestDeferredQuit(); });
 
   const auto fs = emulator_->file_system();
 

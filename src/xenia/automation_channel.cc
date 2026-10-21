@@ -19,6 +19,7 @@
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
 #include "xenia/emulator.h"
 
@@ -93,6 +94,10 @@ constexpr size_t kMaxClients = 8;
 constexpr int32_t kPollMicroseconds = 50000;
 // How long the exit event may take to reach the clients.
 constexpr auto kStopFlushTime = std::chrono::seconds(1);
+// A client this far behind is dropped rather than buffered for.
+constexpr size_t kMaxClientBacklog = 16 * 1024 * 1024;
+// Telemetry lines kept for the channel thread between its rounds.
+constexpr size_t kMaxQueuedTelemetry = 65536;
 
 // std::random_device draws from the OS's secure source with MSVC, libstdc++
 // and libc++.
@@ -127,6 +132,24 @@ bool WriteTokenFile(const std::filesystem::path& path,
 }
 
 }  // namespace
+
+class AutomationChannel::TelemetrySink : public telemetry::Sink {
+ public:
+  explicit TelemetrySink(std::shared_ptr<TelemetryFeed> feed)
+      : feed_(std::move(feed)) {}
+  void Write(std::string_view line) override {
+    std::lock_guard<std::mutex> lock(feed_->mutex);
+    if (feed_->session_start.empty() && IsSessionStart(line)) {
+      feed_->session_start = line;
+    }
+    if (feed_->lines.size() < kMaxQueuedTelemetry) {
+      feed_->lines.emplace_back(line);
+    }
+  }
+
+ private:
+  std::shared_ptr<TelemetryFeed> feed_;
+};
 
 std::unique_ptr<AutomationChannel> AutomationChannel::Create(
     Emulator& emulator, BuildInfo build, std::function<void()> stop) {
@@ -206,20 +229,27 @@ std::unique_ptr<AutomationChannel> AutomationChannel::Create(
     snapshot->snapshot = {};
   });
 
+  // Telemetry streams to subscribers whether or not it also goes to a file.
+  auto telemetry_feed = std::make_shared<TelemetryFeed>();
+  telemetry::AddSink(std::make_unique<TelemetrySink>(telemetry_feed));
+  telemetry::Start();
+
   XELOGI("Automation: listening on 127.0.0.1:{}", port);
-  return std::unique_ptr<AutomationChannel>(
-      new AutomationChannel(listen_socket, std::move(token), std::move(build),
-                            std::move(snapshot), std::move(stop)));
+  return std::unique_ptr<AutomationChannel>(new AutomationChannel(
+      listen_socket, std::move(token), std::move(build), std::move(snapshot),
+      std::move(telemetry_feed), std::move(stop)));
 }
 
 AutomationChannel::AutomationChannel(SocketHandle listen_socket,
                                      std::string token, BuildInfo build,
                                      std::shared_ptr<SnapshotSource> snapshot,
+                                     std::shared_ptr<TelemetryFeed> telemetry,
                                      std::function<void()> stop)
     : listen_socket_(listen_socket),
       token_(std::move(token)),
       build_(std::move(build)),
       snapshot_(std::move(snapshot)),
+      telemetry_(std::move(telemetry)),
       stop_(std::move(stop)) {
   thread_ = std::thread([this]() { ServerLoop(); });
 }
@@ -264,6 +294,7 @@ void AutomationChannel::ServerLoop() {
     if (FD_ISSET(listen_socket_, &read_set)) {
       Accept();
     }
+    ForwardTelemetry();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -379,6 +410,13 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
         XELOGW("Automation: refused a client: {}", decision.reply);
       }
       break;
+    case Action::kStartTelemetry: {
+      std::lock_guard<std::mutex> lock(telemetry_->mutex);
+      if (!telemetry_->session_start.empty()) {
+        client.out += telemetry_->session_start + "\n";
+      }
+      break;
+    }
     case Action::kStop:
       stopping_ = true;
       for (const auto& other : clients_) {
@@ -387,6 +425,31 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
         }
       }
       break;
+  }
+}
+
+void AutomationChannel::ForwardTelemetry() {
+  std::vector<std::string> lines;
+  {
+    std::lock_guard<std::mutex> lock(telemetry_->mutex);
+    lines.swap(telemetry_->lines);
+  }
+  if (lines.empty()) {
+    return;
+  }
+  for (const auto& client : clients_) {
+    if (!client->session.telemetry || client->closing) {
+      continue;
+    }
+    for (const std::string& line : lines) {
+      client->out += line;
+      client->out += '\n';
+    }
+    if (client->out.size() > kMaxClientBacklog) {
+      XELOGW("Automation: dropping a client that fell behind");
+      client->out.clear();
+      client->closing = true;
+    }
   }
 }
 

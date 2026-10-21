@@ -167,6 +167,46 @@ TEST_CASE("State and unknown ops", "[automation]") {
                    .reply)["error"] == "unknown op");
 }
 
+TEST_CASE("Subscribing to telemetry", "[automation]") {
+  Session session{Role::kObserver};
+  Context context = TestContext();
+  Decision first =
+      Decide(session, Parsed(R"({"op":"subscribe","streams":["telemetry"]})"),
+             context);
+  REQUIRE(first.action == Action::kStartTelemetry);
+  REQUIRE(session.telemetry);
+  REQUIRE(Json(first.reply)["streams"][0] == "telemetry");
+  // Again: nothing to replay.
+  REQUIRE(Decide(session,
+                 Parsed(R"({"op":"subscribe","streams":["telemetry"]})"),
+                 context)
+              .action == Action::kNone);
+  Decision none =
+      Decide(session, Parsed(R"({"op":"subscribe","streams":[]})"), context);
+  REQUIRE(none.action == Action::kNone);
+  REQUIRE(!session.telemetry);
+}
+
+TEST_CASE("Subscribing needs known streams", "[automation]") {
+  Session session{Role::kObserver};
+  REQUIRE(Json(Decide(session, Parsed(R"({"op":"subscribe"})"), TestContext())
+                   .reply)["error"] == "missing streams");
+  REQUIRE(
+      Json(Decide(session, Parsed(R"({"op":"subscribe","streams":["video"]})"),
+                  TestContext())
+               .reply)["error"] == "unknown stream video");
+  REQUIRE(!session.telemetry);
+  REQUIRE(ParseRequest(R"({"op":"subscribe","streams":"telemetry"})").error ==
+          "streams must be a list");
+  REQUIRE(ParseRequest(R"({"op":"subscribe","streams":[1]})").error ==
+          "streams must be a list of names");
+}
+
+TEST_CASE("The session_start line is recognized", "[automation]") {
+  REQUIRE(IsSessionStart(R"({"type":"session_start","vblank":0})"));
+  REQUIRE(!IsSessionStart(R"({"type":"state","vblank":0})"));
+}
+
 }  // namespace test
 }  // namespace automation
 }  // namespace xe

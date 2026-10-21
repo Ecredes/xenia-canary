@@ -6,8 +6,11 @@ missing imports or failed file opens. Tools read this file to tell whether a
 title boots, runs, stalls or crashes without scraping the log.
 
 Telemetry is **output only** and **off by default**. Xenia never reads from the
-telemetry file and there is no input or control channel. With no file set, the
-hooks cost one relaxed atomic load each.
+telemetry file. With neither a file nor the automation channel, the hooks cost
+one relaxed atomic load each.
+
+The same lines also stream live to automation channel clients that subscribe to
+them (see [automation.md](automation.md)), with or without a file.
 
 ## Settings
 
