@@ -10,6 +10,12 @@ Fork CI builds it for every `automation/*` push (the `image` job in
 `ghcr.io/ecredes/xenia-headless:<branch with / as ->` and `:<commit>`. The
 package is private: pull with a token that can read packages.
 
+GHCR sets a package's visibility once, when it's first pushed, and the image's
+`org.opencontainers.image.source` label links it to this repository, which is
+public, so a new package starts out public. Set it to private in the package's
+settings (the API can't), and check that an anonymous pull is refused. Later
+pushes keep the package's setting.
+
 game-mcp runs it on remote hosts (`image` in a host profile): rootless
 `podman run` (or `docker run`) on the host network, as the host user, with
 the GPU's render node and the session folder mounted. By hand:
