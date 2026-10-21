@@ -8,13 +8,13 @@ and Mesa) to encode the channel's video stream on the GPU.
 Fork CI builds it for every `automation/*` push (the `image` job in
 `Fork_CI.yml`) from that run's Linux AppImage, and pushes
 `ghcr.io/ecredes/xenia-headless:<branch with / as ->` and `:<commit>`. The
-package is private: pull with a token that can read packages.
+package is public (it holds only the fork's public build and Ubuntu packages),
+so hosts pull it without logging in.
 
-GHCR sets a package's visibility once, when it's first pushed, and the image's
-`org.opencontainers.image.source` label links it to this repository, which is
-public, so a new package starts out public. Set it to private in the package's
-settings (the API can't), and check that an anonymous pull is refused. Later
-pushes keep the package's setting.
+The image's `org.opencontainers.image.source` label links the package to this
+public repository, which made it public on its first push; GHCR can't make a
+public package private again. A private image would need a new package name,
+pushed unlinked with a personal token.
 
 game-mcp runs it on remote hosts (`image` in a host profile): rootless
 `podman run` (or `docker run`) on the host network, as the host user, with
