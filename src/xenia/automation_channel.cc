@@ -241,11 +241,15 @@ class AutomationChannel::FrameWorker {
     if (!capture_(image, captured.vblank, captured.swap)) {
       return result;
     }
+    captured.capture_ns = telemetry::NowNs() - captured.ns;
     for (size_t i = 0; i < encodings.size(); ++i) {
       const FrameOptions& options = encodings[i];
+      uint64_t scale_start = telemetry::NowNs();
       RgbImage rgb = ScaleToWidth(image.data.data(), image.width, image.height,
                                   image.stride, options.max_width);
+      uint64_t encode_start = telemetry::NowNs();
       EncodedFrame frame = captured;
+      frame.scale_ns = encode_start - scale_start;
       frame.format = options.format;
       frame.width = rgb.width;
       frame.height = rgb.height;
@@ -262,6 +266,7 @@ class AutomationChannel::FrameWorker {
               : stbi_write_jpg_to_func(append, &frame.bytes, int(rgb.width),
                                        int(rgb.height), 3, rgb.pixels.data(),
                                        int(options.quality));
+      frame.encode_ns = telemetry::NowNs() - encode_start;
       if (written && rgb.width) {
         result[i] = std::move(frame);
       }

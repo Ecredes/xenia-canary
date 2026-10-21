@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <numeric>
@@ -1150,26 +1151,50 @@ inline RgbImage ScaleToWidth(const uint8_t* rgbx, uint32_t width,
   image.height = std::max(
       uint32_t((uint64_t(height) * image.width + width / 2) / width), 1u);
   image.pixels.resize(size_t(image.width) * image.height * 3);
+  uint8_t* out = image.pixels.data();
+  if (image.width == width && image.height == height) {
+    for (uint32_t y = 0; y < height; ++y) {
+      const uint8_t* row = rgbx + size_t(y) * stride;
+      for (uint32_t x = 0; x < width; ++x, row += 4, out += 3) {
+        out[0] = row[0];
+        out[1] = row[1];
+        out[2] = row[2];
+      }
+    }
+    return image;
+  }
+  // Never upscaled, so each output pixel touches at least one source pixel.
+  // The source columns of each output column, computed once.
+  std::vector<uint32_t> x0s(image.width), x1s(image.width);
+  for (uint32_t x = 0; x < image.width; ++x) {
+    x0s[x] = uint32_t(uint64_t(x) * width / image.width);
+    x1s[x] =
+        uint32_t((uint64_t(x + 1) * width + image.width - 1) / image.width);
+  }
+  // The source rows of one output row, summed per column and channel.
+  std::vector<uint32_t> rows(size_t(width) * 3);
   for (uint32_t y = 0; y < image.height; ++y) {
-    // Never upscaled, so each output pixel touches at least one source pixel.
     uint32_t y0 = uint32_t(uint64_t(y) * height / image.height);
     uint32_t y1 =
         uint32_t((uint64_t(y + 1) * height + image.height - 1) / image.height);
-    for (uint32_t x = 0; x < image.width; ++x) {
-      uint32_t x0 = uint32_t(uint64_t(x) * width / image.width);
-      uint32_t x1 =
-          uint32_t((uint64_t(x + 1) * width + image.width - 1) / image.width);
+    std::fill(rows.begin(), rows.end(), 0);
+    for (uint32_t sy = y0; sy < y1; ++sy) {
+      const uint8_t* row = rgbx + size_t(sy) * stride;
+      uint32_t* sum = rows.data();
+      for (uint32_t sx = 0; sx < width; ++sx, row += 4, sum += 3) {
+        sum[0] += row[0];
+        sum[1] += row[1];
+        sum[2] += row[2];
+      }
+    }
+    for (uint32_t x = 0; x < image.width; ++x, out += 3) {
       std::array<uint32_t, 3> sum = {};
-      for (uint32_t sy = y0; sy < y1; ++sy) {
-        const uint8_t* row = rgbx + sy * stride;
-        for (uint32_t sx = x0; sx < x1; ++sx) {
-          for (size_t c = 0; c < 3; ++c) {
-            sum[c] += row[sx * 4 + c];
-          }
+      for (uint32_t sx = x0s[x]; sx < x1s[x]; ++sx) {
+        for (size_t c = 0; c < 3; ++c) {
+          sum[c] += rows[size_t(sx) * 3 + c];
         }
       }
-      uint32_t count = (y1 - y0) * (x1 - x0);
-      uint8_t* out = &image.pixels[(size_t(y) * image.width + x) * 3];
+      uint32_t count = (y1 - y0) * (x1s[x] - x0s[x]);
       for (size_t c = 0; c < 3; ++c) {
         out[c] = uint8_t((sum[c] + count / 2) / count);
       }
@@ -1190,7 +1215,24 @@ struct EncodedFrame {
   uint64_t ns = 0;
   telemetry::State state = telemetry::State::kStarting;
   std::vector<uint8_t> bytes;
+  // Host time spent reading the guest output back, scaling and encoding.
+  uint64_t capture_ns = 0;
+  uint64_t scale_ns = 0;
+  uint64_t encode_ns = 0;
 };
+
+// ns -> ms, 2 decimals.
+inline double CostMs(uint64_t ns) {
+  return std::round(double(ns) / 1e4) / 100.0;
+}
+
+// CostMs as JSON number text, for telemetry events.
+inline std::string CostText(uint64_t ns) {
+  uint64_t hundredths = (ns + 5000) / 10000;
+  std::string fraction = std::to_string(hundredths % 100);
+  return std::to_string(hundredths / 100) + (fraction.size() < 2 ? ".0" : ".") +
+         fraction;
+}
 
 inline std::string FrameReply(std::string_view id, const EncodedFrame& frame) {
   return JsonLine()
@@ -1202,6 +1244,9 @@ inline std::string FrameReply(std::string_view id, const EncodedFrame& frame) {
       .Uint("vblank", frame.vblank)
       .Uint("swap", frame.swap)
       .Uint("ns", frame.ns)
+      .Double("capture_ms", CostMs(frame.capture_ns))
+      .Double("scale_ms", CostMs(frame.scale_ns))
+      .Double("encode_ms", CostMs(frame.encode_ns))
       .String("data", Base64(frame.bytes.data(), frame.bytes.size()))
       .Finish();
 }
@@ -1212,6 +1257,9 @@ inline std::string FrameEventLine(const EncodedFrame& frame) {
   event.Str("format", FrameFormatName(frame.format))
       .UInt("width", frame.width)
       .UInt("height", frame.height)
+      .Raw("capture_ms", CostText(frame.capture_ns))
+      .Raw("scale_ms", CostText(frame.scale_ns))
+      .Raw("encode_ms", CostText(frame.encode_ns))
       .Str("data", Base64(frame.bytes.data(), frame.bytes.size()));
   return event.Finish(frame.vblank, frame.swap, frame.ns, frame.state) + "\n";
 }
