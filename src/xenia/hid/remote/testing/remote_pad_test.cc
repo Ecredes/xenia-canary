@@ -25,57 +25,6 @@ PadState Buttons(uint16_t buttons) {
 }
 }  // namespace
 
-TEST_CASE("Parse set command", "[remote_input]") {
-  std::string error;
-  auto command = ParseCommand("set 1 1000 255 0 -32768 32767 5 -5", &error);
-  REQUIRE(command.has_value());
-  REQUIRE(command->type == Command::Type::kSet);
-  REQUIRE(command->user == 1);
-  REQUIRE(command->state.buttons == 0x1000);
-  REQUIRE(command->state.left_trigger == 255);
-  REQUIRE(command->state.right_trigger == 0);
-  REQUIRE(command->state.thumb_lx == -32768);
-  REQUIRE(command->state.thumb_ly == 32767);
-  REQUIRE(command->state.thumb_rx == 5);
-  REQUIRE(command->state.thumb_ry == -5);
-}
-
-TEST_CASE("Parse queue command", "[remote_input]") {
-  std::string error;
-  auto command = ParseCommand("queue 0 42 3 f000 0 0 0 0 0 0", &error);
-  REQUIRE(command.has_value());
-  REQUIRE(command->type == Command::Type::kQueue);
-  REQUIRE(command->id == 42);
-  REQUIRE(command->frames == 3);
-  REQUIRE(command->state.buttons == 0xF000);
-}
-
-TEST_CASE("Parse simple commands", "[remote_input]") {
-  std::string error;
-  REQUIRE(ParseCommand("hello", &error)->type == Command::Type::kHello);
-  REQUIRE(ParseCommand("ping", &error)->type == Command::Type::kPing);
-  REQUIRE(ParseCommand("watch 1", &error)->value == 1);
-  REQUIRE(ParseCommand("connect 3 0", &error)->user == 3);
-  REQUIRE(ParseCommand("clear 2", &error)->type == Command::Type::kClear);
-  // Trailing carriage returns from Windows clients are accepted.
-  REQUIRE(ParseCommand("ping\r", &error).has_value());
-}
-
-TEST_CASE("Reject malformed commands", "[remote_input]") {
-  std::string error;
-  for (const char* line :
-       {"", "bogus", "set 4 0 0 0 0 0 0 0", "set 0 0 256 0 0 0 0 0",
-        "set 0 0 0 0 32768 0 0 0", "set 0 10000 0 0 0 0 0 0",
-        "set 0 0 0 0 0 0 0", "queue 0 1 0 0 0 0 0 0 0 0",
-        "queue 0 0 1 0 0 0 0 0 0 0", "queue 0 1 3601 0 0 0 0 0 0 0", "watch 2",
-        "connect 0", "set 0 zz 0 0 0 0 0 0", "ping extra"}) {
-    error.clear();
-    INFO(line);
-    REQUIRE_FALSE(ParseCommand(line, &error).has_value());
-    REQUIRE_FALSE(error.empty());
-  }
-}
-
 TEST_CASE("Base state shows when the queue is empty", "[remote_input]") {
   PadQueue queue;
   queue.set_base(Buttons(0x1000));
@@ -151,13 +100,6 @@ TEST_CASE("Clear drops queued states", "[remote_input]") {
   // A queue after a clear starts on the next vblank.
   REQUIRE(queue.Enqueue(2, 1, Buttons(0x2), 3));
   REQUIRE(queue.Advance(4, 0, &events).buttons == 0x2);
-}
-
-TEST_CASE("Format events", "[remote_input]") {
-  PadEvent event{PadEvent::Kind::kBegin, 2, 7, 101};
-  REQUIRE(FormatEvent(event, 123456789) == "begin 2 7 101 123456789\n");
-  event.kind = PadEvent::Kind::kSeen;
-  REQUIRE(FormatEvent(event, 5) == "seen 2 7 101 5\n");
 }
 
 TEST_CASE("Keystrokes follow button changes", "[remote_input]") {

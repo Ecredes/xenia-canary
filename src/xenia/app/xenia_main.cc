@@ -30,10 +30,8 @@
 #include "xenia/config.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
-#include "xenia/gpu/graphics_system.h"
 #include "xenia/headless_host.h"
 #include "xenia/headless_policy.h"
-#include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
@@ -300,7 +298,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
       cpu::Processor* processor);
   static std::unique_ptr<gpu::GraphicsSystem> CreateGraphicsSystem();
   static std::vector<std::unique_ptr<hid::InputDriver>> CreateInputDrivers(
-      ui::Window* window);
+      ui::Window* window, std::shared_ptr<hid::remote::RemotePads> remote_pads);
 
   // Runs fn on the UI thread with the emulator window, if there is one.
   void CallInWindow(std::function<void(EmulatorWindow& window)> fn);
@@ -480,22 +478,12 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 }
 
 std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
-    ui::Window* window) {
+    ui::Window* window, std::shared_ptr<hid::remote::RemotePads> remote_pads) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
   // First, so it takes priority over real controllers while a tool has one
-  // connected. Null unless remote_input_port is set.
-  auto remote_driver =
-      xe::hid::remote::Create(window, EmulatorWindow::kZOrderHidInput, []() {
-        hid::remote::FrameCounters counters;
-        auto state = kernel::KernelState::shared();
-        auto graphics_system =
-            state ? state->emulator()->graphics_system() : nullptr;
-        if (graphics_system) {
-          counters.vblank = graphics_system->vblank_count();
-          counters.swap = graphics_system->swap_count();
-        }
-        return counters;
-      });
+  // connected. Null without the automation channel.
+  auto remote_driver = xe::hid::remote::Create(
+      window, EmulatorWindow::kZOrderHidInput, std::move(remote_pads));
   if (remote_driver && XSUCCEEDED(remote_driver->Setup())) {
     drivers.emplace_back(std::move(remote_driver));
   }
@@ -695,10 +683,12 @@ void EmulatorApp::EmulatorThread() {
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.
   ui::Window* window = emulator_window_ ? emulator_window_->window() : nullptr;
-  X_STATUS result =
-      emulator_->Setup(emulator_window_ ? &app_context() : nullptr, true, true,
-                       CreateAudioSystem, CreateGraphicsSystem,
-                       [window]() { return CreateInputDrivers(window); });
+  X_STATUS result = emulator_->Setup(
+      emulator_window_ ? &app_context() : nullptr, true, true,
+      CreateAudioSystem, CreateGraphicsSystem,
+      [window, pads = automation_ ? automation_->pads() : nullptr]() {
+        return CreateInputDrivers(window, pads);
+      });
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     exit_code_ = EXIT_FAILURE;

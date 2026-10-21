@@ -52,7 +52,7 @@ answered with:
 | `protocol` | The protocol version, currently 1. |
 | `xenia` | The build: `branch`, `commit`, `date`. |
 | `capabilities` | The ops this build supports, beyond `hello`. |
-| `streams` | The event streams `subscribe` accepts: `telemetry`, `dialogs`. |
+| `streams` | The event streams `subscribe` accepts: `telemetry`, `dialogs`, `input`. |
 | `role` | `controller` for the first client while no other has it, otherwise `observer`. |
 | `state` | As the `state` op returns it. |
 
@@ -66,6 +66,10 @@ At most 8 connections are open at once.
 | `state` | any | `state`: `title_open`, and with a title, `title_id` (8 hex digits) and `title` |
 | `subscribe` {`streams`} | any | `streams`: the streams now subscribed. `streams` replaces the subscription; `[]` ends it. |
 | `dialog_answer` {`dialog`, `answer`} | controller | `ok` when the answer fits the open dialog, which then closes; otherwise an error, and it stays open |
+| `pad_connect` {`user`, `connected`} | controller | `ok`; plugs pad `user` (0 to 3) in or out |
+| `pad_set` {`user`, `pad`} | controller | `ok`; holds `pad` until changed |
+| `pad_queue` {`user`, `input`, `frames`, `pad`} | controller | `ok`, or `queue full` (256); holds `pad` for `frames` vblanks (1 to 3600) after what is queued |
+| `pad_clear` {`user`} | controller | `ok`; drops the queued states |
 | `stop` | controller | `ok`; then every client gets an `exit` event and the process ends |
 
 An unknown op is answered with an error; the connection stays open.
@@ -117,3 +121,25 @@ dialogs to the person as before.
 | `disc` | `prompt` | `{"path": "..."}`, a disc image on the host, or `{"cancel": true}` |
 
 XUIDs are 16 hex digits, as strings.
+
+### Controller input
+
+With the channel on, the guest also sees the four pads the controller drives,
+before any real controller, in windowed and headless runs. A pad counts once
+`pad_connect` plugs it in; when the controller disconnects, every pad is
+unplugged.
+
+`pad` is an object with the X_INPUT_GAMEPAD fields, each 0 when left out:
+`buttons` (0 to 65535, the XINPUT_GAMEPAD button bits), `lt` and `rt` (0 to
+255), `lx`, `ly`, `rx` and `ry` (-32768 to 32767).
+
+A queued state starts on the vblank after it is queued, or when the one before
+it ends, so each lasts whole vblanks. A client subscribed to `input` gets, for
+each queued state, `user`, `input` (its number from `pad_queue`) and
+`at_vblank`:
+
+| type | When |
+|---|---|
+| `pad_begin` | it became visible to the guest |
+| `pad_seen` | the guest first read it |
+| `pad_end` | it stopped being visible |

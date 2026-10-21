@@ -22,6 +22,7 @@
 #include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/graphics_system.h"
 
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
@@ -239,22 +240,34 @@ std::unique_ptr<AutomationChannel> AutomationChannel::Create(
   telemetry::AddSink(std::make_unique<TelemetrySink>(telemetry_feed));
   telemetry::Start();
 
+  // Pads time their states by guest vblanks, from the graphics system once
+  // the emulator is set up.
+  auto pads = std::make_shared<hid::remote::RemotePads>([&emulator]() {
+    hid::remote::FrameCounters counters;
+    if (gpu::GraphicsSystem* graphics_system = emulator.graphics_system()) {
+      counters.vblank = graphics_system->vblank_count();
+      counters.swap = graphics_system->swap_count();
+    }
+    return counters;
+  });
+
   XELOGI("Automation: listening on 127.0.0.1:{}", port);
   return std::unique_ptr<AutomationChannel>(new AutomationChannel(
       listen_socket, std::move(token), std::move(build), std::move(snapshot),
-      std::move(telemetry_feed), std::move(stop)));
+      std::move(telemetry_feed), std::move(pads), std::move(stop)));
 }
 
-AutomationChannel::AutomationChannel(SocketHandle listen_socket,
-                                     std::string token, BuildInfo build,
-                                     std::shared_ptr<SnapshotSource> snapshot,
-                                     std::shared_ptr<TelemetryFeed> telemetry,
-                                     std::function<void()> stop)
+AutomationChannel::AutomationChannel(
+    SocketHandle listen_socket, std::string token, BuildInfo build,
+    std::shared_ptr<SnapshotSource> snapshot,
+    std::shared_ptr<TelemetryFeed> telemetry,
+    std::shared_ptr<hid::remote::RemotePads> pads, std::function<void()> stop)
     : listen_socket_(listen_socket),
       token_(std::move(token)),
       build_(std::move(build)),
       snapshot_(std::move(snapshot)),
       telemetry_(std::move(telemetry)),
+      pads_(std::move(pads)),
       stop_(std::move(stop)),
       dialog_timeout_(
           std::chrono::seconds(std::max(cvars::automation_dialog_timeout, 1))) {
@@ -305,6 +318,7 @@ void AutomationChannel::ServerLoop() {
     }
     ForwardTelemetry();
     ServiceDialogs();
+    ForwardPadEvents();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -320,6 +334,10 @@ void AutomationChannel::ServerLoop() {
       if (alive) {
         ++it;
       } else {
+        if (client.session.role == Role::kController) {
+          // No one drives the pads any more: the guest sees them unplugged.
+          pads_->Reset();
+        }
         CloseSocket(client.socket);
         it = clients_.erase(it);
       }
@@ -461,6 +479,12 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
       }
       break;
     }
+    case Action::kPad:
+      // Decide set the command.
+      if (decision.pad) {
+        client.out += PadReply(parsed.request->id, pads_->Apply(*decision.pad));
+      }
+      break;
     case Action::kStop:
       stopping_ = true;
       controller_answers_ = false;
@@ -573,6 +597,26 @@ void AutomationChannel::CloseAllDialogs() {
   }
   for (auto& [id, dialog] : closing) {
     dialog.done(std::move(dialog.default_answer));
+  }
+}
+
+void AutomationChannel::ForwardPadEvents() {
+  std::vector<hid::remote::PadEvent> events = pads_->Poll();
+  if (events.empty()) {
+    return;
+  }
+  std::vector<std::string> lines;
+  for (const hid::remote::PadEvent& pad_event : events) {
+    lines.push_back(telemetry::FinishNow(PadEvent(pad_event)));
+  }
+  for (const auto& client : clients_) {
+    if (!client->session.input || client->closing) {
+      continue;
+    }
+    for (const std::string& line : lines) {
+      client->out += line;
+      client->out += '\n';
+    }
   }
 }
 

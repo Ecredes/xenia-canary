@@ -24,6 +24,7 @@
 #include "xenia/answer_source.h"
 #include "xenia/automation_protocol.h"
 #include "xenia/base/platform.h"
+#include "xenia/hid/remote/remote_pads.h"
 
 namespace xe {
 class Emulator;
@@ -57,6 +58,9 @@ class AutomationChannel : public AnswerSource {
   // From any thread.
   void Answer(DialogRequest request,
               std::function<void(DialogAnswer)> done) override;
+
+  // The pads the controller drives, for the app's remote input driver.
+  std::shared_ptr<hid::remote::RemotePads> pads() const { return pads_; }
 
  private:
   struct Client {
@@ -92,6 +96,7 @@ class AutomationChannel : public AnswerSource {
   AutomationChannel(SocketHandle listen_socket, std::string token,
                     BuildInfo build, std::shared_ptr<SnapshotSource> snapshot,
                     std::shared_ptr<TelemetryFeed> telemetry,
+                    std::shared_ptr<hid::remote::RemotePads> pads,
                     std::function<void()> stop);
 
   void ServerLoop();
@@ -107,6 +112,8 @@ class AutomationChannel : public AnswerSource {
   void ServiceDialogs();
   // Answers every open dialog with the policies.
   void CloseAllDialogs();
+  // Sends pad events to their subscribers.
+  void ForwardPadEvents();
   void Stop();
 
   SocketHandle listen_socket_;
@@ -114,6 +121,7 @@ class AutomationChannel : public AnswerSource {
   BuildInfo build_;
   std::shared_ptr<SnapshotSource> snapshot_;
   std::shared_ptr<TelemetryFeed> telemetry_;
+  std::shared_ptr<hid::remote::RemotePads> pads_;
   std::function<void()> stop_;
   std::vector<std::unique_ptr<Client>> clients_;
   bool stopping_ = false;

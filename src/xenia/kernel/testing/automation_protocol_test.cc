@@ -323,6 +323,79 @@ TEST_CASE("Answering an open dialog", "[automation]") {
   REQUIRE(Json(answered.reply)["re"] == 5);
 }
 
+TEST_CASE("Pad ops become checked commands", "[automation]") {
+  using hid::remote::Command;
+  Session controller{Role::kController};
+  Decision queue = Decide(
+      controller,
+      Parsed(R"({"op":"pad_queue","id":1,"user":2,"input":9,"frames":3,)"
+             R"("pad":{"buttons":4096,"lt":255,"lx":-32768,"ry":32767}})"),
+      TestContext());
+  REQUIRE(queue.action == Action::kPad);
+  REQUIRE(queue.pad);
+  Command command = queue.pad.value_or(Command());
+  REQUIRE(command.type == Command::Type::kQueue);
+  REQUIRE(command.user == 2);
+  REQUIRE(command.id == 9);
+  REQUIRE(command.frames == 3);
+  REQUIRE(command.state.buttons == 0x1000);
+  REQUIRE(command.state.left_trigger == 255);
+  REQUIRE(command.state.thumb_lx == -32768);
+  REQUIRE(command.state.thumb_ry == 32767);
+  REQUIRE(command.state.right_trigger == 0);
+
+  Command connect =
+      Decide(controller,
+             Parsed(R"({"op":"pad_connect","user":0,"connected":true})"),
+             TestContext())
+          .pad.value_or(Command());
+  REQUIRE(connect.type == Command::Type::kConnect);
+  REQUIRE(connect.value == 1);
+  REQUIRE(Decide(controller, Parsed(R"({"op":"pad_clear","user":3})"),
+                 TestContext())
+              .pad.value_or(Command())
+              .type == Command::Type::kClear);
+  REQUIRE(Json(PadReply("1", ""))["ok"] == true);
+  REQUIRE(Json(PadReply("1", "queue full"))["error"] == "queue full");
+}
+
+TEST_CASE("Pad ops are checked", "[automation]") {
+  Session controller{Role::kController};
+  auto error = [&controller](std::string_view line) {
+    Decision decision = Decide(controller, Parsed(line), TestContext());
+    REQUIRE(decision.action == Action::kNone);
+    return std::string(Json(decision.reply)["error"].GetString());
+  };
+  REQUIRE(error(R"({"op":"pad_set","user":4,"pad":{}})") ==
+          "user must be from 0 to 3");
+  REQUIRE(error(R"({"op":"pad_set","user":0})") == "missing pad");
+  REQUIRE(error(R"({"op":"pad_set","user":0,"pad":{"lt":256}})") ==
+          "pad lt must be from 0 to 255");
+  REQUIRE(error(R"({"op":"pad_set","user":0,"pad":{"lx":32768}})") ==
+          "pad lx must be from -32768 to 32767");
+  REQUIRE(error(R"({"op":"pad_queue","user":0,"frames":1,"pad":{}})") ==
+          "input must be a positive number");
+  REQUIRE(error(R"({"op":"pad_queue","user":0,"input":1,"frames":3601,)"
+                R"("pad":{}})") == "frames must be from 1 to 3600");
+  REQUIRE(error(R"({"op":"pad_connect","user":0})") == "missing connected");
+  REQUIRE(error(R"({"op":"pad_dance","user":0})") == "unknown op");
+  Session observer{Role::kObserver};
+  REQUIRE(Json(Decide(observer, Parsed(R"({"op":"pad_clear","user":0})"),
+                      TestContext())
+                   .reply)["error"] == "needs the controller role");
+}
+
+TEST_CASE("Pad events name the user, input and vblank", "[automation]") {
+  hid::remote::PadEvent seen{hid::remote::PadEvent::Kind::kSeen, 1, 9, 120};
+  rapidjson::Document event = Json(
+      PadEvent(seen).Finish(121, 30, 5, telemetry::State::kRunning) + "\n");
+  REQUIRE(event["type"] == "pad_seen");
+  REQUIRE(event["user"] == 1);
+  REQUIRE(event["input"] == 9);
+  REQUIRE(event["at_vblank"] == 120);
+  REQUIRE(event["vblank"] == 121);
+}
+
 }  // namespace test
 }  // namespace automation
 }  // namespace xe

@@ -17,34 +17,16 @@
 #include <string_view>
 #include <vector>
 
-// Protocol and per-user state for the remote input driver. Kept free of
-// sockets and threads so it can be tested on its own.
-//
-// The protocol is line based ASCII, one command per '\n' terminated line:
-//   hello                          -> hello xenia-remote-input <ver> <users>
-//   ping                           -> pong <vblank> <swap> <ns>
-//   connect <user> <0|1>           -> ok
-//   set <user> <pad>               -> ok    (held until changed)
-//   queue <user> <id> <frames> <pad> -> ok  (held for <frames> vblanks)
-//   clear <user>                   -> ok    (drops queued states)
-//   watch <0|1>                    -> ok    (frame lines on every vblank)
-// where <pad> is: <buttons hex> <lt> <rt> <lx> <ly> <rx> <ry>, using the
-// X_INPUT_GAMEPAD layout and ranges.
-//
-// Notifications, each tagged with the vblank count and steady clock ns:
-//   begin <user> <id> <vblank> <ns>   a queued state became visible
-//   seen <user> <id> <vblank> <ns>    the guest first read it
-//   end <user> <id> <vblank> <ns>     it stopped being visible
-//   frame <vblank> <swap> <ns>        (watch 1 only)
-// Errors are reported as: error <message>
+// Per-user pad state for the remote input driver: states queued to last whole
+// vblanks, the events marking when the guest could and did see them, and
+// keystrokes synthesized from them. Kept free of sockets and threads so it can
+// be tested on its own. Commands come from the automation channel.
 
 namespace xe::hid::remote {
 
-constexpr uint32_t kProtocolVersion = 1;
 constexpr uint32_t kUserCount = 4;
 constexpr uint32_t kMaxQueue = 256;
 constexpr uint32_t kMaxFrames = 3600;
-constexpr size_t kMaxLineLength = 256;
 
 struct PadState {
   uint16_t buttons = 0;
@@ -58,18 +40,26 @@ struct PadState {
   bool operator==(const PadState&) const = default;
 };
 
+// A command from the controlling tool, already checked: user below
+// kUserCount; for a queue, id above 0 and frames from 1 to kMaxFrames.
 struct Command {
-  enum class Type { kHello, kPing, kConnect, kSet, kQueue, kClear, kWatch };
-  Type type = Type::kPing;
+  enum class Type {
+    // value: 1 to connect the user's pad, 0 to disconnect it.
+    kConnect,
+    // Hold state until changed.
+    kSet,
+    // Hold state for frames vblanks, after what is queued already.
+    kQueue,
+    // Drop the queued states.
+    kClear,
+  };
+  Type type = Type::kSet;
   uint32_t user = 0;
   uint32_t id = 0;
   uint32_t frames = 0;
   uint32_t value = 0;
   PadState state;
 };
-
-// Returns the parsed command, or nullopt with a message in *error.
-std::optional<Command> ParseCommand(std::string_view line, std::string* error);
 
 struct PadEvent {
   enum class Kind { kBegin, kSeen, kEnd };
@@ -78,8 +68,6 @@ struct PadEvent {
   uint32_t id = 0;
   uint64_t vblank = 0;
 };
-
-std::string FormatEvent(const PadEvent& event, uint64_t ns);
 
 // Keystroke synthesis for XInputGetKeystroke: one bit per button, trigger and
 // stick direction (sticks report only their dominant axis, no diagonals).

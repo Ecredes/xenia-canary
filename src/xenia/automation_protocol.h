@@ -27,6 +27,7 @@
 #include "third_party/rapidjson/include/rapidjson/writer.h"
 #include "xenia/answer_source.h"
 #include "xenia/base/telemetry.h"
+#include "xenia/hid/remote/remote_pad.h"
 
 // The automation channel's protocol, kept free of sockets and threads: JSON
 // lines in, decisions and JSON lines out. AutomationChannel carries them out.
@@ -79,6 +80,13 @@ struct Request {
   // dialog_answer: the dialog's id, and the answer object as JSON text.
   std::optional<uint64_t> dialog;
   std::string answer;
+  // pad_*: unchecked until ParsePadCommand.
+  std::optional<int64_t> user;
+  std::optional<bool> connected;
+  std::optional<int64_t> input;
+  std::optional<int64_t> frames;
+  // The pad object as JSON text.
+  std::string pad;
 };
 
 struct ParseResult {
@@ -166,6 +174,34 @@ inline ParseResult ParseRequest(std::string_view line) {
     }
     request.answer = ToJson(answer->value);
   }
+  for (auto [key, field] :
+       {std::pair{"user", &request.user}, std::pair{"input", &request.input},
+        std::pair{"frames", &request.frames}}) {
+    auto member = document.FindMember(key);
+    if (member != document.MemberEnd()) {
+      if (!member->value.IsInt64()) {
+        result.error = std::string(key) + " must be a number";
+        return result;
+      }
+      *field = member->value.GetInt64();
+    }
+  }
+  auto connected = document.FindMember("connected");
+  if (connected != document.MemberEnd()) {
+    if (!connected->value.IsBool()) {
+      result.error = "connected must be true or false";
+      return result;
+    }
+    request.connected = connected->value.GetBool();
+  }
+  auto pad = document.FindMember("pad");
+  if (pad != document.MemberEnd()) {
+    if (!pad->value.IsObject()) {
+      result.error = "pad must be an object";
+      return result;
+    }
+    request.pad = ToJson(pad->value);
+  }
   result.request = std::move(request);
   return result;
 }
@@ -234,6 +270,8 @@ struct Session {
   bool telemetry = false;
   // Subscribed to dialog events; the controller answers them.
   bool dialogs = false;
+  // Subscribed to pad events.
+  bool input = false;
 };
 
 // Telemetry's first line, describing the build, host and settings; a new
@@ -250,11 +288,14 @@ enum class Action {
   kStop,
   // Look up the dialog and reply with DecideDialogAnswer.
   kAnswerDialog,
+  // Apply pad, and reply with PadReply.
+  kPad,
 };
 
 struct Decision {
   std::string reply;
   Action action = Action::kNone;
+  std::optional<hid::remote::Command> pad;
 };
 
 class JsonLine {
@@ -327,6 +368,11 @@ inline std::string SnapshotJson(const Snapshot& snapshot) {
   return json;
 }
 
+// Defined with the dialogs and the pads below.
+inline std::string StringListJson(const std::vector<std::string>& values);
+inline std::optional<hid::remote::Command> ParsePadCommand(
+    const Request& request, std::string* error);
+
 // What to do with one request on a connection.
 inline Decision Decide(Session& session, const Request& request,
                        const Context& context) {
@@ -360,8 +406,9 @@ inline Decision Decide(Session& session, const Request& request,
                 .Uint("protocol", kProtocolVersion)
                 .Raw("xenia", xenia)
                 .Raw("capabilities",
-                     R"(["state","stop","subscribe","dialog_answer"])")
-                .Raw("streams", R"(["telemetry","dialogs"])")
+                     R"(["state","stop","subscribe","dialog_answer",)"
+                     R"("pad_connect","pad_set","pad_queue","pad_clear"])")
+                .Raw("streams", R"(["telemetry","dialogs","input"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
                 .Finish()};
@@ -380,31 +427,47 @@ inline Decision Decide(Session& session, const Request& request,
     if (!request.streams) {
       return {ErrorLine(request.id, "missing streams")};
     }
-    bool telemetry = false, dialogs = false;
+    Session subscribed = session;
+    subscribed.telemetry = subscribed.dialogs = subscribed.input = false;
     for (const std::string& stream : *request.streams) {
       if (stream == "telemetry") {
-        telemetry = true;
+        subscribed.telemetry = true;
       } else if (stream == "dialogs") {
-        dialogs = true;
+        subscribed.dialogs = true;
+      } else if (stream == "input") {
+        subscribed.input = true;
       } else {
         return {ErrorLine(request.id, "unknown stream " + stream)};
       }
     }
-    session.telemetry = telemetry;
-    session.dialogs = dialogs;
-    std::string streams = "[";
-    if (telemetry) {
-      streams += R"("telemetry")";
+    session = subscribed;
+    std::vector<std::string> streams;
+    if (session.telemetry) {
+      streams.push_back("telemetry");
     }
-    if (dialogs) {
-      streams += telemetry ? R"(,"dialogs")" : R"("dialogs")";
+    if (session.dialogs) {
+      streams.push_back("dialogs");
     }
-    streams += "]";
+    if (session.input) {
+      streams.push_back("input");
+    }
     return {JsonLine()
                 .Re(request.id)
                 .Bool("ok", true)
-                .Raw("streams", streams)
+                .Raw("streams", StringListJson(streams))
                 .Finish()};
+  }
+  if (request.op.starts_with("pad_")) {
+    if (session.role != Role::kController) {
+      return {ErrorLine(request.id, "needs the controller role")};
+    }
+    std::string error;
+    std::optional<hid::remote::Command> command =
+        ParsePadCommand(request, &error);
+    if (!command) {
+      return {ErrorLine(request.id, error)};
+    }
+    return {"", Action::kPad, command};
   }
   if (request.op == "dialog_answer") {
     if (session.role != Role::kController) {
@@ -737,6 +800,127 @@ inline DialogAnswerDecision DecideDialogAnswer(const Request& request,
   }
   return {JsonLine().Re(request.id).Bool("ok", true).Finish(),
           std::move(answer)};
+}
+
+// Controller input. pad_connect, pad_set, pad_queue and pad_clear drive the
+// four controller slots with exact values and vblank timing; see
+// hid/remote/remote_pad.h.
+
+inline std::optional<hid::remote::PadState> ParsePad(std::string_view json,
+                                                     std::string* error) {
+  rapidjson::Document pad;
+  pad.Parse(json.data(), json.size());
+  if (pad.HasParseError() || !pad.IsObject()) {
+    *error = "pad must be an object";
+    return std::nullopt;
+  }
+  hid::remote::PadState state;
+  struct Field {
+    const char* key;
+    int64_t min;
+    int64_t max;
+    int64_t* value;
+  };
+  int64_t buttons = 0, lt = 0, rt = 0, lx = 0, ly = 0, rx = 0, ry = 0;
+  for (const Field& field :
+       {Field{"buttons", 0, 0xFFFF, &buttons}, Field{"lt", 0, 255, &lt},
+        Field{"rt", 0, 255, &rt}, Field{"lx", -32768, 32767, &lx},
+        Field{"ly", -32768, 32767, &ly}, Field{"rx", -32768, 32767, &rx},
+        Field{"ry", -32768, 32767, &ry}}) {
+    auto member = pad.FindMember(field.key);
+    if (member == pad.MemberEnd()) {
+      continue;
+    }
+    if (!member->value.IsInt64() || member->value.GetInt64() < field.min ||
+        member->value.GetInt64() > field.max) {
+      *error = std::string("pad ") + field.key + " must be from " +
+               std::to_string(field.min) + " to " + std::to_string(field.max);
+      return std::nullopt;
+    }
+    *field.value = member->value.GetInt64();
+  }
+  state.buttons = uint16_t(buttons);
+  state.left_trigger = uint8_t(lt);
+  state.right_trigger = uint8_t(rt);
+  state.thumb_lx = int16_t(lx);
+  state.thumb_ly = int16_t(ly);
+  state.thumb_rx = int16_t(rx);
+  state.thumb_ry = int16_t(ry);
+  return state;
+}
+
+// A pad_* request as a checked command for RemotePads.
+inline std::optional<hid::remote::Command> ParsePadCommand(
+    const Request& request, std::string* error) {
+  using hid::remote::Command;
+  if (!request.user || *request.user < 0 ||
+      *request.user >= int64_t(hid::remote::kUserCount)) {
+    *error = "user must be from 0 to 3";
+    return std::nullopt;
+  }
+  Command command;
+  command.user = uint32_t(*request.user);
+  if (request.op == "pad_connect") {
+    if (!request.connected) {
+      *error = "missing connected";
+      return std::nullopt;
+    }
+    command.type = Command::Type::kConnect;
+    command.value = *request.connected ? 1 : 0;
+    return command;
+  }
+  if (request.op == "pad_clear") {
+    command.type = Command::Type::kClear;
+    return command;
+  }
+  if (request.op != "pad_set" && request.op != "pad_queue") {
+    *error = "unknown op";
+    return std::nullopt;
+  }
+  if (request.pad.empty()) {
+    *error = "missing pad";
+    return std::nullopt;
+  }
+  std::optional<hid::remote::PadState> state = ParsePad(request.pad, error);
+  if (!state) {
+    return std::nullopt;
+  }
+  command.state = *state;
+  if (request.op == "pad_set") {
+    command.type = Command::Type::kSet;
+    return command;
+  }
+  if (!request.input || *request.input < 1 || *request.input > INT32_MAX) {
+    *error = "input must be a positive number";
+    return std::nullopt;
+  }
+  if (!request.frames || *request.frames < 1 ||
+      *request.frames > int64_t(hid::remote::kMaxFrames)) {
+    *error =
+        "frames must be from 1 to " + std::to_string(hid::remote::kMaxFrames);
+    return std::nullopt;
+  }
+  command.type = Command::Type::kQueue;
+  command.id = uint32_t(*request.input);
+  command.frames = uint32_t(*request.frames);
+  return command;
+}
+
+// error: what RemotePads said, empty on success.
+inline std::string PadReply(std::string_view id, std::string_view error) {
+  return error.empty() ? JsonLine().Re(id).Bool("ok", true).Finish()
+                       : ErrorLine(id, error);
+}
+
+// pad_begin: a queued state became visible, from at_vblank; pad_seen: the
+// guest first read it; pad_end: it stopped being visible.
+inline telemetry::Event PadEvent(const hid::remote::PadEvent& pad_event) {
+  static constexpr const char* kTypes[] = {"pad_begin", "pad_seen", "pad_end"};
+  telemetry::Event event(kTypes[size_t(pad_event.kind)]);
+  event.UInt("user", pad_event.user)
+      .UInt("input", pad_event.id)
+      .UInt("at_vblank", pad_event.vblank);
+  return event;
 }
 
 // Sent to every client before the process ends at a client's request.
