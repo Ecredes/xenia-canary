@@ -105,6 +105,24 @@ jobs:
           key: ${{ inputs.restore-key || format('{0}-ccache-v2-{1}', runner.os, inputs.ref) }}
           restore-keys: ${{ runner.os }}-ccache-v2-
 
+      # Incremental LTCG state (.iobj/.ipdb) written on another runner image
+      # can crash this image's linker (C1001 and LNK1000 in IMAGE::BuildImage)
+      # even with the same toolset version: on 2026-10-21 three builds on
+      # win25-vs2026 20261007.264 crashed this way with caches from 20261018.275.
+      # It is dropped unless the image matches; the ccache objects stay. The
+      # stamp lives in C:\ccache so the cache's paths, and its entries, don't
+      # change.
+      - name: Drop LTCG state from another runner image
+        run: |-
+          $stamp = 'C:\ccache\ltcg-image.txt'
+          $saved = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
+          if ($saved -ne $env:ImageVersion) {
+            Remove-Item build\bin\Windows\Release\*.iobj, build\bin\Windows\Release\*.ipdb -ErrorAction SilentlyContinue
+            echo "Dropped LTCG state from runner image '$saved'; this is '$env:ImageVersion'"
+          }
+          New-Item -ItemType Directory -Force C:\ccache | Out-Null
+          Set-Content -NoNewline $stamp $env:ImageVersion
+
       - name: Install ccache
         env:
           CCACHE_VERSION: 4.11.3
