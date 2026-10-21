@@ -18,6 +18,7 @@
 #include <random>
 #include <utility>
 
+#include "xenia/apu/audio_system.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/telemetry.h"
@@ -119,6 +120,10 @@ constexpr size_t kMaxVideoSendBuffer = 64 * 1024 * 1024;
 constexpr uint64_t kVideoSleepNs = 5000000;
 // A video listener reading nothing for this long ends the stream.
 constexpr auto kVideoStallTime = std::chrono::seconds(10);
+// Audio a client has stopped submitting is sent after this long.
+constexpr uint64_t kAudioFlushNs = 200000000;
+// Audio chunks kept for the channel's thread between its rounds (about 10 s).
+constexpr size_t kMaxQueuedAudioChunks = 100;
 
 // std::random_device draws from the OS's secure source with MSVC, libstdc++
 // and libc++.
@@ -666,6 +671,7 @@ void AutomationChannel::ServerLoop() {
     ForwardPadEvents();
     ServiceFrames();
     ServiceVideo();
+    ServiceAudio();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -1071,6 +1077,58 @@ void AutomationChannel::ServiceFrames() {
   }
   frame_recipients_ = std::move(recipients);
   frames_->Submit(frame_encodings_);
+}
+
+void AutomationChannel::ServiceAudio() {
+  bool wanted =
+      std::any_of(clients_.begin(), clients_.end(), [](const auto& client) {
+        return client->session.audio && !client->closing;
+      });
+  audio_->active = wanted;
+  if (wanted && !audio_tap_installed_) {
+    if (apu::AudioSystem* audio_system = emulator_.audio_system()) {
+      audio_system->SetFrameTap([feed = audio_, &emulator = emulator_](
+                                    size_t index, const float* samples) {
+        if (!feed->active.load(std::memory_order_relaxed)) {
+          return;
+        }
+        std::array<int16_t, kGuestAudioFrameSamples * 2> stereo;
+        DownmixGuestFrame(samples, stereo.data());
+        uint64_t vblank = 0, swap = 0;
+        if (gpu::GraphicsSystem* graphics_system = emulator.graphics_system()) {
+          vblank = graphics_system->vblank_count();
+          swap = graphics_system->swap_count();
+        }
+        std::lock_guard<std::mutex> lock(feed->mutex);
+        feed->chunker.Add(uint32_t(index), telemetry::NowNs(), vblank, swap,
+                          stereo.data(), kGuestAudioFrameSamples, feed->chunks);
+        if (feed->chunks.size() > kMaxQueuedAudioChunks) {
+          feed->chunks.erase(feed->chunks.begin());
+        }
+      });
+      audio_tap_installed_ = true;
+    }
+  }
+  std::vector<AudioChunk> chunks;
+  {
+    std::lock_guard<std::mutex> lock(audio_->mutex);
+    if (!wanted) {
+      audio_->chunker.Clear();
+      audio_->chunks.clear();
+      return;
+    }
+    audio_->chunker.Flush(telemetry::NowNs(), kAudioFlushNs, audio_->chunks);
+    chunks.swap(audio_->chunks);
+  }
+  telemetry::State state = telemetry::CurrentState();
+  for (const AudioChunk& chunk : chunks) {
+    std::string line = AudioEventLine(chunk, state);
+    for (const auto& client : clients_) {
+      if (client->session.audio && !client->closing) {
+        client->out += line;
+      }
+    }
+  }
 }
 
 void AutomationChannel::ServiceVideo() {

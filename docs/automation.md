@@ -52,7 +52,7 @@ answered with:
 | `protocol` | The protocol version, currently 1. |
 | `xenia` | The build: `branch`, `commit`, `date`. |
 | `capabilities` | The ops this build supports, beyond `hello`. |
-| `streams` | The event streams `subscribe` accepts: `telemetry`, `dialogs`, `input`. Frames come from `frames_watch` instead. |
+| `streams` | The event streams `subscribe` accepts: `telemetry`, `dialogs`, `input`, `audio`. Frames come from `frames_watch` instead. |
 | `role` | `controller` for the first client while no other has it, otherwise `observer`. |
 | `state` | As the `state` op returns it. |
 
@@ -149,6 +149,24 @@ each queued state, `user`, `input` (its number from `pad_queue`) and
 | `pad_begin` | it became visible to the guest |
 | `pad_seen` | the guest first read it |
 | `pad_end` | it stopped being visible |
+
+### Audio
+
+A client subscribed to `audio` gets the sound the title submits, as `audio`
+events: `client` (the guest's audio client; most titles use one), `rate`
+(48000), `channels` (2), `frames`, and `data`, base64 little-endian 16-bit
+stereo, interleaved. The envelope's `ns`, `vblank` and `swap` are when the
+first frame was submitted.
+
+- The guest's 5.1 frames are downmixed: L = FL + 0.707 FC + 0.707 BL and
+  R = FR + 0.707 FC + 0.707 BR, clamped; the LFE channel is left out.
+- An event holds about 100 ms of contiguous samples. A client that pauses
+  more than 50 ms starts a new event, so placing each event at its `ns` keeps
+  the gaps; one that stops is sent within 200 ms.
+- The tap sees frames as the title submits them, before the host's audio
+  driver, so headless runs without a sound device have audio too. Music the
+  guest plays through the system media player (XMP) isn't included.
+- With no subscriber, the tap does nothing.
 
 ### Frames
 

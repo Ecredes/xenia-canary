@@ -728,6 +728,99 @@ TEST_CASE("Video replies and events describe the stream", "[automation]") {
   REQUIRE(end["frames"] == 90);
 }
 
+TEST_CASE("Audio subscribes as a stream", "[automation]") {
+  Session observer{Role::kObserver};
+  rapidjson::Document reply = Json(
+      Decide(observer,
+             Parsed(R"({"op":"subscribe","streams":["telemetry","audio"]})"),
+             TestContext())
+          .reply);
+  REQUIRE(reply["ok"] == true);
+  REQUIRE(reply["streams"].Size() == 2);
+  REQUIRE(reply["streams"][1] == "audio");
+  REQUIRE(observer.audio);
+  Decide(observer, Parsed(R"({"op":"subscribe","streams":[]})"), TestContext());
+  REQUIRE(!observer.audio);
+}
+
+TEST_CASE("Guest audio frames downmix to stereo", "[automation]") {
+  // Six planar channels of big-endian floats, the guest's layout.
+  std::vector<float> frame(kGuestAudioChannels * kGuestAudioFrameSamples);
+  auto put = [&frame](uint32_t channel, uint32_t i, float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits = (bits >> 24) | ((bits >> 8) & 0xFF00) | ((bits << 8) & 0xFF0000) |
+           (bits << 24);
+    std::memcpy(&frame[channel * kGuestAudioFrameSamples + i], &bits,
+                sizeof(bits));
+  };
+  // Sample 0: front left only. 1: centre, to both sides at -3 dB. 2: back
+  // right and LFE (left out). 3: overdriven left, clamped. 4: NaN, silent.
+  put(0, 0, 0.5f);
+  put(2, 1, 0.5f);
+  put(5, 2, 0.25f);
+  put(3, 2, 1.0f);
+  put(0, 3, 3.0f);
+  put(1, 4, std::nanf(""));
+  std::vector<int16_t> stereo(kGuestAudioFrameSamples * 2);
+  DownmixGuestFrame(frame.data(), stereo.data());
+  REQUIRE(stereo[0] == 16384);
+  REQUIRE(stereo[1] == 0);
+  REQUIRE(stereo[2] == 11585);
+  REQUIRE(stereo[3] == 11585);
+  REQUIRE(stereo[4] == 0);
+  REQUIRE(stereo[5] == 5792);
+  REQUIRE(stereo[6] == 32767);
+  REQUIRE(stereo[9] == 0);
+}
+
+TEST_CASE("Audio gathers per client into contiguous chunks", "[automation]") {
+  // 4-frame chunks, a gap over 10 ms starts a new one.
+  AudioChunker chunker(4, 10000000);
+  std::vector<AudioChunk> done;
+  const int16_t two[] = {1, 2, 3, 4};
+  chunker.Add(0, 1000, 7, 3, two, 2, done);
+  chunker.Add(1, 1500, 7, 3, two, 2, done);
+  REQUIRE(done.empty());
+  chunker.Add(0, 2000, 8, 4, two, 2, done);
+  REQUIRE(done.size() == 1);
+  REQUIRE(done[0].client == 0);
+  REQUIRE(done[0].ns == 1000);
+  REQUIRE(done[0].vblank == 7);
+  REQUIRE(done[0].frames() == 4);
+  // Client 1's next frames come 50 ms later: its first chunk ends short.
+  chunker.Add(1, 50001500, 9, 5, two, 2, done);
+  REQUIRE(done.size() == 2);
+  REQUIRE(done[1].client == 1);
+  REQUIRE(done[1].frames() == 2);
+  // Flushed once idle long enough.
+  chunker.Flush(50001600, 200, done);
+  REQUIRE(done.size() == 2);
+  chunker.Flush(50001700, 200, done);
+  REQUIRE(done.size() == 3);
+  REQUIRE(done[2].ns == 50001500);
+}
+
+TEST_CASE("Audio events carry little-endian stereo", "[automation]") {
+  AudioChunk chunk;
+  chunk.client = 2;
+  chunk.ns = 123;
+  chunk.vblank = 70;
+  chunk.swap = 35;
+  chunk.samples = {1, -1};
+  rapidjson::Document event =
+      Json(AudioEventLine(chunk, telemetry::State::kRunning));
+  REQUIRE(event["type"] == "audio");
+  REQUIRE(event["ns"] == 123);
+  REQUIRE(event["vblank"] == 70);
+  REQUIRE(event["client"] == 2);
+  REQUIRE(event["rate"] == 48000);
+  REQUIRE(event["channels"] == 2);
+  REQUIRE(event["frames"] == 1);
+  // 01 00 FF FF
+  REQUIRE(event["data"] == "AQD//w==");
+}
+
 }  // namespace test
 }  // namespace automation
 }  // namespace xe

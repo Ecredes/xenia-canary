@@ -11,6 +11,7 @@
 #define XENIA_APU_AUDIO_SYSTEM_H_
 
 #include <atomic>
+#include <functional>
 
 #include "xenia/base/mutex.h"
 #include "xenia/base/threading.h"
@@ -48,6 +49,12 @@ class AudioSystem {
                           size_t* out_index);
   void UnregisterClient(size_t index);
   void SubmitFrame(size_t index, float* samples);
+
+  // Sees each frame a client submits, in the guest's layout (big-endian
+  // floats, one channel after another), on the thread submitting it. Empty for
+  // none. It must be quick: it runs in the global critical region.
+  using FrameTap = std::function<void(size_t index, const float* samples)>;
+  void SetFrameTap(FrameTap tap);
 
   // Creates an independent, non-registered driver instance.
   virtual AudioDriver* CreateDriver(xe::threading::Semaphore* semaphore,
@@ -100,6 +107,8 @@ class AudioSystem {
       client_semaphores_[kMaximumClientCount];
   // Event is always there in case we have no clients.
   std::unique_ptr<xe::threading::Event> pending_work_event_;
+
+  FrameTap frame_tap_;
 
   bool paused_ = false;
   threading::Fence pause_fence_;

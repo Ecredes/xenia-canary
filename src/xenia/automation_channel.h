@@ -86,6 +86,15 @@ class AutomationChannel : public AnswerSource {
     std::vector<std::string> lines;
   };
   class TelemetrySink;
+  // Audio frames from the audio system's tap, gathered for the channel's
+  // thread. Shared with the tap, which the audio system owns.
+  struct AudioFeed {
+    // A client is subscribed: the tap gathers frames.
+    std::atomic<bool> active{false};
+    std::mutex mutex;
+    AudioChunker chunker;
+    std::vector<AudioChunk> chunks;
+  };
   struct OpenDialog {
     DialogRequest request;
     DialogAnswer default_answer;
@@ -134,6 +143,9 @@ class AutomationChannel : public AnswerSource {
   // Delivers the captured frame, then starts capturing the next if a request
   // waits or a watch is due.
   void ServiceFrames();
+  // Installs the audio tap once a client subscribes and the audio system is
+  // up, and sends audio events to the subscribers.
+  void ServiceAudio();
   // Sends video_frame events to the video's client, and ends the video when
   // its listener or its client goes.
   void ServiceVideo();
@@ -153,6 +165,8 @@ class AutomationChannel : public AnswerSource {
   // At most one video stream, and the client that started it.
   std::unique_ptr<VideoStream> video_;
   uint64_t video_client_ = 0;
+  std::shared_ptr<AudioFeed> audio_ = std::make_shared<AudioFeed>();
+  bool audio_tap_installed_ = false;
   std::function<void()> stop_;
   std::vector<std::unique_ptr<Client>> clients_;
   uint64_t next_client_ = 1;

@@ -345,7 +345,15 @@ void AudioSystem::SubmitFrame(size_t index, float* samples) {
     xe::telemetry::Count(xe::telemetry::Counter::kAudioFrames);
     xe::telemetry::ObservePeak(peak);
   }
+  if (frame_tap_) {
+    frame_tap_(index, samples);
+  }
   (clients_[index].driver)->SubmitFrame(samples);
+}
+
+void AudioSystem::SetFrameTap(FrameTap tap) {
+  auto global_lock = global_critical_region_.Acquire();
+  frame_tap_ = std::move(tap);
 }
 
 void AudioSystem::UnregisterClient(size_t index) {

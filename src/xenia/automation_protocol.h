@@ -15,7 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <numeric>
@@ -361,6 +361,8 @@ struct Session {
   bool dialogs = false;
   // Subscribed to pad events.
   bool input = false;
+  // Subscribed to audio events.
+  bool audio = false;
   // Watching frames.
   std::optional<FrameWatch> frames;
   // Benching, since bench_start.
@@ -522,7 +524,7 @@ inline Decision Decide(Session& session, const Request& request,
                      R"("pad_connect","pad_set","pad_queue","pad_clear",)"
                      R"("frame","frames_watch","bench_start","bench_stop",)"
                      R"("video_start","video_stop"])")
-                .Raw("streams", R"(["telemetry","dialogs","input"])")
+                .Raw("streams", R"(["telemetry","dialogs","input","audio"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
                 .Finish()};
@@ -542,7 +544,8 @@ inline Decision Decide(Session& session, const Request& request,
       return {ErrorLine(request.id, "missing streams")};
     }
     Session subscribed = session;
-    subscribed.telemetry = subscribed.dialogs = subscribed.input = false;
+    subscribed.telemetry = subscribed.dialogs = subscribed.input =
+        subscribed.audio = false;
     for (const std::string& stream : *request.streams) {
       if (stream == "telemetry") {
         subscribed.telemetry = true;
@@ -550,6 +553,8 @@ inline Decision Decide(Session& session, const Request& request,
         subscribed.dialogs = true;
       } else if (stream == "input") {
         subscribed.input = true;
+      } else if (stream == "audio") {
+        subscribed.audio = true;
       } else {
         return {ErrorLine(request.id, "unknown stream " + stream)};
       }
@@ -564,6 +569,9 @@ inline Decision Decide(Session& session, const Request& request,
     }
     if (session.input) {
       streams.push_back("input");
+    }
+    if (session.audio) {
+      streams.push_back("audio");
     }
     return {JsonLine()
                 .Re(request.id)
@@ -1484,6 +1492,152 @@ inline telemetry::Event VideoEndEvent(std::string_view reason,
       .UInt("captures", counts.captures)
       .UInt("dropped", counts.dropped);
   return event;
+}
+
+// Audio. Subscribing to the audio stream taps the frames the title submits:
+// each is downmixed to 16-bit stereo, and audio events carry about 100 ms of
+// one client's samples, stamped with the host time of the first.
+
+constexpr uint32_t kAudioRate = 48000;
+constexpr uint32_t kGuestAudioChannels = 6;
+constexpr uint32_t kGuestAudioFrameSamples = 256;
+// About -3 dB, for the centre and back channels in the stereo downmix.
+constexpr float kDownmixSide = 0.70710678f;
+// Samples gathered before an audio event is sent.
+constexpr uint32_t kAudioChunkFrames = kAudioRate / 10;
+// A frame this much later than its chunk's audio would end starts a new chunk.
+constexpr uint64_t kAudioGapNs = 50000000;
+
+// One guest audio frame, kGuestAudioChannels channels of
+// kGuestAudioFrameSamples big-endian floats one channel after another, in the
+// order FL FR FC LFE BL BR, as interleaved 16-bit stereo:
+// L = FL + 0.707 FC + 0.707 BL and R = FR + 0.707 FC + 0.707 BR, clamped. The
+// LFE channel is left out. NaN reads as silence.
+inline void DownmixGuestFrame(const float* samples, int16_t* stereo) {
+  auto sample_at = [samples](uint32_t channel, uint32_t i) {
+    uint32_t bits;
+    std::memcpy(&bits, &samples[channel * kGuestAudioFrameSamples + i],
+                sizeof(bits));
+    bits = (bits >> 24) | ((bits >> 8) & 0xFF00) | ((bits << 8) & 0xFF0000) |
+           (bits << 24);
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+  };
+  auto to_pcm = [](float value) {
+    if (!(value == value)) {
+      return int16_t(0);
+    }
+    return int16_t(std::lround(std::clamp(value, -1.0f, 1.0f) * 32767.0f));
+  };
+  for (uint32_t i = 0; i < kGuestAudioFrameSamples; ++i) {
+    float centre = kDownmixSide * sample_at(2, i);
+    stereo[i * 2] =
+        to_pcm(sample_at(0, i) + centre + kDownmixSide * sample_at(4, i));
+    stereo[i * 2 + 1] =
+        to_pcm(sample_at(1, i) + centre + kDownmixSide * sample_at(5, i));
+  }
+}
+
+// Contiguous stereo samples of one audio client.
+struct AudioChunk {
+  uint32_t client = 0;
+  // Host time and guest counters when its first frame was submitted.
+  uint64_t ns = 0;
+  uint64_t vblank = 0;
+  uint64_t swap = 0;
+  // Interleaved L R.
+  std::vector<int16_t> samples;
+  uint64_t frames() const { return samples.size() / 2; }
+};
+
+// Gathers each client's downmixed frames into chunks of at least min_frames.
+class AudioChunker {
+ public:
+  explicit AudioChunker(uint64_t min_frames = kAudioChunkFrames,
+                        uint64_t max_gap_ns = kAudioGapNs)
+      : min_frames_(min_frames), max_gap_ns_(max_gap_ns) {}
+
+  // frames of interleaved stereo submitted by client at ns; full chunks go to
+  // done.
+  void Add(uint32_t client, uint64_t ns, uint64_t vblank, uint64_t swap,
+           const int16_t* stereo, size_t frames,
+           std::vector<AudioChunk>& done) {
+    Pending& pending = Find(client);
+    AudioChunk& chunk = pending.chunk;
+    if (!chunk.samples.empty() &&
+        ns >
+            chunk.ns + chunk.frames() * 1000000000 / kAudioRate + max_gap_ns_) {
+      done.push_back(std::move(chunk));
+      chunk = AudioChunk();
+    }
+    if (chunk.samples.empty()) {
+      chunk.client = client;
+      chunk.ns = ns;
+      chunk.vblank = vblank;
+      chunk.swap = swap;
+    }
+    chunk.samples.insert(chunk.samples.end(), stereo, stereo + frames * 2);
+    pending.last_ns = ns;
+    if (chunk.frames() >= min_frames_) {
+      done.push_back(std::move(chunk));
+      chunk = AudioChunk();
+    }
+  }
+
+  // Ends the chunks whose last frame came max_age_ns or more before now_ns.
+  void Flush(uint64_t now_ns, uint64_t max_age_ns,
+             std::vector<AudioChunk>& done) {
+    for (Pending& pending : pending_) {
+      if (!pending.chunk.samples.empty() &&
+          now_ns >= pending.last_ns + max_age_ns) {
+        done.push_back(std::move(pending.chunk));
+        pending.chunk = AudioChunk();
+      }
+    }
+  }
+
+  void Clear() { pending_.clear(); }
+
+ private:
+  struct Pending {
+    uint32_t client = 0;
+    AudioChunk chunk;
+    uint64_t last_ns = 0;
+  };
+  Pending& Find(uint32_t client) {
+    auto it = std::find_if(
+        pending_.begin(), pending_.end(),
+        [client](const Pending& pending) { return pending.client == client; });
+    if (it != pending_.end()) {
+      return *it;
+    }
+    pending_.emplace_back();
+    pending_.back().client = client;
+    return pending_.back();
+  }
+
+  uint64_t min_frames_;
+  uint64_t max_gap_ns_;
+  std::vector<Pending> pending_;
+};
+
+// An audio event: chunk's samples as base64 little-endian 16-bit stereo.
+inline std::string AudioEventLine(const AudioChunk& chunk,
+                                  telemetry::State state) {
+  std::vector<uint8_t> bytes;
+  bytes.reserve(chunk.samples.size() * 2);
+  for (int16_t sample : chunk.samples) {
+    bytes.push_back(uint8_t(uint16_t(sample) & 0xFF));
+    bytes.push_back(uint8_t(uint16_t(sample) >> 8));
+  }
+  telemetry::Event event("audio");
+  event.UInt("client", chunk.client)
+      .UInt("rate", kAudioRate)
+      .UInt("channels", 2)
+      .UInt("frames", chunk.frames())
+      .Str("data", Base64(bytes.data(), bytes.size()));
+  return event.Finish(chunk.vblank, chunk.swap, chunk.ns, state) + "\n";
 }
 
 // Benching. bench_start gathers the frame times telemetry writes from then on;
