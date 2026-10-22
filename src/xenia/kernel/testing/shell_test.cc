@@ -229,6 +229,70 @@ TEST_CASE("A routine not yet taken keeps its user APC pending",
   REQUIRE(shell.Wait(poll) == kStatusTimeout);
 }
 
+namespace {
+
+// A timer whose routine targets the calling thread's waiter, expired once.
+ObjectId QueueRoutine(Shell& shell, uint64_t period) {
+  Waiter& mine = shell.CurrentWaiter();
+  ObjectId timer =
+      shell.Read([](Dispatcher& core) { return core.NewTimer(true); });
+  uint64_t now = Shell::GuestNow();
+  shell.Run([&](Dispatcher& core) {
+    return core.SetTimer(timer, now, period,
+                         TimerRoutine{mine.id, 0x82000000, 7});
+  });
+  shell.Run([now](Dispatcher& core) { return core.Tick(now); });
+  return timer;
+}
+
+}  // namespace
+
+TEST_CASE("A shell waiter gets one routine per timer until it takes it",
+          "[dispatch][shell]") {
+  Shell shell;
+  Waiter& mine = shell.CurrentWaiter();
+  ObjectId timer = QueueRoutine(shell, 1);
+  uint64_t now = Shell::GuestNow();
+  for (uint64_t i = 1; i <= 3; ++i) {
+    shell.Run([now, i](Dispatcher& core) { return core.Tick(now + i * 10); });
+  }
+  std::vector<TimerApc> apcs = shell.TakeTimerApcs(mine);
+  REQUIRE(apcs.size() == 1);
+  REQUIRE(apcs[0].timer == timer);
+  shell.Run([now](Dispatcher& core) { return core.Tick(now + 100); });
+  REQUIRE(shell.TakeTimerApcs(mine).size() == 1);
+}
+
+TEST_CASE("Cancelling a timer drops its routine from the shell waiter",
+          "[dispatch][shell]") {
+  Shell shell;
+  Waiter& mine = shell.CurrentWaiter();
+  ObjectId timer = QueueRoutine(shell, 0);
+  shell.Run([timer](Dispatcher& core) { return core.CancelTimer(timer); });
+  REQUIRE(shell.TakeTimerApcs(mine).empty());
+}
+
+TEST_CASE("Re-arming a timer drops its routine from the shell waiter",
+          "[dispatch][shell]") {
+  Shell shell;
+  Waiter& mine = shell.CurrentWaiter();
+  ObjectId timer = QueueRoutine(shell, 0);
+  shell.Run([&](Dispatcher& core) {
+    return core.SetTimer(timer, UINT64_MAX, 0,
+                         TimerRoutine{mine.id, 0x82000000, 7});
+  });
+  REQUIRE(shell.TakeTimerApcs(mine).empty());
+}
+
+TEST_CASE("Destroying a timer drops its routine from the shell waiter",
+          "[dispatch][shell]") {
+  Shell shell;
+  Waiter& mine = shell.CurrentWaiter();
+  ObjectId timer = QueueRoutine(shell, 0);
+  shell.Destroy(timer);
+  REQUIRE(shell.TakeTimerApcs(mine).empty());
+}
+
 }  // namespace test
 }  // namespace dispatch
 }  // namespace kernel

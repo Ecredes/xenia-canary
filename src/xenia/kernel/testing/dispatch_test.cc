@@ -448,15 +448,19 @@ TEST_CASE("Cancelling a timer disarms it and keeps its state", "[dispatch]") {
   Dispatcher d;
   ObjectId t = d.NewTimer(true);
   d.SetTimer(t, 100, 0, {});
-  REQUIRE(d.CancelTimer(t));
+  bool was = false;
+  d.CancelTimer(t, &was);
+  REQUIRE(was);
   Effects none = d.Tick(200);
   REQUIRE(none.wakes.empty());
   REQUIRE(none.writes.empty());
   REQUIRE(State(d, t) == 0);
-  REQUIRE(!d.CancelTimer(t));
+  d.CancelTimer(t, &was);
+  REQUIRE(!was);
   d.SetTimer(t, 300, 0, {});
   d.Tick(300);
-  REQUIRE(!d.CancelTimer(t));
+  d.CancelTimer(t, &was);
+  REQUIRE(!was);
   REQUIRE(State(d, t) == 1);
 }
 
@@ -493,9 +497,9 @@ TEST_CASE("Timers expire in due order, ties in arming order", "[dispatch]") {
   d.SetTimer(second, 100, 0, TimerRoutine{a, 2, 0});
   d.SetTimer(third, 100, 0, TimerRoutine{a, 3, 0});
   Effects tick = d.Tick(200);
-  REQUIRE(tick.timer_apcs == std::vector<TimerApc>{{a, 2, 0, 200},
-                                                   {a, 3, 0, 200},
-                                                   {a, 1, 0, 200}});
+  REQUIRE(tick.timer_apcs == std::vector<TimerApc>{{second, a, 2, 0, 200},
+                                                   {third, a, 3, 0, 200},
+                                                   {first, a, 1, 0, 200}});
 }
 
 TEST_CASE("A timer routine is queued to its thread with the expiry time",
@@ -507,7 +511,7 @@ TEST_CASE("A timer routine is queued to its thread with the expiry time",
   d.BeginWait(a, Wait({event}, WaitType::kAny, std::nullopt, true), 0);
   d.SetTimer(t, 100, 0, TimerRoutine{a, 0x82000000, 7});
   Effects tick = d.Tick(100);
-  REQUIRE(tick.timer_apcs == std::vector<TimerApc>{{a, 0x82000000, 7, 100}});
+  REQUIRE(tick.timer_apcs == std::vector<TimerApc>{{t, a, 0x82000000, 7, 100}});
   REQUIRE(tick.wakes == std::vector<Wake>{{a, kStatusUserApc}});
 }
 
@@ -544,6 +548,77 @@ TEST_CASE("A timer due before it was armed expires at the next tick",
   d.SetTimer(t, 50, 0, {});
   REQUIRE(d.Tick(100).writes == std::vector<SignalWrite>{{t, 1}});
   REQUIRE(d.Tick(101).writes.empty());
+}
+
+TEST_CASE("A periodic timer queues one routine until it is taken",
+          "[dispatch]") {
+  Dispatcher d;
+  ObjectId event = d.NewEvent(true, false);
+  ObjectId t = d.NewTimer(false);
+  ThreadId a = d.NewThread(), b = d.NewThread();
+  d.SetTimer(t, 100, 50, TimerRoutine{a, 0x82000000, 7});
+  Effects first = d.Tick(100);
+  REQUIRE(first.timer_apcs ==
+          std::vector<TimerApc>{{t, a, 0x82000000, 7, 100}});
+  // Consumed by a wait, so the next expiry has a waiter to wake.
+  REQUIRE(!d.BeginWait(b, Wait({t}), 100).blocked);
+  REQUIRE(d.BeginWait(b, Wait({t}), 100).blocked);
+  d.UserApcsDelivered(a);
+  REQUIRE(d.BeginWait(a, Wait({event}, WaitType::kAny, std::nullopt, true), 100)
+              .blocked);
+  // Still queued: the timer signals and wakes, but queues no second routine
+  // and leaves its thread's APC state alone.
+  Effects second = d.Tick(150);
+  REQUIRE(second.timer_apcs.empty());
+  REQUIRE(second.wakes == std::vector<Wake>{{b, kStatusWait0}});
+  REQUIRE(Thread(d, a).waiting);
+  REQUIRE(!Thread(d, a).user_apc_pending);
+  d.TimerRoutinesTaken(first.timer_apcs);
+  Effects third = d.Tick(200);
+  REQUIRE(third.timer_apcs ==
+          std::vector<TimerApc>{{t, a, 0x82000000, 7, 200}});
+  REQUIRE(third.wakes == std::vector<Wake>{{a, kStatusUserApc}});
+}
+
+TEST_CASE("Cancelling a timer drops its queued routine", "[dispatch]") {
+  Dispatcher d;
+  ObjectId t = d.NewTimer(true);
+  ThreadId a = d.NewThread();
+  d.SetTimer(t, 100, 50, TimerRoutine{a, 0x82000000, 7});
+  d.Tick(100);
+  REQUIRE(d.CancelTimer(t).withdrawn_routines ==
+          std::vector<WithdrawnRoutine>{{a, t}});
+  // Nothing is queued now: cancelling again withdraws nothing, and the next
+  // expiry queues a routine again.
+  REQUIRE(d.CancelTimer(t).withdrawn_routines.empty());
+  REQUIRE(d.SetTimer(t, 200, 0, TimerRoutine{a, 0x82000000, 7})
+              .withdrawn_routines.empty());
+  REQUIRE(d.Tick(200).timer_apcs.size() == 1);
+}
+
+TEST_CASE("Re-arming a timer drops its queued routine", "[dispatch]") {
+  Dispatcher d;
+  ObjectId t = d.NewTimer(true);
+  ThreadId a = d.NewThread(), b = d.NewThread();
+  d.SetTimer(t, 100, 0, TimerRoutine{a, 0x82000000, 7});
+  d.Tick(100);
+  Effects set = d.SetTimer(t, 200, 0, TimerRoutine{b, 0x82000010, 8});
+  REQUIRE(set.withdrawn_routines == std::vector<WithdrawnRoutine>{{a, t}});
+  REQUIRE(d.Tick(200).timer_apcs ==
+          std::vector<TimerApc>{{t, b, 0x82000010, 8, 200}});
+}
+
+TEST_CASE("Destroying a timer drops its queued routine", "[dispatch]") {
+  Dispatcher d;
+  ObjectId t = d.NewTimer(true);
+  ThreadId a = d.NewThread();
+  d.SetTimer(t, 100, 0, TimerRoutine{a, 0x82000000, 7});
+  d.Tick(100);
+  REQUIRE(d.DestroyObject(t).withdrawn_routines ==
+          std::vector<WithdrawnRoutine>{{a, t}});
+  ObjectId u = d.NewTimer(true);
+  d.SetTimer(u, 100, 0, TimerRoutine{a, 0x82000000, 7});
+  REQUIRE(d.DestroyObject(u).withdrawn_routines.empty());
 }
 
 }  // namespace test

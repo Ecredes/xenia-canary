@@ -116,7 +116,7 @@ class Shell {
   }
 
   // The timer routines queued to waiter that it hasn't run yet, oldest
-  // first; clears them.
+  // first; clears them, so their timers may queue the next.
   std::vector<TimerApc> TakeTimerApcs(Waiter& waiter);
   // Waiter has run its user APCs: clears its pending APC, unless a timer
   // routine came due since it took them (its next alertable wait runs it).

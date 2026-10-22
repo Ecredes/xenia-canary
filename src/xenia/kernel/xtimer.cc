@@ -62,13 +62,12 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
 }
 
 X_STATUS XTimer::Cancel(bool* was_signaled) {
-  bool signaled =
-      kernel_state()->dispatch()->Read([this](dispatch::Dispatcher& core) {
-        std::optional<dispatch::ObjectInfo> info =
-            core.Query(dispatch_object());
-        core.CancelTimer(dispatch_object());
-        return info && info->signal_state != 0;
-      });
+  bool signaled = false;
+  kernel_state()->dispatch()->Run([&](dispatch::Dispatcher& core) {
+    std::optional<dispatch::ObjectInfo> info = core.Query(dispatch_object());
+    signaled = info && info->signal_state != 0;
+    return core.CancelTimer(dispatch_object());
+  });
   if (was_signaled) {
     *was_signaled = signaled;
   }

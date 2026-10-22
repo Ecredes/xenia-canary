@@ -44,9 +44,13 @@ void Shell::Bind(ObjectId id, XObject* object) {
 }
 
 void Shell::Destroy(ObjectId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  objects_.erase(id);
-  core_.DestroyObject(id);
+  Unparks unparks;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    objects_.erase(id);
+    ApplyLocked(core_.DestroyObject(id), unparks);
+  }
+  Unpark(unparks);
 }
 
 void Shell::AddWaiter(Waiter& waiter) {
@@ -110,10 +114,21 @@ void Shell::ApplyLocked(const Effects& effects, Unparks& unparks) {
       object->second->WriteSignalState(write.signal_state);
     }
   }
+  for (const WithdrawnRoutine& withdrawn : effects.withdrawn_routines) {
+    auto waiter = waiters_.find(withdrawn.thread);
+    if (waiter != waiters_.end()) {
+      std::erase_if(waiter->second->timer_apcs, [&](const TimerApc& apc) {
+        return apc.timer == withdrawn.timer;
+      });
+    }
+  }
   for (const TimerApc& apc : effects.timer_apcs) {
     auto waiter = waiters_.find(apc.thread);
     if (waiter != waiters_.end()) {
       waiter->second->timer_apcs.push_back(apc);
+    } else {
+      // Nobody to take it: its timer may queue the next one.
+      core_.TimerRoutinesTaken({&apc, 1});
     }
   }
   for (const Wake& wake : effects.wakes) {
@@ -201,7 +216,9 @@ uint32_t Shell::ParkLocked(Waiter& waiter, const WaitResult& result,
 
 std::vector<TimerApc> Shell::TakeTimerApcs(Waiter& waiter) {
   std::lock_guard<std::mutex> lock(mutex_);
-  return std::exchange(waiter.timer_apcs, {});
+  std::vector<TimerApc> apcs = std::exchange(waiter.timer_apcs, {});
+  core_.TimerRoutinesTaken(apcs);
+  return apcs;
 }
 
 void Shell::UserApcsDelivered(Waiter& waiter) {

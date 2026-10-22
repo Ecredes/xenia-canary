@@ -60,7 +60,16 @@ ObjectId Dispatcher::NewTimer(bool notification) {
   return AddObject(std::move(timer));
 }
 
-void Dispatcher::DestroyObject(ObjectId object) { objects_.erase(object); }
+Effects Dispatcher::DestroyObject(ObjectId object) {
+  Effects effects;
+  auto found = objects_.find(object);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  WithdrawRoutine(object, found->second, effects);
+  objects_.erase(found);
+  return effects;
+}
 
 ThreadId Dispatcher::NewThread() {
   ThreadId id = next_thread_++;
@@ -80,15 +89,25 @@ void Dispatcher::DestroyThread(ThreadId thread) {
     }
   }
   threads_.erase(it);
-  DropTimerRoutines(thread);
+  // The shell forgets the waiter's routines with the waiter.
+  Effects dropped;
+  DropTimerRoutines(thread, dropped);
 }
 
-void Dispatcher::DropTimerRoutines(ThreadId thread) {
+void Dispatcher::DropTimerRoutines(ThreadId thread, Effects& effects) {
   for (auto& [id, object] : objects_) {
     if (object.routine && object.routine->thread == thread) {
+      WithdrawRoutine(id, object, effects);
       object.routine.reset();
     }
   }
+}
+
+void Dispatcher::WithdrawRoutine(ObjectId id, Object& timer, Effects& effects) {
+  if (timer.routine_queued && timer.routine) {
+    effects.withdrawn_routines.push_back({timer.routine->thread, id});
+  }
+  timer.routine_queued = false;
 }
 
 void Dispatcher::NoteSignal(ObjectId id, Effects& effects) {
@@ -368,6 +387,7 @@ Effects Dispatcher::SetTimer(ObjectId id, uint64_t due, uint64_t period,
   if (was_armed) {
     *was_armed = timer.armed;
   }
+  WithdrawRoutine(id, timer, effects);
   timer.armed = true;
   timer.due = due;
   timer.period = period;
@@ -378,14 +398,30 @@ Effects Dispatcher::SetTimer(ObjectId id, uint64_t due, uint64_t period,
   return effects;
 }
 
-bool Dispatcher::CancelTimer(ObjectId id) {
+Effects Dispatcher::CancelTimer(ObjectId id, bool* was_armed) {
+  Effects effects;
+  if (was_armed) {
+    *was_armed = false;
+  }
   auto found = objects_.find(id);
   if (found == objects_.end()) {
-    return false;
+    return effects;
   }
-  bool was_armed = found->second.armed;
+  if (was_armed) {
+    *was_armed = found->second.armed;
+  }
   found->second.armed = false;
-  return was_armed;
+  WithdrawRoutine(id, found->second, effects);
+  return effects;
+}
+
+void Dispatcher::TimerRoutinesTaken(std::span<const TimerApc> apcs) {
+  for (const TimerApc& apc : apcs) {
+    auto found = objects_.find(apc.timer);
+    if (found != objects_.end()) {
+      found->second.routine_queued = false;
+    }
+  }
 }
 
 Effects Dispatcher::Tick(uint64_t now) {
@@ -419,8 +455,12 @@ Effects Dispatcher::Tick(uint64_t now) {
     timer.signal_state = 1;
     NoteSignal(next.id, effects);
     WakeWaiters(next.id, effects);
-    if (timer.routine && threads_.count(timer.routine->thread)) {
-      effects.timer_apcs.push_back({timer.routine->thread,
+    // TODO(Ecredes): the guest's APC rule for timers is unobserved; follows NT
+    // (one queued routine per timer).
+    if (timer.routine && !timer.routine_queued &&
+        threads_.count(timer.routine->thread)) {
+      timer.routine_queued = true;
+      effects.timer_apcs.push_back({next.id, timer.routine->thread,
                                     timer.routine->routine,
                                     timer.routine->argument, now});
       Effects apc = QueueUserApc(timer.routine->thread);
@@ -595,7 +635,7 @@ WaitResult Dispatcher::BeginHold(ThreadId id) {
 
 Effects Dispatcher::ThreadTerminated(ThreadId id) {
   Effects effects;
-  DropTimerRoutines(id);
+  DropTimerRoutines(id, effects);
   auto thread = threads_.find(id);
   if (thread != threads_.end() && thread->second.waiting) {
     // It won't come back for the wake: drop it without one.

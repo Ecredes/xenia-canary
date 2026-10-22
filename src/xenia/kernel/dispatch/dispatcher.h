@@ -91,14 +91,22 @@ struct TimerRoutine {
   bool operator==(const TimerRoutine&) const = default;
 };
 
-// A routine to queue: the TimerRoutine plus the guest system time the timer
-// expired at (the routine's time arguments).
+// A routine to queue: the timer, its TimerRoutine and the guest system time
+// it expired at (the routine's time arguments).
 struct TimerApc {
+  ObjectId timer;
   ThreadId thread;
   uint32_t routine;
   uint32_t argument;
   uint64_t time;
   bool operator==(const TimerApc&) const = default;
+};
+
+// A timer's routine, queued to thread and not yet taken, that is withdrawn.
+struct WithdrawnRoutine {
+  ThreadId thread;
+  ObjectId timer;
+  bool operator==(const WithdrawnRoutine&) const = default;
 };
 
 struct Effects {
@@ -107,6 +115,9 @@ struct Effects {
   std::vector<SignalWrite> writes;
   // Timer routines to queue, in expiry order.
   std::vector<TimerApc> timer_apcs;
+  // Queued routines the shell drops: their timer was cancelled, re-armed or
+  // destroyed, or their thread terminated.
+  std::vector<WithdrawnRoutine> withdrawn_routines;
 };
 
 struct WaitRequest {
@@ -165,7 +176,7 @@ class Dispatcher {
   ObjectId NewThreadObject(ThreadId thread);
   ObjectId NewTimer(bool notification);
   // An object nobody waits on any more (its waiters are woken by now).
-  void DestroyObject(ObjectId object);
+  Effects DestroyObject(ObjectId object);
 
   ThreadId NewThread();
   void DestroyThread(ThreadId thread);
@@ -195,12 +206,16 @@ class Dispatcher {
   Effects SetTimer(ObjectId timer, uint64_t due, uint64_t period,
                    std::optional<TimerRoutine> routine,
                    bool* was_armed = nullptr);
-  // Disarms; the signal state is unchanged. Returns whether it was armed.
-  bool CancelTimer(ObjectId timer);
+  // Disarms; the signal state is unchanged. *was_armed gets whether it was
+  // armed.
+  Effects CancelTimer(ObjectId timer, bool* was_armed = nullptr);
   // The guest clock interrupt: expires every armed timer due at or before
-  // now, in due order, ties in the order they were armed.
+  // now, in due order, ties in the order they were armed. A timer has one
+  // routine queued at a time: until it is taken, an expiry queues none.
   Effects Tick(uint64_t now);
   std::optional<TimerInfo> QueryTimer(ObjectId timer) const;
+  // The shell handed these routines to their threads.
+  void TimerRoutinesTaken(std::span<const TimerApc> apcs);
 
   // Waits. A thread waits on at most one request at a time. now is the
   // guest system time, for a deadline that has passed already. A suspended
@@ -253,6 +268,8 @@ class Dispatcher {
     uint64_t due = 0;
     uint64_t period = 0;
     std::optional<TimerRoutine> routine;
+    // Its routine is queued to routine->thread and not yet taken.
+    bool routine_queued = false;
     // The order timers were armed in, to break ties in due time.
     uint64_t sequence = 0;
   };
@@ -291,7 +308,9 @@ class Dispatcher {
   void EndWait(ThreadId id, Thread& thread, uint32_t status, Effects& effects);
   void NoteSignal(ObjectId id, Effects& effects);
   // Forgets the routines of the timers that target thread.
-  void DropTimerRoutines(ThreadId thread);
+  void DropTimerRoutines(ThreadId thread, Effects& effects);
+  // Withdraws timer's queued routine, if it has one.
+  static void WithdrawRoutine(ObjectId id, Object& timer, Effects& effects);
 
   std::unordered_map<ObjectId, Object> objects_;
   std::unordered_map<ThreadId, Thread> threads_;
