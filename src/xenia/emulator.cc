@@ -1256,6 +1256,9 @@ void Emulator::Pause() {
 
     if (thread->is_running()) {
       thread->thread()->Suspend(nullptr);
+      // Resume() resumes these alone: a thread the title created suspended,
+      // or suspended itself, must stay so.
+      paused_threads_.push_back(thread);
     }
   }
 
@@ -1272,19 +1275,10 @@ void Emulator::Resume() {
   graphics_system_->Resume();
   audio_system_->Resume();
 
-  auto threads =
-      kernel_state()->object_table()->GetObjectsByType<kernel::XThread>(
-          kernel::XObject::Type::Thread);
-  for (auto thread : threads) {
-    if (!thread->can_debugger_suspend()) {
-      // Don't pause host threads.
-      continue;
-    }
-
-    if (!thread->is_running()) {
-      thread->thread()->Resume(nullptr);
-    }
+  for (auto& thread : paused_threads_) {
+    thread->thread()->Resume(nullptr);
   }
+  paused_threads_.clear();
 }
 
 bool Emulator::SaveToFile(const std::filesystem::path& path) {
