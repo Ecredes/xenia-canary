@@ -40,7 +40,8 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
                           uint32_t routine, uint32_t routine_arg, bool resume) {
   // Guest time throughout: the clock interrupt expires it.
   uint64_t timeout = uint64_t(due_time);
-  uint64_t due = *dispatch::Shell::DeadlineFromTimeout(&timeout);
+  uint64_t due = dispatch::Shell::DeadlineFromTimeout(&timeout).value_or(
+      dispatch::Shell::GuestNow());
   uint64_t period = uint64_t(period_ms) * 10000;
   // The routine runs as an APC on the thread that set the timer.
   std::optional<dispatch::TimerRoutine> timer_routine;

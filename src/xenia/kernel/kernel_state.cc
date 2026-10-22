@@ -1295,13 +1295,13 @@ void KernelState::ClockInterrupt() {
   uint32_t bundle_ptr =
       ke_timestamp_bundle_ptr_.load(std::memory_order_acquire);
   if (bundle_ptr) {
-    X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
+    X_TIME_STAMP_BUNDLE* bundle =
         memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(bundle_ptr);
-    xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
+    xe::store_and_swap<uint64_t>(&bundle->interrupt_time,
                                  Clock::QueryGuestInterruptTime());
-    xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
+    xe::store_and_swap<uint64_t>(&bundle->system_time,
                                  Clock::QueryGuestSystemTime());
-    xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count,
+    xe::store_and_swap<uint32_t>(&bundle->tick_count,
                                  Clock::QueryGuestUptimeMillis());
   }
 
@@ -1334,19 +1334,19 @@ uint32_t KernelState::CreateKeTimestampBundle() {
   auto crit = global_critical_region::Acquire();
 
   const uint32_t pKeTimeStampBundle = 0x80240EE0;
-  X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
+  X_TIME_STAMP_BUNDLE* bundle =
       memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(pKeTimeStampBundle);
 
-  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
+  xe::store_and_swap<uint64_t>(&bundle->interrupt_time,
                                Clock::QueryGuestInterruptTime());
 
-  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
+  xe::store_and_swap<uint64_t>(&bundle->system_time,
                                Clock::QueryGuestSystemTime());
 
-  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count,
+  xe::store_and_swap<uint32_t>(&bundle->tick_count,
                                Clock::QueryGuestUptimeMillis());
 
-  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->padding, 0);
+  xe::store_and_swap<uint32_t>(&bundle->padding, 0);
 
   ke_timestamp_bundle_ptr_.store(pKeTimeStampBundle, std::memory_order_release);
   return pKeTimeStampBundle;

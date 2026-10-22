@@ -205,9 +205,11 @@ TEST_CASE("Tick on a host thread's routine timer signals and queues nothing",
 TEST_CASE("A routine not yet taken keeps its user APC pending",
           "[dispatch][shell]") {
   Shell shell;
-  auto [timer, event] = shell.Read([](Dispatcher& core) {
+  auto objects = shell.Read([](Dispatcher& core) {
     return std::make_pair(core.NewTimer(true), core.NewEvent(false, false));
   });
+  const ObjectId timer = objects.first;
+  const ObjectId event = objects.second;
   Waiter& mine = shell.CurrentWaiter();
   WaitRequest poll;
   poll.objects = {event};

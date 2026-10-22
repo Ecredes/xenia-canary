@@ -41,6 +41,12 @@ ThreadInfo Thread(const Dispatcher& d, ThreadId thread) {
   return info.value_or(ThreadInfo{});
 }
 
+TimerInfo Timer(const Dispatcher& d, ObjectId timer) {
+  std::optional<TimerInfo> info = d.QueryTimer(timer);
+  REQUIRE(info.has_value());
+  return info.value_or(TimerInfo{});
+}
+
 int32_t State(const Dispatcher& d, ObjectId object) {
   return Info(d, object).signal_state;
 }
@@ -388,7 +394,7 @@ TEST_CASE("A timer is unsignaled and disarmed until set", "[dispatch]") {
   Dispatcher d;
   ObjectId t = d.NewTimer(true);
   REQUIRE(State(d, t) == 0);
-  REQUIRE(!d.QueryTimer(t)->armed);
+  REQUIRE(!Timer(d, t).armed);
 }
 
 TEST_CASE("A notification timer expires at its due time and wakes every waiter",
@@ -403,7 +409,7 @@ TEST_CASE("A notification timer expires at its due time and wakes every waiter",
   REQUIRE(d.Tick(100).wakes ==
           std::vector<Wake>{{a, kStatusWait0}, {b, kStatusWait0}});
   REQUIRE(State(d, t) == 1);
-  REQUIRE(!d.QueryTimer(t)->armed);
+  REQUIRE(!Timer(d, t).armed);
 }
 
 TEST_CASE("A synchronization timer wakes one waiter and clears", "[dispatch]") {
@@ -461,8 +467,8 @@ TEST_CASE("A periodic timer expires every period", "[dispatch]") {
   for (uint64_t now : {100, 150, 200}) {
     REQUIRE(d.Tick(now).writes == std::vector<SignalWrite>{{t, 1}});
   }
-  REQUIRE(d.QueryTimer(t)->due == 250);
-  REQUIRE(d.QueryTimer(t)->armed);
+  REQUIRE(Timer(d, t).due == 250);
+  REQUIRE(Timer(d, t).armed);
 }
 
 TEST_CASE("A late periodic timer fires once and keeps its phase",
@@ -471,11 +477,11 @@ TEST_CASE("A late periodic timer fires once and keeps its phase",
   ObjectId t = d.NewTimer(true);
   d.SetTimer(t, 100, 50, {});
   REQUIRE(d.Tick(260).writes.size() == 1);
-  REQUIRE(d.QueryTimer(t)->due == 310);
+  REQUIRE(Timer(d, t).due == 310);
   ObjectId u = d.NewTimer(true);
   d.SetTimer(u, 100, 50, {});
   d.Tick(101);
-  REQUIRE(d.QueryTimer(u)->due == 150);
+  REQUIRE(Timer(d, u).due == 150);
 }
 
 TEST_CASE("Timers expire in due order, ties in arming order", "[dispatch]") {
@@ -512,8 +518,8 @@ TEST_CASE("A timer routine is dropped when its thread terminates",
   ThreadId a = d.NewThread();
   d.SetTimer(t, 100, 0, TimerRoutine{a, 0x82000000, 7});
   d.ThreadTerminated(a);
-  REQUIRE(d.QueryTimer(t)->routine == std::nullopt);
-  REQUIRE(d.QueryTimer(t)->armed);
+  REQUIRE(Timer(d, t).routine == std::nullopt);
+  REQUIRE(Timer(d, t).armed);
   Effects tick = d.Tick(100);
   REQUIRE(tick.timer_apcs.empty());
   REQUIRE(State(d, t) == 1);
