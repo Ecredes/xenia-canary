@@ -1,0 +1,220 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_KERNEL_DISPATCH_DISPATCHER_H_
+#define XENIA_KERNEL_DISPATCH_DISPATCHER_H_
+
+#include <cstdint>
+#include <deque>
+#include <optional>
+#include <span>
+#include <unordered_map>
+#include <vector>
+
+namespace xe {
+namespace kernel {
+namespace dispatch {
+
+// The guest kernel's dispatcher as plain data: waitable objects, their signal
+// state and waiter queues, and the threads waiting on them. Every operation
+// takes the state and an input and returns what happened (Effects); it never
+// blocks, reads a clock or calls the host. The shell (dispatch/shell.h) holds
+// the lock, writes guest headers and wakes host threads from the Effects.
+//
+// The rules are the NT dispatcher's, as Microsoft's public documentation of
+// KeSetEvent, KePulseEvent, KeReleaseSemaphore, KeReleaseMutex and
+// KeWaitForMultipleObjects describes them, which Xbox 360 titles follow.
+
+using ObjectId = uint32_t;
+using ThreadId = uint32_t;
+constexpr ObjectId kNoObject = 0;
+constexpr ThreadId kNoThread = 0;
+
+// Wait results, with the NT status values the guest sees.
+constexpr uint32_t kStatusWait0 = 0x00000000;
+constexpr uint32_t kStatusAbandonedWait0 = 0x00000080;
+constexpr uint32_t kStatusUserApc = 0x000000C0;
+constexpr uint32_t kStatusTimeout = 0x00000102;
+
+// At most this many objects in one wait, as the guest kernel allows.
+constexpr size_t kMaxWaitObjects = 64;
+
+enum class ObjectKind : uint8_t {
+  // Set wakes every waiter and stays set until reset.
+  kNotificationEvent,
+  // Set wakes one waiter, whose wake clears it; with none, it stays set.
+  kSynchronizationEvent,
+  // A count from 0 to its limit; each satisfied wait takes one.
+  kSemaphore,
+  // Signaled when unowned. Signal state 1 - recursion: 1 free, 0 owned once,
+  // -1 owned twice by the same thread, and so on.
+  kMutant,
+  // Signaled once its thread has terminated.
+  kThread,
+};
+
+enum class WaitType : uint8_t { kAny, kAll };
+
+struct Wake {
+  ThreadId thread;
+  uint32_t status;
+  bool operator==(const Wake&) const = default;
+};
+
+// The final signal state of an object an operation changed, for the guest
+// header (X_DISPATCH_HEADER::signal_state).
+struct SignalWrite {
+  ObjectId object;
+  int32_t signal_state;
+  bool operator==(const SignalWrite&) const = default;
+};
+
+struct Effects {
+  // In the order the threads were satisfied.
+  std::vector<Wake> wakes;
+  std::vector<SignalWrite> writes;
+};
+
+struct WaitRequest {
+  std::vector<ObjectId> objects;
+  WaitType type = WaitType::kAny;
+  // Guest system time (100 ns units) when the wait times out; none: never.
+  // A deadline at or before now polls: the wait never blocks.
+  std::optional<uint64_t> deadline;
+  bool alertable = false;
+};
+
+struct WaitResult {
+  // True if the thread must park until a Wake names it.
+  bool blocked = false;
+  // The status when not blocked.
+  uint32_t status = kStatusWait0;
+  Effects effects;
+};
+
+struct ObjectInfo {
+  ObjectKind kind;
+  int32_t signal_state;
+  int32_t limit;
+  ThreadId owner;
+  bool abandoned;
+  size_t waiters;
+};
+
+struct ThreadInfo {
+  bool waiting;
+  WaitType type;
+  std::vector<ObjectId> objects;
+  std::optional<uint64_t> deadline;
+  bool alertable;
+  bool user_apc_pending;
+};
+
+class Dispatcher {
+ public:
+  // Objects. signal_state is the initial state: an event's 0/1, a semaphore's
+  // count (with limit), a mutant's 1 (free) or 0 (owned by owner).
+  ObjectId NewEvent(bool notification, bool signaled);
+  ObjectId NewSemaphore(int32_t count, int32_t limit);
+  ObjectId NewMutant(ThreadId owner);
+  // The object a thread's handle waits on; signaled at ThreadTerminated.
+  ObjectId NewThreadObject(ThreadId thread);
+  // An object nobody waits on any more (its waiters are woken by now).
+  void DestroyObject(ObjectId object);
+
+  ThreadId NewThread();
+  void DestroyThread(ThreadId thread);
+
+  // Events. previous gets the state before the call.
+  Effects SetEvent(ObjectId event, int32_t* previous = nullptr);
+  // Wakes the current waiters as Set would, then resets.
+  Effects PulseEvent(ObjectId event, int32_t* previous = nullptr);
+  Effects ResetEvent(ObjectId event, int32_t* previous = nullptr);
+
+  // Semaphores. A release past the limit changes nothing and sets *exceeded.
+  Effects ReleaseSemaphore(ObjectId semaphore, int32_t count,
+                           int32_t* previous = nullptr,
+                           bool* exceeded = nullptr);
+
+  // Mutants. Only the owner may release (else *not_owned, nothing changes).
+  // abandon releases it whatever the recursion, marked abandoned.
+  Effects ReleaseMutant(ObjectId mutant, ThreadId caller, bool abandon = false,
+                        int32_t* previous = nullptr, bool* not_owned = nullptr);
+
+  // A guest write to an object's header (signal state), read back in.
+  Effects SetSignalState(ObjectId object, int32_t signal_state);
+
+  // Waits. A thread waits on at most one request at a time. now is the
+  // guest system time, for a deadline that has passed already.
+  WaitResult BeginWait(ThreadId thread, const WaitRequest& request,
+                       uint64_t now);
+  // Wakes every thread whose deadline is at or before now with a timeout.
+  Effects Expire(uint64_t now);
+  // The earliest deadline among waiting threads.
+  std::optional<uint64_t> NextDeadline() const;
+
+  // A user-mode APC was queued to thread: it ends an alertable wait with
+  // kStatusUserApc, or stays pending so the next alertable wait returns at
+  // once. UserApcsDelivered clears it once the shell has run them.
+  Effects QueueUserApc(ThreadId thread);
+  void UserApcsDelivered(ThreadId thread);
+
+  // The thread ended: its thread object is signaled, and each mutant it owns
+  // is released and marked abandoned. A wait it was in is dropped.
+  Effects ThreadTerminated(ThreadId thread);
+
+  std::optional<ObjectInfo> Query(ObjectId object) const;
+  std::optional<ThreadInfo> QueryThread(ThreadId thread) const;
+
+ private:
+  struct Object {
+    ObjectKind kind;
+    int32_t signal_state = 0;
+    int32_t limit = 0;
+    ThreadId owner = kNoThread;
+    bool abandoned = false;
+    // For a thread object, its thread.
+    ThreadId thread = kNoThread;
+    std::deque<ThreadId> waiters;
+  };
+  struct Thread {
+    bool waiting = false;
+    WaitType type = WaitType::kAny;
+    std::vector<ObjectId> objects;
+    std::optional<uint64_t> deadline;
+    bool alertable = false;
+    bool user_apc_pending = false;
+  };
+
+  ObjectId AddObject(Object object);
+  // Whether object would satisfy a wait by thread now.
+  bool SignaledFor(const Object& object, ThreadId thread) const;
+  // Takes object for thread: consumes it as its kind does. Returns true if it
+  // was abandoned (the acquirer learns that once).
+  bool Consume(ObjectId id, ThreadId thread, Effects& effects);
+  // The status a thread's wait would end with now, if it can be satisfied,
+  // consuming what it takes.
+  std::optional<uint32_t> TrySatisfy(ThreadId id, Thread& thread,
+                                     Effects& effects);
+  // Satisfies the waiters of object that can be, in queue order.
+  void WakeWaiters(ObjectId object, Effects& effects);
+  void EndWait(ThreadId id, Thread& thread, uint32_t status, Effects& effects);
+  void NoteSignal(ObjectId id, Effects& effects);
+
+  std::unordered_map<ObjectId, Object> objects_;
+  std::unordered_map<ThreadId, Thread> threads_;
+  ObjectId next_object_ = 1;
+  ThreadId next_thread_ = 1;
+};
+
+}  // namespace dispatch
+}  // namespace kernel
+}  // namespace xe
+
+#endif  // XENIA_KERNEL_DISPATCH_DISPATCHER_H_
