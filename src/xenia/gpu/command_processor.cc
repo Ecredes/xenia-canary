@@ -342,7 +342,8 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
       kernel::XThread::IsInThread(worker_thread_.get())) {
     fn();
   } else {
-    pending_fns_.push(std::move(fn));
+    pending_fns_.Push(std::move(fn));
+    write_ptr_index_event_->Set();
   }
 }
 
@@ -366,11 +367,7 @@ void CommandProcessor::WorkerThreadMain() {
   }
 
   while (worker_running_) {
-    while (!pending_fns_.empty()) {
-      auto fn = std::move(pending_fns_.front());
-      pending_fns_.pop();
-      fn();
-    }
+    pending_fns_.RunAll();
 
     uint32_t write_ptr_index = write_ptr_index_.load();
     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {

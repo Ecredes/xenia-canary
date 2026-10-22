@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/base/function_queue.h"
 #include "xenia/base/math.h"
 #include "xenia/base/ring_buffer.h"
 #include "xenia/gpu/register_file.h"
@@ -603,7 +604,7 @@ class CommandProcessor {
   std::atomic<bool> worker_running_;
   kernel::object_ref<kernel::XHostThread> worker_thread_;
 
-  std::queue<std::function<void()>> pending_fns_;
+  FunctionQueue pending_fns_;
 
   // MicroEngine binary from PM4_ME_INIT
   std::vector<uint32_t> me_bin_;
