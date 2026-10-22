@@ -16,6 +16,15 @@ namespace xe {
 namespace kernel {
 namespace dispatch {
 
+namespace {
+
+bool IsTimer(ObjectKind kind) {
+  return kind == ObjectKind::kNotificationTimer ||
+         kind == ObjectKind::kSynchronizationTimer;
+}
+
+}  // namespace
+
 ObjectId Dispatcher::AddObject(Object object) {
   ObjectId id = next_object_++;
   objects_.emplace(id, std::move(object));
@@ -67,6 +76,7 @@ Effects Dispatcher::DestroyObject(ObjectId object) {
     return effects;
   }
   WithdrawRoutine(object, found->second, effects);
+  SetArmed(found->second, false);
   objects_.erase(found);
   return effects;
 }
@@ -108,6 +118,18 @@ void Dispatcher::WithdrawRoutine(ObjectId id, Object& timer, Effects& effects) {
     effects.withdrawn_routines.push_back({timer.routine->thread, id});
   }
   timer.routine_queued = false;
+}
+
+void Dispatcher::SetArmed(Object& timer, bool armed) {
+  if (timer.armed == armed) {
+    return;
+  }
+  timer.armed = armed;
+  if (armed) {
+    ++armed_timers_;
+  } else {
+    --armed_timers_;
+  }
 }
 
 void Dispatcher::NoteSignal(ObjectId id, Effects& effects) {
@@ -379,8 +401,11 @@ Effects Dispatcher::SetTimer(ObjectId id, uint64_t due, uint64_t period,
                              std::optional<TimerRoutine> routine,
                              bool* was_armed) {
   Effects effects;
+  if (was_armed) {
+    *was_armed = false;
+  }
   auto found = objects_.find(id);
-  if (found == objects_.end()) {
+  if (found == objects_.end() || !IsTimer(found->second.kind)) {
     return effects;
   }
   Object& timer = found->second;
@@ -388,7 +413,7 @@ Effects Dispatcher::SetTimer(ObjectId id, uint64_t due, uint64_t period,
     *was_armed = timer.armed;
   }
   WithdrawRoutine(id, timer, effects);
-  timer.armed = true;
+  SetArmed(timer, true);
   timer.due = due;
   timer.period = period;
   timer.routine = routine;
@@ -404,13 +429,13 @@ Effects Dispatcher::CancelTimer(ObjectId id, bool* was_armed) {
     *was_armed = false;
   }
   auto found = objects_.find(id);
-  if (found == objects_.end()) {
+  if (found == objects_.end() || !IsTimer(found->second.kind)) {
     return effects;
   }
   if (was_armed) {
     *was_armed = found->second.armed;
   }
-  found->second.armed = false;
+  SetArmed(found->second, false);
   WithdrawRoutine(id, found->second, effects);
   return effects;
 }
@@ -426,6 +451,9 @@ void Dispatcher::TimerRoutinesTaken(std::span<const TimerApc> apcs) {
 
 Effects Dispatcher::Tick(uint64_t now) {
   Effects effects;
+  if (armed_timers_ == 0) {
+    return effects;
+  }
   struct Due {
     uint64_t due;
     uint64_t sequence;
@@ -443,7 +471,7 @@ Effects Dispatcher::Tick(uint64_t now) {
   for (const Due& next : expiring) {
     Object& timer = objects_.at(next.id);
     if (timer.period == 0) {
-      timer.armed = false;
+      SetArmed(timer, false);
     } else {
       // TODO(Ecredes): guest reinsertion rule unobserved; keeps phase at tick
       // granularity.
@@ -473,9 +501,7 @@ Effects Dispatcher::Tick(uint64_t now) {
 
 std::optional<TimerInfo> Dispatcher::QueryTimer(ObjectId id) const {
   auto it = objects_.find(id);
-  if (it == objects_.end() ||
-      (it->second.kind != ObjectKind::kNotificationTimer &&
-       it->second.kind != ObjectKind::kSynchronizationTimer)) {
+  if (it == objects_.end() || !IsTimer(it->second.kind)) {
     return std::nullopt;
   }
   const Object& timer = it->second;

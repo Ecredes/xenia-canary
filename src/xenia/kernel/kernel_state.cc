@@ -1286,8 +1286,9 @@ bool KernelState::Save(ByteStream* stream) {
   return true;
 }
 
-// this only gets triggered once per ms at most, so fields other than tick count
-// will probably not be updated in a timely manner for guest code that uses them
+// The guest clock interrupt, from a 1 ms host timer: ticks the dispatcher
+// core at guest time, writes the KeTimeStampBundle when one exists, and
+// decays quanta.
 void KernelState::ClockInterrupt() {
   uint64_t now = dispatch::Shell::GuestNow();
   dispatch_->Run([now](dispatch::Dispatcher& core) { return core.Tick(now); });

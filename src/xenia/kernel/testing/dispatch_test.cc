@@ -621,6 +621,36 @@ TEST_CASE("Destroying a timer drops its queued routine", "[dispatch]") {
   REQUIRE(d.DestroyObject(u).withdrawn_routines.empty());
 }
 
+TEST_CASE("A held thread's alertable wait ends with a timer routine on resume",
+          "[dispatch]") {
+  Dispatcher d;
+  ObjectId event = d.NewEvent(true, false);
+  ObjectId t = d.NewTimer(true);
+  ThreadId a = d.NewThread();
+  d.BeginWait(a, Wait({event}, WaitType::kAny, std::nullopt, true), 0);
+  d.Suspend(a);
+  d.SetTimer(t, 100, 0, TimerRoutine{a, 0x82000000, 7});
+  Effects tick = d.Tick(100);
+  REQUIRE(tick.timer_apcs.size() == 1);
+  REQUIRE(tick.wakes.empty());
+  REQUIRE(Thread(d, a).user_apc_pending);
+  REQUIRE(Thread(d, a).waiting);
+  REQUIRE(d.Resume(a, 100).wakes == std::vector<Wake>{{a, kStatusUserApc}});
+}
+
+TEST_CASE("Timer calls leave other objects alone", "[dispatch]") {
+  Dispatcher d;
+  ObjectId event = d.NewEvent(true, true);
+  bool was = true;
+  REQUIRE(d.SetTimer(event, 100, 0, {}, &was).writes.empty());
+  REQUIRE(!was);
+  was = true;
+  d.CancelTimer(event, &was);
+  REQUIRE(!was);
+  REQUIRE(d.Tick(100).writes.empty());
+  REQUIRE(State(d, event) == 1);
+}
+
 }  // namespace test
 }  // namespace dispatch
 }  // namespace kernel

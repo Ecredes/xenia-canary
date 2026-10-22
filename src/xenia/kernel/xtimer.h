@@ -27,7 +27,8 @@ class XTimer : public XObject {
 
   X_STATUS SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine,
                     uint32_t routine_arg, bool resume);
-  // Disarms; *was_signaled gets the signal state, which this leaves as is.
+  // Disarms, leaving the signal state unchanged; *was_signaled gets it. A
+  // routine queued and not yet run is dropped.
   X_STATUS Cancel(bool* was_signaled = nullptr);
 };
 

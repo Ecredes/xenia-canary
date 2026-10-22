@@ -63,6 +63,8 @@ void Shell::AddWaiter(Waiter& waiter) {
   }
   waiter.id = core_.NewThread();
   waiter.shell = serial_;
+  // A host thread's waiter may come from an earlier shell, with its routines.
+  waiter.timer_apcs.clear();
   waiters_[waiter.id] = &waiter;
 }
 
@@ -73,6 +75,7 @@ void Shell::RemoveWaiter(Waiter& waiter) {
   }
   waiters_.erase(waiter.id);
   core_.DestroyThread(waiter.id);
+  waiter.timer_apcs.clear();
   waiter.shell = 0;
   waiter.id = kNoThread;
 }

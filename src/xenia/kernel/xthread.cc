@@ -774,7 +774,7 @@ void XThread::CheckQuantumAndDecay() {
   // thread's quantum by 3.  The process quantum is 60, so it takes ~20ms
   // for quantum to expire.  When it does, the scheduler decays the
   // effective priority by exactly 1 and resets quantum.  We approximate
-  // this by decaying 1 priority level per 20ms of elapsed wall-clock time.
+  // this by decaying 1 priority level per 20ms of elapsed guest time.
   constexpr uint64_t kQuantumPeriodMs = 20;
   if (elapsed < kQuantumPeriodMs) {
     return;

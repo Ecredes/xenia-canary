@@ -26,6 +26,8 @@ namespace dispatch {
 // takes the state and an input and returns what happened (Effects); it never
 // blocks, reads a clock or calls the host. The shell (dispatch/shell.h) holds
 // the lock, writes guest headers and wakes host threads from the Effects.
+// Timer routines queued but not yet taken live in the shell's Waiter, not
+// here: a save state must account for them.
 //
 // The rules are the NT dispatcher's, as Microsoft's public documentation of
 // KeSetEvent, KePulseEvent, KeReleaseSemaphore, KeReleaseMutex and
@@ -311,12 +313,16 @@ class Dispatcher {
   void DropTimerRoutines(ThreadId thread, Effects& effects);
   // Withdraws timer's queued routine, if it has one.
   static void WithdrawRoutine(ObjectId id, Object& timer, Effects& effects);
+  // Arms or disarms timer, counting the armed ones.
+  void SetArmed(Object& timer, bool armed);
 
   std::unordered_map<ObjectId, Object> objects_;
   std::unordered_map<ThreadId, Thread> threads_;
   ObjectId next_object_ = 1;
   ThreadId next_thread_ = 1;
   uint64_t next_sequence_ = 1;
+  // How many timers are armed: Tick has nothing to do at 0.
+  size_t armed_timers_ = 0;
 };
 
 }  // namespace dispatch

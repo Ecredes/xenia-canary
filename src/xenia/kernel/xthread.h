@@ -543,7 +543,7 @@ class XThread : public XObject, public cpu::Thread {
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
   int32_t boost_amount_ = 0;   // accumulated priority boost above base
-  uint64_t quantum_start_ms_ = 0;  // host uptime (ms) when quantum last reset
+  uint64_t quantum_start_ms_ = 0;  // guest uptime (ms) when quantum last reset
 
   // Reentry mechanism for fiber-based stack switching.
   // On Linux, C++ exceptions are used instead of setjmp/longjmp so that

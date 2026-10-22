@@ -49,7 +49,7 @@ struct Waiter {
   // may outlive a shell, and a later one may get its address).
   uint64_t shell = 0;
   // Timer routines queued to it and not yet run, oldest first (under the
-  // dispatcher lock).
+  // dispatcher lock). The core doesn't hold them: a save state must.
   std::vector<TimerApc> timer_apcs;
 };
 
@@ -76,7 +76,8 @@ class Shell {
     }
     Unpark(unparks);
   }
-  // Runs op on the core with the lock held, for queries and creation.
+  // Runs op on the core with the lock held, for ops with no Effects to apply
+  // (queries, creation); returns what op returns.
   template <typename Op>
   auto Read(Op&& op) {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -293,6 +293,16 @@ TEST_CASE("Destroying a timer drops its routine from the shell waiter",
   REQUIRE(shell.TakeTimerApcs(mine).empty());
 }
 
+TEST_CASE("A host waiter carries no routines into a later shell",
+          "[dispatch][shell]") {
+  {
+    Shell shell;
+    QueueRoutine(shell, 0);
+  }
+  Shell shell;
+  REQUIRE(shell.TakeTimerApcs(shell.CurrentWaiter()).empty());
+}
+
 }  // namespace test
 }  // namespace dispatch
 }  // namespace kernel
