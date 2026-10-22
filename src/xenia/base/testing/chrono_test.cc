@@ -147,13 +147,19 @@ TEST_CASE("WinSystemClock <-> steady_clock", "[clock_cast]") {
 }
 
 TEST_CASE("Guest interrupt time is guest uptime in 100 ns", "[clock]") {
+  // Restores the scalar even when a REQUIRE fails.
+  struct ScalarGuard {
+    ~ScalarGuard() { Clock::set_guest_time_scalar(1.0); }
+  } guard;
   Clock::set_guest_time_scalar(2.0);
 
-  // Interrupt time is in 100 ns units; uptime is in milliseconds.
-  REQUIRE(llabs(int64_t(Clock::QueryGuestInterruptTime() / 10000) -
-                int64_t(Clock::QueryGuestUptimeMillis())) <= 1);
-
-  Clock::set_guest_time_scalar(1.0);
+  // Interrupt time is in 100 ns units; uptime is in milliseconds. Both run
+  // on one guest clock, so uptime read before and after brackets it.
+  uint64_t up1 = Clock::QueryGuestUptimeMillis();
+  uint64_t it = Clock::QueryGuestInterruptTime() / 10000;
+  uint64_t up2 = Clock::QueryGuestUptimeMillis();
+  REQUIRE(up1 <= it);
+  REQUIRE(it <= up2);
 }
 
 }  // namespace xe::base::test
