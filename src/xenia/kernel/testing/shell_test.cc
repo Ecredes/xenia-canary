@@ -184,6 +184,24 @@ TEST_CASE("A timer routine reaches its waiter and ends its alertable wait",
   REQUIRE(again.empty());
 }
 
+TEST_CASE("Tick on a host thread's routine timer signals and queues nothing",
+          "[dispatch][shell]") {
+  Shell shell;
+  ObjectId timer =
+      shell.Read([](Dispatcher& core) { return core.NewTimer(true); });
+  // No routine: what XTimer arms when no XThread is current.
+  shell.Run([&](Dispatcher& core) {
+    return core.SetTimer(timer, Shell::GuestNow(), 0, std::nullopt);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  shell.Run([](Dispatcher& core) { return core.Tick(Shell::GuestNow()); });
+  int32_t state = shell.Read([&](Dispatcher& core) {
+    return core.Query(timer).value_or(ObjectInfo{}).signal_state;
+  });
+  REQUIRE(state == 1);
+  REQUIRE(shell.TakeTimerApcs(shell.CurrentWaiter()).empty());
+}
+
 }  // namespace test
 }  // namespace dispatch
 }  // namespace kernel

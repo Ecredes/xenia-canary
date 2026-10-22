@@ -769,7 +769,7 @@ void XThread::SetPriority(int32_t increment) {
   }
   priority_ = clamped;
   base_priority_ = clamped;
-  quantum_start_ms_ = Clock::QueryHostUptimeMillis();
+  quantum_start_ms_ = Clock::QueryGuestUptimeMillis();
   if (!cvars::ignore_thread_priorities) {
     thread_->set_priority(GuestPriorityToHost(clamped));
   }
@@ -784,7 +784,7 @@ void XThread::CheckQuantumAndDecay() {
     return;
   }
 
-  uint64_t now = Clock::QueryHostUptimeMillis();
+  uint64_t now = Clock::QueryGuestUptimeMillis();
   uint64_t elapsed = now - quantum_start_ms_;
   // On Xenon, the clock interrupt fires every ~1ms and decrements the
   // thread's quantum by 3.  The process quantum is 60, so it takes ~20ms
@@ -826,7 +826,7 @@ void XThread::BoostOnWake(int32_t increment) {
   // Real-time threads (priority >= 0x12) just get their quantum reset.
   if (priority_ >= 18) {
     boost_amount_ = 0;
-    quantum_start_ms_ = Clock::QueryHostUptimeMillis();
+    quantum_start_ms_ = Clock::QueryGuestUptimeMillis();
     return;
   }
 
@@ -871,7 +871,7 @@ void XThread::BoostOnWake(int32_t increment) {
     }
   }
 
-  quantum_start_ms_ = Clock::QueryHostUptimeMillis();
+  quantum_start_ms_ = Clock::QueryGuestUptimeMillis();
 }
 
 void XThread::SetAffinity(uint32_t affinity) {

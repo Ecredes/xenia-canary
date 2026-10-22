@@ -82,9 +82,14 @@ KernelState::KernelState(Emulator* emulator)
       kMemoryProtectRead | kMemoryProtectWrite);
 
   xenia_assert(fixed_alloc_worked);
+
+  clock_interrupt_ = xe::threading::HighResolutionTimer::CreateRepeating(
+      std::chrono::milliseconds(1), [this]() { this->ClockInterrupt(); });
 }
 
 KernelState::~KernelState() {
+  // Stop the clock interrupt before anything it touches goes.
+  clock_interrupt_.reset();
   SetExecutableModule(nullptr);
 
   if (dispatch_thread_running_) {
@@ -1283,15 +1288,22 @@ bool KernelState::Save(ByteStream* stream) {
 
 // this only gets triggered once per ms at most, so fields other than tick count
 // will probably not be updated in a timely manner for guest code that uses them
-void KernelState::UpdateKeTimestampBundle() {
-  X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
-      memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(ke_timestamp_bundle_ptr_);
-  uint32_t uptime_ms = Clock::QueryGuestUptimeMillis();
-  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
-                               Clock::QueryGuestInterruptTime());
-  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
-                               Clock::QueryGuestSystemTime());
-  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count, uptime_ms);
+void KernelState::ClockInterrupt() {
+  uint64_t now = dispatch::Shell::GuestNow();
+  dispatch_->Run([now](dispatch::Dispatcher& core) { return core.Tick(now); });
+
+  uint32_t bundle_ptr =
+      ke_timestamp_bundle_ptr_.load(std::memory_order_acquire);
+  if (bundle_ptr) {
+    X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
+        memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(bundle_ptr);
+    xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
+                                 Clock::QueryGuestInterruptTime());
+    xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
+                                 Clock::QueryGuestSystemTime());
+    xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count,
+                                 Clock::QueryGuestUptimeMillis());
+  }
 
   // Every 20 ticks (~20ms), decay priority on running guest threads.
   // This simulates the Xenon decrementer-driven quantum expiration.
@@ -1307,7 +1319,9 @@ void KernelState::UpdateKeTimestampBundle() {
 }
 
 uint32_t KernelState::GetKeTimestampBundle() {
-  XE_LIKELY_IF(ke_timestamp_bundle_ptr_) { return ke_timestamp_bundle_ptr_; }
+  uint32_t bundle_ptr =
+      ke_timestamp_bundle_ptr_.load(std::memory_order_acquire);
+  XE_LIKELY_IF(bundle_ptr) { return bundle_ptr; }
   else {
     global_critical_region::PrepareToAcquire();
     return CreateKeTimestampBundle();
@@ -1334,10 +1348,7 @@ uint32_t KernelState::CreateKeTimestampBundle() {
 
   xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->padding, 0);
 
-  ke_timestamp_bundle_ptr_ = pKeTimeStampBundle;
-  timestamp_timer_ = xe::threading::HighResolutionTimer::CreateRepeating(
-      std::chrono::milliseconds(1),
-      [this]() { this->UpdateKeTimestampBundle(); });
+  ke_timestamp_bundle_ptr_.store(pKeTimeStampBundle, std::memory_order_release);
   return pKeTimeStampBundle;
 }
 

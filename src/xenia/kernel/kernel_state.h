@@ -320,7 +320,7 @@ class KernelState {
   XE_NOINLINE
   XE_COLD
   uint32_t CreateKeTimestampBundle();
-  void UpdateKeTimestampBundle();
+  void ClockInterrupt();
 
   void BeginDPCImpersonation(cpu::ppc::PPCContext* context,
                              DPCImpersonationScope& scope);
@@ -393,13 +393,14 @@ class KernelState {
   std::condition_variable_any dispatch_cond_;
   std::list<std::function<void()>> dispatch_queue_;
 
-  uint32_t ke_timestamp_bundle_ptr_ = 0;
-  std::unique_ptr<xe::threading::HighResolutionTimer> timestamp_timer_;
+  std::atomic<uint32_t> ke_timestamp_bundle_ptr_{0};
   uint32_t quantum_timer_counter_ = 0;
   cpu::backend::GuestTrampolineGroup kernel_trampoline_group_;
   // fixed address referenced by dashboards. Data is currently unknown
   uint32_t strange_hardcoded_page_ = 0x8E038634 & (~0xFFFF);
   uint32_t strange_hardcoded_location_ = 0x8E038634;
+  // Declared last so it goes first; it touches the members above.
+  std::unique_ptr<xe::threading::HighResolutionTimer> clock_interrupt_;
 
   friend class XObject;
 
