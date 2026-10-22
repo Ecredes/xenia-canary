@@ -162,7 +162,7 @@ Ecredes/xenia-canary.
 | F8 | Guest code on host threads that aren't guest threads (audio callbacks, vblank interrupt) escapes emulator pause and runs with borrowed identity | §2.3; pause work 2026-10-21 | interrupts and callbacks |
 | F9 | A suspended worker held the lwarx reservation bit | fork #35, `cpu/reservation-generations` | suspension vs atomics |
 | F10 | A stale `launch_data.bin` hijacks the next launch; title relaunch is not an in-place swap | fork #53 | title lifecycle |
-| F11 | Frostbite titles (454109C9, 45410950): GPU `WAIT_REG_MEM` stuck on a memory value with the main thread running; gone on the integration build (coherence) in one run each, repeats pending | threads snapshots 2026-10-22 | CPU/GPU fences (coherence handoff, §5) |
+| F11 | Frostbite titles (454109C9, 45410950): GPU `WAIT_REG_MEM` stuck on a memory value with the main thread running; repeats on 45410950: the automation-only build hung 5 of 6 runs, the integration build 0 of 6, so the coherence series fixes it and it is not a threading defect | threads snapshots 2026-10-22 | CPU/GPU fences (coherence handoff, §5) |
 | F12 | 545407DC: hangs at menus in one run, crashes (null+0x18, thread 23) in another | probe batch 2026-10-19, batch 2026-10-22 | nondeterministic: scheduling or timing sensitive |
 | F13 | 45410950 on the integration build: crash null+0x62 in BF.Main after calling the undefined `XamBackgroundDownloadSetMode` | batch 2026-10-22 | unknown yet |
 
