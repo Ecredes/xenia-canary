@@ -11,6 +11,7 @@
 #define XENIA_GPU_GRAPHICS_SYSTEM_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -38,6 +39,9 @@ class CommandProcessor;
 
 class GraphicsSystem {
  public:
+  // How long a vblank limit holds the next vblank back (see set_vblank_limit).
+  static constexpr std::chrono::milliseconds kVblankLimitGrace{100};
+
   virtual ~GraphicsSystem();
 
   virtual std::string name() const = 0;
@@ -93,6 +97,15 @@ class GraphicsSystem {
     return swap_count_.load(std::memory_order_relaxed);
   }
   void MarkSwap();
+  // Holds vblanks back once vblank_count() reaches limit (0: no limit), so a
+  // tool can run the guest for an exact number of vblanks, then pause it.
+  // The hold gives way after kVblankLimitGrace: pausing may need a vblank.
+  void set_vblank_limit(uint64_t limit) {
+    vblank_limit_.store(limit, std::memory_order_relaxed);
+  }
+  uint64_t vblank_limit() const {
+    return vblank_limit_.load(std::memory_order_relaxed);
+  }
   // No vblanks while frozen: the emulator sets it once everything that runs
   // guest code is paused (a vblank runs the guest's interrupt callback).
   void set_vblanks_frozen(bool frozen) {
@@ -146,6 +159,7 @@ class GraphicsSystem {
   std::atomic<bool> vblank_deadline_reset_{false};
 
   std::atomic<uint64_t> vblank_count_{0};
+  std::atomic<uint64_t> vblank_limit_{0};
   std::atomic<bool> vblanks_frozen_{false};
   std::atomic<uint64_t> swap_count_{0};
 

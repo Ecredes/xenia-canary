@@ -155,6 +155,42 @@ TEST_CASE("The controller stops the run", "[automation]") {
   REQUIRE(Json(ExitEvent(0))["type"] == "exit");
 }
 
+TEST_CASE("The controller pauses, resumes and advances", "[automation]") {
+  Session session{Role::kController};
+  Context context = TestContext();
+  REQUIRE(Decide(session, Parsed(R"({"op":"pause"})"), context).action ==
+          Action::kPause);
+  REQUIRE(Decide(session, Parsed(R"({"op":"resume"})"), context).action ==
+          Action::kResume);
+  Decision advance =
+      Decide(session, Parsed(R"({"op":"advance","vblanks":30})"), context);
+  REQUIRE(advance.action == Action::kAdvance);
+  REQUIRE(advance.vblanks == 30);
+  REQUIRE(advance.reply.empty());
+  for (const char* line :
+       {R"({"op":"advance"})", R"({"op":"advance","vblanks":0})",
+        R"({"op":"advance","vblanks":3601})"}) {
+    Decision refused = Decide(session, Parsed(line), context);
+    REQUIRE(refused.action == Action::kNone);
+    REQUIRE(Json(refused.reply)["error"] == "vblanks must be from 1 to 3600");
+  }
+  rapidjson::Document reply = Json(PauseReply("7", true, 120, 61));
+  REQUIRE(reply["re"] == 7);
+  REQUIRE(reply["paused"] == true);
+  REQUIRE(reply["vblank"] == 120);
+  REQUIRE(reply["swap"] == 61);
+}
+
+TEST_CASE("Observers can't pause", "[automation]") {
+  Session session{Role::kObserver};
+  for (const char* line : {R"({"op":"pause"})", R"({"op":"resume"})",
+                           R"({"op":"advance","vblanks":1})"}) {
+    Decision refused = Decide(session, Parsed(line), TestContext());
+    REQUIRE(refused.action == Action::kNone);
+    REQUIRE(Json(refused.reply)["error"] == "needs the controller role");
+  }
+}
+
 TEST_CASE("State and unknown ops", "[automation]") {
   Session session{Role::kObserver};
   Context context = TestContext();

@@ -45,6 +45,8 @@ constexpr uint32_t kProtocolVersion = 1;
 constexpr size_t kMaxLineLength = 16 * 1024 * 1024;
 // The guest's vblank rate: no title swaps faster.
 constexpr int64_t kMaxWatchFps = 60;
+// One minute of vblanks at 60 Hz, as pad_queue's longest hold.
+constexpr int64_t kMaxAdvanceVblanks = 3600;
 
 // Splits a byte stream into lines, without the terminator (\n or \r\n).
 class LineSplitter {
@@ -104,6 +106,8 @@ struct Request {
   std::optional<int64_t> height;
   // bench_stop
   std::optional<bool> raw;
+  // advance
+  std::optional<int64_t> vblanks;
 };
 
 struct ParseResult {
@@ -197,7 +201,8 @@ inline ParseResult ParseRequest(std::string_view line) {
         std::pair{"max_width", &request.max_width},
         std::pair{"quality", &request.quality}, std::pair{"fps", &request.fps},
         std::pair{"port", &request.port}, std::pair{"width", &request.width},
-        std::pair{"height", &request.height}}) {
+        std::pair{"height", &request.height},
+        std::pair{"vblanks", &request.vblanks}}) {
     auto member = document.FindMember(key);
     if (member != document.MemberEnd()) {
       if (!member->value.IsInt64()) {
@@ -391,6 +396,12 @@ enum class Action {
   kVideoStart,
   // End this client's video stream, and reply with VideoStopReply.
   kVideoStop,
+  // Pause or resume the emulator, and reply with PauseReply.
+  kPause,
+  kResume,
+  // Run the paused emulator for vblanks, pause it again, then reply with
+  // PauseReply.
+  kAdvance,
 };
 
 struct Decision {
@@ -399,6 +410,7 @@ struct Decision {
   std::optional<hid::remote::Command> pad;
   FrameOptions frame_options;
   VideoOptions video_options;
+  uint64_t vblanks = 0;
 };
 
 class JsonLine {
@@ -523,7 +535,8 @@ inline Decision Decide(Session& session, const Request& request,
                      R"(["state","stop","subscribe","dialog_answer",)"
                      R"("pad_connect","pad_set","pad_queue","pad_clear",)"
                      R"("frame","frames_watch","bench_start","bench_stop",)"
-                     R"("video_start","video_stop"])")
+                     R"("video_start","video_stop","pause","resume",)"
+                     R"("advance"])")
                 .Raw("streams", R"(["telemetry","dialogs","input","audio"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
@@ -661,6 +674,26 @@ inline Decision Decide(Session& session, const Request& request,
       return {ErrorLine(request.id, "needs the controller role")};
     }
     return {JsonLine().Re(request.id).Bool("ok", true).Finish(), Action::kStop};
+  }
+  if (request.op == "pause" || request.op == "resume" ||
+      request.op == "advance") {
+    if (session.role != Role::kController) {
+      return {ErrorLine(request.id, "needs the controller role")};
+    }
+    if (request.op == "pause") {
+      return {"", Action::kPause};
+    }
+    if (request.op == "resume") {
+      return {"", Action::kResume};
+    }
+    if (!request.vblanks || *request.vblanks < 1 ||
+        *request.vblanks > kMaxAdvanceVblanks) {
+      return {ErrorLine(request.id, "vblanks must be from 1 to " +
+                                        std::to_string(kMaxAdvanceVblanks))};
+    }
+    Decision decision{"", Action::kAdvance};
+    decision.vblanks = uint64_t(*request.vblanks);
+    return decision;
   }
   return {ErrorLine(request.id, "unknown op")};
 }
@@ -1085,6 +1118,18 @@ inline std::optional<hid::remote::Command> ParsePadCommand(
 }
 
 // error: what RemotePads said, empty on success.
+// Whether the emulator is now paused, and the guest's vblank and swap counts.
+inline std::string PauseReply(std::string_view id, bool paused, uint64_t vblank,
+                              uint64_t swap) {
+  return JsonLine()
+      .Re(id)
+      .Bool("ok", true)
+      .Bool("paused", paused)
+      .Uint("vblank", vblank)
+      .Uint("swap", swap)
+      .Finish();
+}
+
 inline std::string PadReply(std::string_view id, std::string_view error) {
   return error.empty() ? JsonLine().Re(id).Bool("ok", true).Finish()
                        : ErrorLine(id, error);

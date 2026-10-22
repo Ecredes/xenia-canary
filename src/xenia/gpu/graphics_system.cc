@@ -175,6 +175,8 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             constexpr auto kMaxVblankCatchUp = std::chrono::seconds(1);
             (void)next_vblank_deadline;
             (void)kMaxVblankCatchUp;
+            // When vblank_count() reached the vblank limit, if it has.
+            steady_time_point limit_hold_since{};
     // Sleep for 90% of the vblank duration on Windows, spin for 10%
     // Linux uses full sleep duration due to scheduler quantum issues
 #if XE_PLATFORM_WIN32
@@ -192,9 +194,21 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 continue;
               }
 
-              // Frozen: a vblank would run the guest's interrupt callback and
-              // show it time passing.
-              if (vblanks_frozen_) {
+              // Frozen, or held at the vblank limit: a vblank would run the
+              // guest's interrupt callback and show it time passing.
+              const uint64_t limit = vblank_limit();
+              if (limit && vblank_count() >= limit) {
+                if (limit_hold_since == steady_time_point()) {
+                  limit_hold_since = std::chrono::steady_clock::now();
+                }
+              } else {
+                limit_hold_since = steady_time_point();
+              }
+              const bool held_at_limit =
+                  limit_hold_since != steady_time_point() &&
+                  std::chrono::steady_clock::now() - limit_hold_since <
+                      kVblankLimitGrace;
+              if (vblanks_frozen_ || held_at_limit) {
                 vblank_deadline_reset_ = true;
                 xe::threading::Sleep(std::chrono::milliseconds(1));
                 continue;

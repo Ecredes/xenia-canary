@@ -656,8 +656,9 @@ void AutomationChannel::ServerLoop() {
       }
       max_socket = std::max(max_socket, client->socket);
     }
-    timeval timeout = {
-        0, FramesBusy() ? kFramePollMicroseconds : kPollMicroseconds};
+    // An advance pauses as soon as its last vblank has passed.
+    timeval timeout = {0, FramesBusy() || advance_ ? kFramePollMicroseconds
+                                                   : kPollMicroseconds};
     if (select(int(max_socket + 1), &read_set, &write_set, nullptr, &timeout) <
         0) {
       // Interrupted; the next round starts over.
@@ -672,6 +673,7 @@ void AutomationChannel::ServerLoop() {
     ServiceFrames();
     ServiceVideo();
     ServiceAudio();
+    ServiceAdvance();
     for (auto it = clients_.begin(); it != clients_.end();) {
       Client& client = **it;
       bool alive = true;
@@ -690,6 +692,8 @@ void AutomationChannel::ServerLoop() {
         if (client.session.role == Role::kController) {
           // No one drives the pads any more: the guest sees them unplugged.
           pads_->Reset();
+          // Nor can anyone resume it: a run left paused would never go on.
+          ReleasePause();
         }
         CloseSocket(client.socket);
         it = clients_.erase(it);
@@ -872,7 +876,45 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
       client.out += VideoStopReply(parsed.request->id, video_->counts());
       video_.reset();
       break;
+    case Action::kPause:
+    case Action::kResume:
+    case Action::kAdvance: {
+      gpu::GraphicsSystem* graphics_system = emulator_.graphics_system();
+      if (!graphics_system) {
+        client.out += ErrorLine(parsed.request->id, "no title running");
+        break;
+      }
+      if (advance_) {
+        client.out += ErrorLine(parsed.request->id, "an advance is under way");
+        break;
+      }
+      if (decision.action == Action::kAdvance) {
+        if (!emulator_.is_paused()) {
+          client.out += ErrorLine(parsed.request->id, "not paused");
+          break;
+        }
+        // The vblank thread delivers exactly this many, then holds.
+        uint64_t target = graphics_system->vblank_count() + decision.vblanks;
+        graphics_system->set_vblank_limit(target);
+        advance_ = Advance{client.id, parsed.request->id, target};
+        emulator_.Resume();
+        break;
+      }
+      if (decision.action == Action::kPause) {
+        emulator_.Pause();
+        paused_by_client_ = true;
+      } else {
+        emulator_.Resume();
+        paused_by_client_ = false;
+      }
+      client.out += PauseReply(parsed.request->id, emulator_.is_paused(),
+                               graphics_system->vblank_count(),
+                               graphics_system->swap_count());
+      break;
+    }
     case Action::kStop:
+      // Suspended guest threads would hold the shutdown up.
+      ReleasePause();
       stopping_ = true;
       controller_answers_ = false;
       for (const auto& other : clients_) {
@@ -1152,6 +1194,41 @@ void AutomationChannel::ServiceVideo() {
         telemetry::FinishNow(VideoEndEvent(reason, video_->counts())) + "\n";
     video_.reset();
   }
+}
+
+void AutomationChannel::ServiceAdvance() {
+  if (!advance_) {
+    return;
+  }
+  gpu::GraphicsSystem* graphics_system = emulator_.graphics_system();
+  if (!graphics_system || graphics_system->vblank_count() < advance_->target) {
+    return;
+  }
+  // No vblank comes past the limit, so the guest is still in the last one.
+  emulator_.Pause();
+  graphics_system->set_vblank_limit(0);
+  paused_by_client_ = true;
+  auto client =
+      std::find_if(clients_.begin(), clients_.end(),
+                   [this](const auto& c) { return c->id == advance_->client; });
+  if (client != clients_.end() && !(*client)->closing) {
+    (*client)->out +=
+        PauseReply(advance_->re, true, graphics_system->vblank_count(),
+                   graphics_system->swap_count());
+  }
+  advance_.reset();
+}
+
+void AutomationChannel::ReleasePause() {
+  gpu::GraphicsSystem* graphics_system = emulator_.graphics_system();
+  if (advance_ && graphics_system) {
+    graphics_system->set_vblank_limit(0);
+  }
+  if ((paused_by_client_ || advance_) && emulator_.is_paused()) {
+    emulator_.Resume();
+  }
+  advance_.reset();
+  paused_by_client_ = false;
 }
 
 void AutomationChannel::Stop() {

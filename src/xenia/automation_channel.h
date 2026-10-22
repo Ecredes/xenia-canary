@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -151,6 +152,10 @@ class AutomationChannel : public AnswerSource {
   void ServiceVideo();
   // A watch or a capture needs the loop to come round sooner.
   bool FramesBusy() const;
+  // Pauses again once an advance's vblanks have passed, and replies.
+  void ServiceAdvance();
+  // Undoes the controller's pause and any advance, when it goes or stops.
+  void ReleasePause();
   void Stop();
 
   SocketHandle listen_socket_;
@@ -176,6 +181,15 @@ class AutomationChannel : public AnswerSource {
   std::vector<FrameRecipient> frame_recipients_;
   // The capture's encodings, as the worker returns them.
   std::vector<FrameOptions> frame_encodings_;
+  // The controller paused the emulator (pause or advance).
+  bool paused_by_client_ = false;
+  // An advance under way: whose, and the vblank count it ends at.
+  struct Advance {
+    uint64_t client;
+    std::string re;
+    uint64_t target;
+  };
+  std::optional<Advance> advance_;
   bool stopping_ = false;
   std::atomic<bool> running_{true};
 

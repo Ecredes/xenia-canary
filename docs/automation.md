@@ -76,6 +76,9 @@ At most 8 connections are open at once.
 | `video_stop` | the client that started it | `ok` with `frames`, `captures` and `dropped`, or `no video streaming` |
 | `bench_start` | any | `ok`; starts gathering frame times for this client, restarting any bench it had |
 | `bench_stop` {`raw`} | any | the bench's summary, as below, or `no bench running` |
+| `pause` | controller | `ok` with `paused`, `vblank` and `swap`; the emulator pauses, as below |
+| `resume` | controller | `ok` with `paused`, `vblank` and `swap`; the emulator runs again |
+| `advance` {`vblanks`} | controller | when the emulator is paused: runs it for `vblanks` vblanks (1 to 3600), pauses it again, then `ok` with `paused`, `vblank` and `swap`; `not paused` otherwise |
 | `stop` | controller | `ok`; then every client gets an `exit` event and the process ends |
 
 An unknown op is answered with an error; the connection stays open.
@@ -149,6 +152,35 @@ each queued state, `user`, `input` (its number from `pad_queue`) and
 | `pad_begin` | it became visible to the guest |
 | `pad_seen` | the guest first read it |
 | `pad_end` | it stopped being visible |
+
+### Pause and advance
+
+`pause` is Xenia's own emulator pause, the one its debugger uses, not the
+title's pause menu: guest threads are suspended where they are, the GPU and
+audio stop, and nothing is saved (it is not a save state). While paused:
+
+- guest time stands still: the guest clock gains nothing, so on `resume` the
+  title doesn't see the pause as elapsed time;
+- no vblanks are delivered, and queued pad states wait;
+- frames, the video stream and telemetry still work: the picture is the last
+  one the title drew, and telemetry's state is `paused`.
+
+`advance` runs a paused emulator for an exact number of vblanks, then pauses
+it again: the vblank thread holds the next vblank back at the target, so the
+guest gets exactly `vblanks` of them, and it may still finish the work of the
+last one before the pause lands, a few milliseconds later. If pausing takes
+longer than 100 ms (it can wait on work that needs a vblank), the held vblank
+is delivered after all; the reply's `vblank` is the count the pause landed at.
+Queue pad states first to hold them over the advance. Advancing is exact in
+guest vblanks, not deterministic: guest threads are still scheduled by the
+host, so the same inputs from the same point need not give the same result.
+
+The pause belongs to the controller: when it disconnects or stops the run,
+an advance under way is dropped and the emulator resumes. While an advance is
+under way, `pause`, `resume` and another `advance` are refused.
+
+With `clock_no_scaling`, guest time is host time and keeps running while
+paused.
 
 ### Audio
 
