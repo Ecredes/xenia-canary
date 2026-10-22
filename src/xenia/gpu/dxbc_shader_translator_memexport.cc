@@ -656,10 +656,12 @@ void DxbcShaderTranslator::ExportToMemory(uint8_t export_eM) {
   a_.OpIf(true, dxbc::Src::R(temp, dxbc::Src::kWWWW));
 
   // Extract the base address to temp.w as bytes (30 lower bits to 30 upper bits
-  // with 0 below).
+  // with 0 below), masked to physical like the vertex fetch address.
   a_.OpIShL(dxbc::Dest::R(temp, 0b1000),
             dxbc::Src::R(system_temp_memexport_address_, dxbc::Src::kXXXX),
             dxbc::Src::LU(2));
+  a_.OpAnd(dxbc::Dest::R(temp, 0b1000), dxbc::Src::R(temp, dxbc::Src::kWWWW),
+           dxbc::Src::LU(0x1FFFFFFC));
   dxbc::Src base_address_src(dxbc::Src::R(temp, dxbc::Src::kWWWW));
 
   uint8_t export_eM14 = export_eM >> 1;
