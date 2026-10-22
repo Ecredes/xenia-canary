@@ -48,6 +48,9 @@ struct Waiter {
   // The serial of the shell it is registered with, 0 for none (a host thread
   // may outlive a shell, and a later one may get its address).
   uint64_t shell = 0;
+  // Timer routines queued to it and not yet run, oldest first (under the
+  // dispatcher lock).
+  std::vector<TimerApc> timer_apcs;
 };
 
 // The imperative shell around the dispatcher core: the lock, guest header
@@ -111,6 +114,10 @@ class Shell {
     ApplyLocked(signal(core_, waiter.id), unparks);
     return WaitLocked(waiter, request, lock, unparks);
   }
+
+  // The timer routines queued to waiter that it hasn't run yet, oldest
+  // first; clears them.
+  std::vector<TimerApc> TakeTimerApcs(Waiter& waiter);
 
   // Guest suspension of target, from any thread; returns the previous count.
   // A target in a wait stays parked and the core holds the wait; one that is

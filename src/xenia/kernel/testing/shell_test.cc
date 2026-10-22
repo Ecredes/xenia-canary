@@ -143,6 +143,47 @@ TEST_CASE("A thread that suspends itself returns once resumed",
   REQUIRE(returned);
 }
 
+TEST_CASE("A timer routine reaches its waiter and ends its alertable wait",
+          "[dispatch][shell]") {
+  Shell shell;
+  auto [timer, event] = shell.Read([](Dispatcher& core) {
+    return std::make_pair(core.NewTimer(true), core.NewEvent(false, false));
+  });
+  std::atomic<Waiter*> target{nullptr};
+  std::atomic<uint32_t> status{0xFFFFFFFF};
+  // Taken on the thread: a host thread's waiter goes with it.
+  std::vector<TimerApc> apcs, again;
+  ThreadId id = kNoThread;
+  std::thread waiter([&, timer = timer, event = event] {
+    Waiter& mine = shell.CurrentWaiter();
+    shell.Run([&](Dispatcher& core) {
+      return core.SetTimer(timer, Shell::GuestNow(), 0,
+                           TimerRoutine{mine.id, 0x82000000, 7});
+    });
+    target = &mine;
+    WaitRequest request;
+    request.objects = {event};
+    request.alertable = true;
+    id = mine.id;
+    status = shell.Wait(request);
+    apcs = shell.TakeTimerApcs(mine);
+    again = shell.TakeTimerApcs(mine);
+  });
+  while (!target) {
+    std::this_thread::yield();
+  }
+  AwaitWaiting(shell, target.load()->id);
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  shell.Run([](Dispatcher& core) { return core.Tick(Shell::GuestNow()); });
+  waiter.join();
+  REQUIRE(status == kStatusUserApc);
+  REQUIRE(apcs.size() == 1);
+  REQUIRE(apcs[0].thread == id);
+  REQUIRE(apcs[0].routine == 0x82000000);
+  REQUIRE(apcs[0].argument == 7);
+  REQUIRE(again.empty());
+}
+
 }  // namespace test
 }  // namespace dispatch
 }  // namespace kernel

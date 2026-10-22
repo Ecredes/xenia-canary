@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <utility>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -109,6 +110,12 @@ void Shell::ApplyLocked(const Effects& effects, Unparks& unparks) {
       object->second->WriteSignalState(write.signal_state);
     }
   }
+  for (const TimerApc& apc : effects.timer_apcs) {
+    auto waiter = waiters_.find(apc.thread);
+    if (waiter != waiters_.end()) {
+      waiter->second->timer_apcs.push_back(apc);
+    }
+  }
   for (const Wake& wake : effects.wakes) {
     auto waiter = waiters_.find(wake.thread);
     if (waiter == waiters_.end()) {
@@ -190,6 +197,11 @@ uint32_t Shell::ParkLocked(Waiter& waiter, const WaitResult& result,
       return waiter.status.load(std::memory_order_relaxed);
     }
   }
+}
+
+std::vector<TimerApc> Shell::TakeTimerApcs(Waiter& waiter) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return std::exchange(waiter.timer_apcs, {});
 }
 
 uint32_t Shell::Suspend(Waiter& target, bool* exceeded) {
