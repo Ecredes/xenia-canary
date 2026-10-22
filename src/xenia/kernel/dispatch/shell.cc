@@ -16,7 +16,6 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/kernel/xobject.h"
-#include "xenia/kernel/xthread.h"
 
 namespace xe {
 namespace kernel {
@@ -30,7 +29,11 @@ constexpr int64_t kMaxParkMs = 1000;
 
 }  // namespace
 
-Shell::Shell() = default;
+Shell::Shell()
+    : serial_([] {
+        static std::atomic<uint64_t> next_serial{1};
+        return next_serial++;
+      }()) {}
 
 Shell::~Shell() = default;
 
@@ -47,38 +50,43 @@ void Shell::Destroy(ObjectId id) {
 
 void Shell::AddWaiter(Waiter& waiter) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (waiter.shell == this) {
+  if (waiter.shell == serial_) {
     return;
   }
   if (!waiter.park) {
     waiter.park = xe::threading::Event::CreateAutoResetEvent(false);
   }
   waiter.id = core_.NewThread();
-  waiter.shell = this;
+  waiter.shell = serial_;
   waiters_[waiter.id] = &waiter;
 }
 
 void Shell::RemoveWaiter(Waiter& waiter) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (waiter.shell != this) {
+  if (waiter.shell != serial_) {
     return;
   }
   waiters_.erase(waiter.id);
   core_.DestroyThread(waiter.id);
-  waiter.shell = nullptr;
+  waiter.shell = 0;
   waiter.id = kNoThread;
 }
 
 Waiter& Shell::CurrentWaiter() {
-  if (XThread* thread = XThread::TryGetCurrentThread()) {
-    Waiter& waiter = thread->waiter();
-    AddWaiter(waiter);
-    return waiter;
+  // waiter.shell is written only before the thread starts or by the thread
+  // itself, so it can be read without the lock.
+  if (Waiter* waiter = waiter_source_ ? waiter_source_() : nullptr) {
+    if (waiter->shell != serial_) {
+      AddWaiter(*waiter);
+    }
+    return *waiter;
   }
   // A host thread that isn't an XThread (the UI, a worker) waiting on a
   // guest object. Its waiter lives as long as the thread.
   thread_local Waiter host_waiter;
-  AddWaiter(host_waiter);
+  if (host_waiter.shell != serial_) {
+    AddWaiter(host_waiter);
+  }
   return host_waiter;
 }
 
@@ -88,7 +96,13 @@ const XThread* Shell::ThreadOf(ThreadId id) {
   return waiter != waiters_.end() ? waiter->second->thread : nullptr;
 }
 
-void Shell::ApplyLocked(const Effects& effects) {
+void Shell::Unpark(const Unparks& unparks) {
+  for (const auto& park : unparks) {
+    park->Set();
+  }
+}
+
+void Shell::ApplyLocked(const Effects& effects, Unparks& unparks) {
   for (const SignalWrite& write : effects.writes) {
     auto object = objects_.find(write.object);
     if (object != objects_.end()) {
@@ -100,22 +114,30 @@ void Shell::ApplyLocked(const Effects& effects) {
     if (waiter == waiters_.end()) {
       continue;
     }
-    waiter->second->status = wake.status;
-    waiter->second->park->Set();
+    waiter->second->status.store(wake.status, std::memory_order_relaxed);
+    waiter->second->woken.store(true, std::memory_order_release);
+    unparks.push_back(waiter->second->park);
   }
 }
 
 uint32_t Shell::Wait(const WaitRequest& request) {
   Waiter& waiter = CurrentWaiter();
+  Unparks unparks;
   std::unique_lock<std::mutex> lock(mutex_);
-  return WaitLocked(waiter, request, lock);
+  return WaitLocked(waiter, request, lock, unparks);
 }
 
 uint32_t Shell::WaitLocked(Waiter& waiter, const WaitRequest& request,
-                           std::unique_lock<std::mutex>& lock) {
+                           std::unique_lock<std::mutex>& lock,
+                           Unparks& unparks) {
+  // A set left over from an earlier wait's waker; the flag is the truth.
+  waiter.park->Reset();
+  waiter.woken.store(false, std::memory_order_relaxed);
   WaitResult result = core_.BeginWait(waiter.id, request, GuestNow());
-  ApplyLocked(result.effects);
+  ApplyLocked(result.effects, unparks);
   if (!result.blocked) {
+    lock.unlock();
+    Unpark(unparks);
     return result.status;
   }
   while (true) {
@@ -131,17 +153,22 @@ uint32_t Shell::WaitLocked(Waiter& waiter, const WaitRequest& request,
           std::clamp<int64_t>(int64_t(std::ceil(remaining_ms)), 1, kMaxParkMs));
     }
     lock.unlock();
+    Unpark(unparks);
+    unparks.clear();
     // Not alertable: guest APCs come through the core, as a wake.
     xe::threading::Wait(waiter.park.get(), false, timeout);
-    lock.lock();
-    std::optional<ThreadInfo> info = core_.QueryThread(waiter.id);
-    if (!info || !info->waiting) {
-      // Satisfied, timed out or ended by an APC: the waker left the status.
-      waiter.park->Reset();
-      return waiter.status;
+    if (waiter.woken.load(std::memory_order_acquire)) {
+      return waiter.status.load(std::memory_order_relaxed);
     }
-    if (request.deadline && GuestNow() >= *request.deadline) {
-      ApplyLocked(core_.Expire(GuestNow()));
+    lock.lock();
+    if (!waiter.woken.load(std::memory_order_relaxed) && request.deadline &&
+        GuestNow() >= *request.deadline) {
+      ApplyLocked(core_.Expire(GuestNow()), unparks);
+    }
+    if (waiter.woken.load(std::memory_order_relaxed)) {
+      lock.unlock();
+      Unpark(unparks);
+      return waiter.status.load(std::memory_order_relaxed);
     }
   }
 }

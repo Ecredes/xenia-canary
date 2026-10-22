@@ -60,6 +60,10 @@ KernelState::KernelState(Emulator* emulator)
       kernel_trampoline_group_(emulator->processor()->backend()) {
   assert_null(shared_kernel_state_);
   shared_kernel_state_ = this;
+  dispatch_->set_waiter_source([]() -> dispatch::Waiter* {
+    XThread* thread = XThread::TryGetCurrentThread();
+    return thread ? &thread->waiter() : nullptr;
+  });
   processor_ = emulator->processor();
   file_system_ = emulator->file_system();
   xam_state_ = std::make_unique<xam::XamState>(emulator, this);

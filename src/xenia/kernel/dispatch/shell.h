@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include "xenia/base/threading.h"
 #include "xenia/kernel/dispatch/dispatcher.h"
@@ -27,16 +28,20 @@ class XThread;
 namespace dispatch {
 
 // A host thread that waits on guest objects: its dispatcher thread, and the
-// one primitive it parks on. A park means only "the core has decided"; the
-// outcome is in status.
+// one primitive it parks on. The core's decision is woken and status; the
+// park only hurries the waiter to look, and may also fire spuriously.
 struct Waiter {
   ThreadId id = kNoThread;
-  std::unique_ptr<xe::threading::Event> park;
+  // Shared, so a waker can set it after the lock is gone.
+  std::shared_ptr<xe::threading::Event> park;
   std::atomic<uint32_t> status{kStatusWait0};
+  // Set (after status) when the core ends the current wait.
+  std::atomic<bool> woken{false};
   // The XThread it belongs to; null for a host thread.
   XThread* thread = nullptr;
-  // The shell it is registered with (a host thread may outlive one).
-  const void* shell = nullptr;
+  // The serial of the shell it is registered with, 0 for none (a host thread
+  // may outlive a shell, and a later one may get its address).
+  uint64_t shell = 0;
 };
 
 // The imperative shell around the dispatcher core: the lock, guest header
@@ -55,8 +60,12 @@ class Shell {
   // returns Effects.
   template <typename Op>
   void Run(Op&& op) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    ApplyLocked(op(core_));
+    Unparks unparks;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ApplyLocked(op(core_), unparks);
+    }
+    Unpark(unparks);
   }
   // Runs op on the core with the lock held, for queries and creation.
   template <typename Op>
@@ -73,8 +82,13 @@ class Shell {
   // Registers waiter with the core (once per shell).
   void AddWaiter(Waiter& waiter);
   void RemoveWaiter(Waiter& waiter);
-  // The calling thread's waiter: its XThread's, or one for this host thread.
+  // The calling thread's waiter: the source's (an XThread's), or else one
+  // for this host thread.
   Waiter& CurrentWaiter();
+  // Where CurrentWaiter finds a guest thread's waiter; null when the calling
+  // thread has none of its own.
+  using WaiterSource = Waiter* (*)();
+  void set_waiter_source(WaiterSource source) { waiter_source_ = source; }
   // The XThread a core thread belongs to, or null. Compare, don't
   // dereference: it may be gone by the time it is read.
   const XThread* ThreadOf(ThreadId id);
@@ -86,9 +100,10 @@ class Shell {
   template <typename Signal>
   uint32_t SignalAndWait(Signal&& signal, const WaitRequest& request) {
     Waiter& waiter = CurrentWaiter();
+    Unparks unparks;
     std::unique_lock<std::mutex> lock(mutex_);
-    ApplyLocked(signal(core_, waiter.id));
-    return WaitLocked(waiter, request, lock);
+    ApplyLocked(signal(core_, waiter.id), unparks);
+    return WaitLocked(waiter, request, lock, unparks);
   }
 
   // Guest system time, 100 ns units: the clock deadlines run on.
@@ -99,10 +114,18 @@ class Shell {
       const uint64_t* opt_timeout);
 
  private:
-  void ApplyLocked(const Effects& effects);
-  uint32_t WaitLocked(Waiter& waiter, const WaitRequest& request,
-                      std::unique_lock<std::mutex>& lock);
+  // Parks to set once the lock is released: a woken thread's first act is
+  // to look at its outcome, and it shouldn't find the lock still held.
+  using Unparks = std::vector<std::shared_ptr<xe::threading::Event>>;
+  static void Unpark(const Unparks& unparks);
 
+  void ApplyLocked(const Effects& effects, Unparks& unparks);
+  // Releases lock before returning.
+  uint32_t WaitLocked(Waiter& waiter, const WaitRequest& request,
+                      std::unique_lock<std::mutex>& lock, Unparks& unparks);
+
+  const uint64_t serial_;
+  WaiterSource waiter_source_ = nullptr;
   std::mutex mutex_;
   Dispatcher core_;
   std::unordered_map<ObjectId, XObject*> objects_;
