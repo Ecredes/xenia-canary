@@ -407,6 +407,12 @@ X_STATUS XThread::Create() {
 
   // Initialize the KTHREAD object.
   InitializeGuestObject();
+  waiter_.suspend_count = &guest_object<X_KTHREAD>()->suspend_count;
+  if (creation_params_.creation_flags & X_CREATE_SUSPENDED) {
+    shell->Run([this](dispatch::Dispatcher& core) {
+      return core.Suspend(waiter_.id);
+    });
+  }
 
   X_KPCR* pcr = memory()->TranslateVirtual<X_KPCR*>(pcr_address_);
 
@@ -438,10 +444,11 @@ X_STATUS XThread::Create() {
     // Profiler needs to know about the thread.
     xe::Profiler::ThreadEnter(thread_name_.c_str());
 
-    // Execute user code.
+    // Execute user code, once resumed if it was created suspended.
     current_xthread_tls_ = this;
     current_thread_ = this;
     cpu::ThreadState::Bind(this->thread_state());
+    kernel_state()->dispatch()->Hold();
     running_ = true;
     Execute();
     running_ = false;
@@ -476,10 +483,10 @@ X_STATUS XThread::Create() {
   // Notify processor of our creation.
   emulator()->processor()->OnThreadCreated(handle(), thread_state_, this);
 
-  if ((creation_params_.creation_flags & X_CREATE_SUSPENDED) == 0) {
-    // Start the thread now that we're all setup.
-    thread_->Resume();
-  }
+  // Start the thread now that we're all setup; created suspended, it holds
+  // in the dispatcher before running guest code.
+  waiter_.host = thread_.get();
+  thread_->Resume();
 
   return X_STATUS_SUCCESS;
 }
@@ -934,85 +941,21 @@ uint32_t XThread::start_address() {
 }
 
 X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
-  auto guest_thread = guest_object<X_KTHREAD>();
-  uint32_t unused_host_suspend_count = 0;
-
-#if XE_PLATFORM_WIN32
-  uint8_t previous_suspend_count =
-      reinterpret_cast<std::atomic_uint8_t*>(&guest_thread->suspend_count)
-          ->fetch_sub(1);
+  uint32_t previous = kernel_state()->dispatch()->Resume(waiter_);
   if (out_suspend_count) {
-    *out_suspend_count = previous_suspend_count;
-  }
-
-  if (thread_->Resume(&unused_host_suspend_count)) {
-    return X_STATUS_SUCCESS;
-  } else {
-    return X_STATUS_UNSUCCESSFUL;
-  }
-#else
-  // Use mutex to protect suspend_count access and coordinate with SelfSuspend.
-  bool should_resume_host = false;
-  {
-    std::lock_guard<std::mutex> lock(suspend_mutex_);
-    uint8_t previous = guest_thread->suspend_count;
-    if (previous > 0) {
-      guest_thread->suspend_count--;
-    }
-    if (out_suspend_count) {
-      *out_suspend_count = previous;
-    }
-    should_resume_host = (guest_thread->suspend_count == 0);
-    suspend_cv_.notify_all();
-  }
-
-  // Try to resume host thread if fully resumed (for non-self-suspended case).
-  if (should_resume_host) {
-    thread_->Resume(&unused_host_suspend_count);
+    *out_suspend_count = previous;
   }
   return X_STATUS_SUCCESS;
-#endif
 }
 
 X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
-  // this normally holds the apc lock for the thread, because it queues a kernel
-  // mode apc that does the actual suspension
-
-  X_KTHREAD* guest_thread = guest_object<X_KTHREAD>();
-
-  uint8_t previous_suspend_count =
-      reinterpret_cast<std::atomic_uint8_t*>(&guest_thread->suspend_count)
-          ->fetch_add(1);
+  bool exceeded = false;
+  uint32_t previous = kernel_state()->dispatch()->Suspend(waiter_, &exceeded);
   if (out_suspend_count) {
-    *out_suspend_count = previous_suspend_count;
+    *out_suspend_count = previous;
   }
-  // If we are suspending ourselves, we can't hold the lock.
-  uint32_t unused_host_suspend_count = 0;
-
-  // If we had suspend count wrap around and go back to 0 then thread is not
-  // suspended.
-  if (guest_thread->suspend_count == 0) {
-    return X_STATUS_SUCCESS;
-  }
-
-  if (thread_->Suspend(&unused_host_suspend_count)) {
-    return X_STATUS_SUCCESS;
-  } else {
-    return X_STATUS_UNSUCCESSFUL;
-  }
+  return exceeded ? X_STATUS_SUSPEND_COUNT_EXCEEDED : X_STATUS_SUCCESS;
 }
-
-#if !XE_PLATFORM_WIN32
-uint32_t XThread::SelfSuspend() {
-  auto guest_thread = guest_object<X_KTHREAD>();
-  std::unique_lock<std::mutex> lock(suspend_mutex_);
-  uint32_t previous = guest_thread->suspend_count;
-  guest_thread->suspend_count++;
-  suspend_cv_.wait(
-      lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
-  return previous;
-}
-#endif  // !XE_PLATFORM_WIN32
 
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
                         uint64_t interval) {
@@ -1186,6 +1129,14 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       kernel_state->dispatch()->Read([thread](dispatch::Dispatcher& core) {
         return core.NewThreadObject(thread->waiter_.id);
       }));
+  // The saved guest count is the dispatcher's.
+  uint8_t* suspend_count = &thread->guest_object<X_KTHREAD>()->suspend_count;
+  thread->waiter_.suspend_count = suspend_count;
+  for (uint8_t i = 0; i < *suspend_count; ++i) {
+    kernel_state->dispatch()->Run([thread](dispatch::Dispatcher& core) {
+      return core.Suspend(thread->waiter_.id);
+    });
+  }
 
   thread->thread_state_ =
       new cpu::ThreadState(kernel_state->processor(), thread->thread_id_,
@@ -1240,7 +1191,8 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       }
       thread->pending_mutant_acquires_.clear();
 
-      // Execute user code.
+      // Execute user code, once resumed if it was saved suspended.
+      thread->kernel_state_->dispatch()->Hold();
       thread->running_ = true;
 
       uint32_t pc = state.context.pc;
@@ -1255,6 +1207,7 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       thread->ReleaseHandle();
     });
     assert_not_null(thread->thread_);
+    thread->waiter_.host = thread->thread_.get();
 
     // Notify processor we were recreated.
     thread->emulator()->processor()->OnThreadCreated(

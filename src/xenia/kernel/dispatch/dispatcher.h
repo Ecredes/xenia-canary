@@ -45,6 +45,9 @@ constexpr uint32_t kStatusTimeout = 0x00000102;
 // At most this many objects in one wait, as the guest kernel allows.
 constexpr size_t kMaxWaitObjects = 64;
 
+// The highest suspend count (MAXIMUM_SUSPEND_COUNT in the public WDK headers).
+constexpr uint32_t kMaxSuspendCount = 0x7F;
+
 enum class ObjectKind : uint8_t {
   // Set wakes every waiter and stays set until reset.
   kNotificationEvent,
@@ -114,6 +117,9 @@ struct ThreadInfo {
   std::optional<uint64_t> deadline;
   bool alertable;
   bool user_apc_pending;
+  uint32_t suspend_count;
+  // Waiting, but set aside while suspended: out of every waiter queue.
+  bool held;
 };
 
 class Dispatcher {
@@ -151,7 +157,8 @@ class Dispatcher {
   Effects SetSignalState(ObjectId object, int32_t signal_state);
 
   // Waits. A thread waits on at most one request at a time. now is the
-  // guest system time, for a deadline that has passed already.
+  // guest system time, for a deadline that has passed already. A suspended
+  // thread's wait begins held.
   WaitResult BeginWait(ThreadId thread, const WaitRequest& request,
                        uint64_t now);
   // Wakes every thread whose deadline is at or before now with a timeout.
@@ -164,6 +171,19 @@ class Dispatcher {
   // once. UserApcsDelivered clears it once the shell has run them.
   Effects QueueUserApc(ThreadId thread);
   void UserApcsDelivered(ThreadId thread);
+
+  // The guest suspend count. A suspended thread doesn't run: a wait it is in
+  // is held (it takes no signal, doesn't time out and no APC ends it), and
+  // the last Resume puts it back at the end of its queues, so it then ends
+  // as it would have begun at that moment. Suspend past kMaxSuspendCount
+  // changes nothing and sets *exceeded. previous gets the count before.
+  Effects Suspend(ThreadId thread, uint32_t* previous = nullptr,
+                  bool* exceeded = nullptr);
+  Effects Resume(ThreadId thread, uint64_t now, uint32_t* previous = nullptr);
+  // Where a suspended thread that isn't in a wait stops: blocked until the
+  // last Resume, which wakes it with kStatusWait0. Doesn't block when the
+  // thread isn't suspended.
+  WaitResult BeginHold(ThreadId thread);
 
   // The thread ended: its thread object is signaled, and each mutant it owns
   // is released and marked abandoned. A wait it was in is dropped.
@@ -190,6 +210,10 @@ class Dispatcher {
     std::optional<uint64_t> deadline;
     bool alertable = false;
     bool user_apc_pending = false;
+    uint32_t suspend_count = 0;
+    bool held = false;
+    // In BeginHold's wait rather than the guest's.
+    bool holding = false;
   };
 
   ObjectId AddObject(Object object);
@@ -202,6 +226,13 @@ class Dispatcher {
   // consuming what it takes.
   std::optional<uint32_t> TrySatisfy(ThreadId id, Thread& thread,
                                      Effects& effects);
+  // How the thread's request ends now without blocking, if it does: a pending
+  // user APC, satisfied, or past its deadline.
+  std::optional<uint32_t> TryFinish(ThreadId id, Thread& thread, uint64_t now,
+                                    Effects& effects);
+  // Joins (or leaves) the waiter queues of the thread's objects.
+  void Enqueue(ThreadId id, const Thread& thread);
+  void Dequeue(ThreadId id, const Thread& thread);
   // Satisfies the waiters of object that can be, in queue order.
   void WakeWaiters(ObjectId object, Effects& effects);
   void EndWait(ThreadId id, Thread& thread, uint32_t status, Effects& effects);

@@ -238,17 +238,15 @@ dword_result_t NtResumeThread_entry(dword_t handle,
 }
 DECLARE_XBOXKRNL_EXPORT1(NtResumeThread, kThreading, kImplemented);
 
+// Returns the previous suspend count, as KeSuspendThread does.
 dword_result_t KeResumeThread_entry(pointer_t<X_KTHREAD> thread_ptr) {
-  X_STATUS result = X_STATUS_SUCCESS;
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr,
                                                   ThreadObject);
+  uint32_t previous = 0;
   if (thread) {
-    result = thread->Resume();
-  } else {
-    result = X_STATUS_INVALID_HANDLE;
+    thread->Resume(&previous);
   }
-
-  return result;
+  return previous;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeResumeThread, kThreading, kImplemented);
 
@@ -263,31 +261,14 @@ dword_result_t NtSuspendThread_entry(dword_t handle,
     if (thread->type() == XObject::Type::Thread) {
       auto current_pcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
 
-#if XE_PLATFORM_WIN32
+      // A thread may suspend itself (returning once resumed) even while it
+      // terminates; another thread may not.
       if (current_pcr->prcb_data.current_thread == thread->guest_object() ||
           !thread->guest_object<X_KTHREAD>()->terminated) {
         result = thread->Suspend(&suspend_count);
       } else {
         return X_STATUS_THREAD_IS_TERMINATING;
       }
-#else
-      // Handle self-suspension specially to avoid deadlock.
-      if (!thread->guest_object<X_KTHREAD>()->terminated) {
-        bool is_self_suspend =
-            (current_pcr->prcb_data.current_thread == thread->guest_object());
-
-        if (is_self_suspend) {
-          XELOGD("Thread {:X} self-suspending", thread->handle());
-          suspend_count = thread->SelfSuspend();
-          result = X_STATUS_SUCCESS;
-          XELOGD("Thread {:X} resumed", thread->handle());
-        } else {
-          result = thread->Suspend(&suspend_count);
-        }
-      } else {
-        return X_STATUS_THREAD_IS_TERMINATING;
-      }
-#endif
     } else {
       return X_STATUS_OBJECT_TYPE_MISMATCH;
     }
@@ -310,10 +291,7 @@ dword_result_t KeSuspendThread_entry(pointer_t<X_KTHREAD> kthread,
   uint32_t suspend_count_out = 0;
 
   if (thread) {
-    suspend_count_out = thread->suspend_count();
-
-    uint32_t discarded_new_suspend_count = 0;
-    thread->Suspend(&discarded_new_suspend_count);
+    thread->Suspend(&suspend_count_out);
   }
 
   return suspend_count_out;

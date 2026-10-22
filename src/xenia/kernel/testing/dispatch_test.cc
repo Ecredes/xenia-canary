@@ -294,6 +294,85 @@ TEST_CASE("A guest write to a header is read back in", "[dispatch]") {
   REQUIRE(State(d, event) == 0);
 }
 
+TEST_CASE("A suspended waiter takes no signal until resumed", "[dispatch]") {
+  Dispatcher d;
+  ObjectId event = d.NewEvent(false, false);
+  ThreadId a = d.NewThread(), b = d.NewThread(), c = d.NewThread();
+  d.BeginWait(a, Wait({event}), 0);
+  d.BeginWait(b, Wait({event}), 0);
+  uint32_t previous = 99;
+  d.Suspend(a, &previous);
+  REQUIRE(previous == 0);
+  REQUIRE(Thread(d, a).held);
+  // The set goes past a to b.
+  REQUIRE(d.SetEvent(event).wakes == std::vector<Wake>{{b, kStatusWait0}});
+  d.BeginWait(c, Wait({event}), 0);
+  // Resumed, a waits again behind c.
+  REQUIRE(d.Resume(a, 0, &previous).wakes.empty());
+  REQUIRE(previous == 1);
+  REQUIRE(d.SetEvent(event).wakes == std::vector<Wake>{{c, kStatusWait0}});
+  REQUIRE(d.SetEvent(event).wakes == std::vector<Wake>{{a, kStatusWait0}});
+}
+
+TEST_CASE("Resume ends a held wait as it would begin then", "[dispatch]") {
+  Dispatcher d;
+  ObjectId event = d.NewEvent(true, false);
+  ThreadId a = d.NewThread(), b = d.NewThread(), c = d.NewThread();
+  d.BeginWait(a, Wait({event}), 0);
+  d.BeginWait(b, Wait({event}, WaitType::kAny, 100), 0);
+  d.BeginWait(c, Wait({event}, WaitType::kAny, std::nullopt, true), 0);
+  d.Suspend(a);
+  d.Suspend(b);
+  d.Suspend(c);
+  // Held: no wake from a signal, a deadline or an APC.
+  REQUIRE(d.SetEvent(event).wakes.empty());
+  REQUIRE(d.Expire(200).wakes.empty());
+  REQUIRE(!d.NextDeadline());
+  REQUIRE(d.QueueUserApc(c).wakes.empty());
+  REQUIRE(d.Resume(a, 200).wakes == std::vector<Wake>{{a, kStatusWait0}});
+  d.ResetEvent(event);
+  REQUIRE(d.Resume(b, 200).wakes == std::vector<Wake>{{b, kStatusTimeout}});
+  REQUIRE(d.Resume(c, 200).wakes == std::vector<Wake>{{c, kStatusUserApc}});
+}
+
+TEST_CASE("Suspension counts, and only the last resume counts", "[dispatch]") {
+  Dispatcher d;
+  ObjectId event = d.NewEvent(true, true);
+  ThreadId a = d.NewThread();
+  for (uint32_t i = 0; i < kMaxSuspendCount; ++i) {
+    d.Suspend(a);
+  }
+  bool exceeded = false;
+  uint32_t previous = 0;
+  d.Suspend(a, &previous, &exceeded);
+  REQUIRE(exceeded);
+  REQUIRE(previous == kMaxSuspendCount);
+  // A suspended thread's wait begins held, though the event is set.
+  REQUIRE(d.BeginWait(a, Wait({event}), 0).blocked);
+  for (uint32_t i = 1; i < kMaxSuspendCount; ++i) {
+    REQUIRE(d.Resume(a, 0).wakes.empty());
+  }
+  REQUIRE(d.Resume(a, 0).wakes == std::vector<Wake>{{a, kStatusWait0}});
+  // Resuming a thread that isn't suspended changes nothing.
+  REQUIRE(d.Resume(a, 0, &previous).wakes.empty());
+  REQUIRE(previous == 0);
+  REQUIRE(Thread(d, a).suspend_count == 0);
+}
+
+TEST_CASE("A hold blocks a suspended thread until the last resume",
+          "[dispatch]") {
+  Dispatcher d;
+  ThreadId a = d.NewThread();
+  REQUIRE(!d.BeginHold(a).blocked);
+  d.Suspend(a);
+  REQUIRE(d.BeginHold(a).blocked);
+  REQUIRE(Thread(d, a).held);
+  d.Suspend(a);
+  REQUIRE(d.Resume(a, 0).wakes.empty());
+  REQUIRE(d.Resume(a, 0).wakes == std::vector<Wake>{{a, kStatusWait0}});
+  REQUIRE(!Thread(d, a).waiting);
+}
+
 TEST_CASE("Destroying a waiting thread leaves no trace", "[dispatch]") {
   Dispatcher d;
   ObjectId event = d.NewEvent(false, false);

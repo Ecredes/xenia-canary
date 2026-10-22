@@ -39,6 +39,12 @@ struct Waiter {
   std::atomic<bool> woken{false};
   // The XThread it belongs to; null for a host thread.
   XThread* thread = nullptr;
+  // The host thread to stop when it is suspended while running, and whether
+  // it is stopped (under the dispatcher lock); null for none.
+  xe::threading::Thread* host = nullptr;
+  bool host_suspended = false;
+  // The guest's copy of the suspend count (KTHREAD), written through.
+  uint8_t* suspend_count = nullptr;
   // The serial of the shell it is registered with, 0 for none (a host thread
   // may outlive a shell, and a later one may get its address).
   uint64_t shell = 0;
@@ -106,6 +112,14 @@ class Shell {
     return WaitLocked(waiter, request, lock, unparks);
   }
 
+  // Guest suspension of target, from any thread; returns the previous count.
+  // A target in a wait stays parked and the core holds the wait; one that is
+  // running is stopped by host suspend, the calling thread by Hold.
+  uint32_t Suspend(Waiter& target, bool* exceeded = nullptr);
+  uint32_t Resume(Waiter& target);
+  // Blocks the calling thread while it is suspended.
+  void Hold();
+
   // Guest system time, 100 ns units: the clock deadlines run on.
   static uint64_t GuestNow();
   // A deadline from a guest timeout (null: none; negative: relative 100 ns;
@@ -122,6 +136,12 @@ class Shell {
   void ApplyLocked(const Effects& effects, Unparks& unparks);
   // Releases lock before returning.
   uint32_t WaitLocked(Waiter& waiter, const WaitRequest& request,
+                      std::unique_lock<std::mutex>& lock, Unparks& unparks);
+  // Parks waiter until the core wakes it, for a wait begun with result after
+  // PrepareLocked. Releases lock before returning.
+  static void PrepareLocked(Waiter& waiter);
+  uint32_t ParkLocked(Waiter& waiter, const WaitResult& result,
+                      std::optional<uint64_t> deadline,
                       std::unique_lock<std::mutex>& lock, Unparks& unparks);
 
   const uint64_t serial_;

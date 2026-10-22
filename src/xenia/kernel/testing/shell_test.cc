@@ -9,6 +9,7 @@
 
 #include "xenia/kernel/dispatch/shell.h"
 
+#include <atomic>
 #include <thread>
 
 #include "third_party/catch/include/catch.hpp"
@@ -72,6 +73,74 @@ TEST_CASE("Shell waits ping-pong between two threads", "[dispatch][shell]") {
   }
   other.join();
   REQUIRE(rounds == kRounds);
+}
+
+namespace {
+
+// Waits until thread is waiting (or held) in the core.
+void AwaitWaiting(Shell& shell, ThreadId thread) {
+  while (!shell.Read([thread](Dispatcher& core) {
+    std::optional<ThreadInfo> info = core.QueryThread(thread);
+    return info && info->waiting;
+  })) {
+    std::this_thread::yield();
+  }
+}
+
+}  // namespace
+
+TEST_CASE("A suspended shell waiter is woken only after its resume",
+          "[dispatch][shell]") {
+  Shell shell;
+  ObjectId event =
+      shell.Read([](Dispatcher& core) { return core.NewEvent(false, false); });
+  std::atomic<Waiter*> target{nullptr};
+  std::atomic<uint32_t> status{0xFFFFFFFF};
+  std::thread waiter([&] {
+    target = &shell.CurrentWaiter();
+    WaitRequest request;
+    request.objects = {event};
+    status = shell.Wait(request);
+  });
+  while (!target) {
+    std::this_thread::yield();
+  }
+  AwaitWaiting(shell, target.load()->id);
+  REQUIRE(shell.Suspend(*target) == 0);
+  shell.Run([event](Dispatcher& core) { return core.SetEvent(event); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  REQUIRE(status == 0xFFFFFFFF);
+  REQUIRE(shell.Read([event](Dispatcher& core) {
+    return core.Query(event).value_or(ObjectInfo{}).signal_state;
+  }) == 1);
+  REQUIRE(shell.Resume(*target) == 1);
+  waiter.join();
+  REQUIRE(status == kStatusWait0);
+}
+
+TEST_CASE("A thread that suspends itself returns once resumed",
+          "[dispatch][shell]") {
+  Shell shell;
+  std::atomic<Waiter*> target{nullptr};
+  std::atomic<bool> returned{false};
+  std::thread self([&] {
+    Waiter& mine = shell.CurrentWaiter();
+    target = &mine;
+    shell.Suspend(mine);
+    returned = true;
+  });
+  while (!target) {
+    std::this_thread::yield();
+  }
+  AwaitWaiting(shell, target.load()->id);
+  REQUIRE(!returned);
+  REQUIRE(shell.Suspend(*target) == 1);
+  REQUIRE(shell.Resume(*target) == 2);
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  REQUIRE(!returned);
+  REQUIRE(shell.Resume(*target) == 1);
+  self.join();
+  REQUIRE(returned);
 }
 
 }  // namespace test

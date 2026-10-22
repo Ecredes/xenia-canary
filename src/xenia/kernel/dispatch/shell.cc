@@ -130,25 +130,43 @@ uint32_t Shell::Wait(const WaitRequest& request) {
 uint32_t Shell::WaitLocked(Waiter& waiter, const WaitRequest& request,
                            std::unique_lock<std::mutex>& lock,
                            Unparks& unparks) {
+  PrepareLocked(waiter);
+  WaitResult result = core_.BeginWait(waiter.id, request, GuestNow());
+  return ParkLocked(waiter, result, request.deadline, lock, unparks);
+}
+
+void Shell::PrepareLocked(Waiter& waiter) {
   // A set left over from an earlier wait's waker; the flag is the truth.
   waiter.park->Reset();
   waiter.woken.store(false, std::memory_order_relaxed);
-  WaitResult result = core_.BeginWait(waiter.id, request, GuestNow());
+}
+
+uint32_t Shell::ParkLocked(Waiter& waiter, const WaitResult& result,
+                           std::optional<uint64_t> deadline,
+                           std::unique_lock<std::mutex>& lock,
+                           Unparks& unparks) {
   ApplyLocked(result.effects, unparks);
   if (!result.blocked) {
     lock.unlock();
     Unpark(unparks);
     return result.status;
   }
+  // Kept alive here, should the waiter go with its thread object while this
+  // thread is parked (a thread created suspended and never resumed).
+  std::shared_ptr<xe::threading::Event> park = waiter.park;
+  // Once the deadline has been handed to the core, only a wake ends the wait
+  // (a held one waits for its Resume).
+  bool expired = false;
   while (true) {
     std::chrono::milliseconds timeout = std::chrono::milliseconds::max();
-    if (request.deadline) {
+    if (deadline && expired) {
+      timeout = std::chrono::milliseconds(kMaxParkMs);
+    } else if (deadline) {
       uint64_t now = GuestNow();
       double remaining_ms =
-          now >= *request.deadline
-              ? 0.0
-              : double(*request.deadline - now) / 10000.0 /
-                    std::max(Clock::guest_time_scalar(), 1e-6);
+          now >= *deadline ? 0.0
+                           : double(*deadline - now) / 10000.0 /
+                                 std::max(Clock::guest_time_scalar(), 1e-6);
       timeout = std::chrono::milliseconds(
           std::clamp<int64_t>(int64_t(std::ceil(remaining_ms)), 1, kMaxParkMs));
     }
@@ -156,14 +174,15 @@ uint32_t Shell::WaitLocked(Waiter& waiter, const WaitRequest& request,
     Unpark(unparks);
     unparks.clear();
     // Not alertable: guest APCs come through the core, as a wake.
-    xe::threading::Wait(waiter.park.get(), false, timeout);
+    xe::threading::Wait(park.get(), false, timeout);
     if (waiter.woken.load(std::memory_order_acquire)) {
       return waiter.status.load(std::memory_order_relaxed);
     }
     lock.lock();
-    if (!waiter.woken.load(std::memory_order_relaxed) && request.deadline &&
-        GuestNow() >= *request.deadline) {
+    if (!waiter.woken.load(std::memory_order_relaxed) && deadline &&
+        GuestNow() >= *deadline) {
       ApplyLocked(core_.Expire(GuestNow()), unparks);
+      expired = true;
     }
     if (waiter.woken.load(std::memory_order_relaxed)) {
       lock.unlock();
@@ -171,6 +190,62 @@ uint32_t Shell::WaitLocked(Waiter& waiter, const WaitRequest& request,
       return waiter.status.load(std::memory_order_relaxed);
     }
   }
+}
+
+uint32_t Shell::Suspend(Waiter& target, bool* exceeded) {
+  Waiter& self = CurrentWaiter();
+  uint32_t previous = 0;
+  bool over = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    core_.Suspend(target.id, &previous, &over);
+    if (!over && target.suspend_count) {
+      *target.suspend_count = uint8_t(previous + 1);
+    }
+    if (!over && previous == 0 && &target != &self && target.host) {
+      std::optional<ThreadInfo> info = core_.QueryThread(target.id);
+      if (info && !info->waiting) {
+        // Running: stop it where it is. With the lock held here, it can't
+        // be stopped holding it.
+        target.host->Suspend();
+        target.host_suspended = true;
+      }
+    }
+  }
+  if (exceeded) {
+    *exceeded = over;
+  }
+  if (!over && &target == &self) {
+    Hold();
+  }
+  return previous;
+}
+
+uint32_t Shell::Resume(Waiter& target) {
+  uint32_t previous = 0;
+  Unparks unparks;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ApplyLocked(core_.Resume(target.id, GuestNow(), &previous), unparks);
+    if (previous && target.suspend_count) {
+      *target.suspend_count = uint8_t(previous - 1);
+    }
+    if (previous == 1 && target.host_suspended) {
+      target.host->Resume();
+      target.host_suspended = false;
+    }
+  }
+  Unpark(unparks);
+  return previous;
+}
+
+void Shell::Hold() {
+  Waiter& waiter = CurrentWaiter();
+  Unparks unparks;
+  std::unique_lock<std::mutex> lock(mutex_);
+  PrepareLocked(waiter);
+  WaitResult result = core_.BeginHold(waiter.id);
+  ParkLocked(waiter, result, std::nullopt, lock, unparks);
 }
 
 uint64_t Shell::GuestNow() { return Clock::QueryGuestSystemTime(); }

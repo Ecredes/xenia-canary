@@ -150,15 +150,44 @@ std::optional<uint32_t> Dispatcher::TrySatisfy(ThreadId id, Thread& thread,
                          : kStatusWait0;
 }
 
-void Dispatcher::EndWait(ThreadId id, Thread& thread, uint32_t status,
-                         Effects& effects) {
+std::optional<uint32_t> Dispatcher::TryFinish(ThreadId id, Thread& thread,
+                                              uint64_t now, Effects& effects) {
+  if (thread.alertable && thread.user_apc_pending) {
+    return kStatusUserApc;
+  }
+  if (std::optional<uint32_t> status = TrySatisfy(id, thread, effects)) {
+    return status;
+  }
+  if (thread.deadline && *thread.deadline <= now) {
+    return kStatusTimeout;
+  }
+  return std::nullopt;
+}
+
+void Dispatcher::Enqueue(ThreadId id, const Thread& thread) {
+  for (ObjectId object_id : thread.objects) {
+    auto object = objects_.find(object_id);
+    if (object != objects_.end()) {
+      object->second.waiters.push_back(id);
+    }
+  }
+}
+
+void Dispatcher::Dequeue(ThreadId id, const Thread& thread) {
   for (ObjectId object_id : thread.objects) {
     auto object = objects_.find(object_id);
     if (object != objects_.end()) {
       std::erase(object->second.waiters, id);
     }
   }
+}
+
+void Dispatcher::EndWait(ThreadId id, Thread& thread, uint32_t status,
+                         Effects& effects) {
+  Dequeue(id, thread);
   thread.waiting = false;
+  thread.held = false;
+  thread.holding = false;
   thread.objects.clear();
   thread.deadline.reset();
   effects.wakes.push_back({id, status});
@@ -317,32 +346,27 @@ WaitResult Dispatcher::BeginWait(ThreadId id, const WaitRequest& request,
     return result;
   }
   Thread& thread = found->second;
-  if (request.alertable && thread.user_apc_pending) {
-    result.status = kStatusUserApc;
-    return result;
-  }
   thread.type = request.type;
   thread.objects = request.objects;
-  if (std::optional<uint32_t> status = TrySatisfy(id, thread, result.effects)) {
+  thread.deadline = request.deadline;
+  thread.alertable = request.alertable;
+  result.blocked = true;
+  if (thread.suspend_count) {
+    // It can't run: the wait is decided at the last Resume.
+    thread.waiting = true;
+    thread.held = true;
+    return result;
+  }
+  if (std::optional<uint32_t> status =
+          TryFinish(id, thread, now, result.effects)) {
     thread.objects.clear();
+    thread.deadline.reset();
+    result.blocked = false;
     result.status = *status;
     return result;
   }
-  if (request.deadline && *request.deadline <= now) {
-    thread.objects.clear();
-    result.status = kStatusTimeout;
-    return result;
-  }
   thread.waiting = true;
-  thread.deadline = request.deadline;
-  thread.alertable = request.alertable;
-  for (ObjectId object_id : thread.objects) {
-    auto object = objects_.find(object_id);
-    if (object != objects_.end()) {
-      object->second.waiters.push_back(id);
-    }
-  }
-  result.blocked = true;
+  Enqueue(id, thread);
   return result;
 }
 
@@ -350,7 +374,8 @@ Effects Dispatcher::Expire(uint64_t now) {
   Effects effects;
   std::vector<std::pair<uint64_t, ThreadId>> due;
   for (const auto& [id, thread] : threads_) {
-    if (thread.waiting && thread.deadline && *thread.deadline <= now) {
+    if (thread.waiting && !thread.held && thread.deadline &&
+        *thread.deadline <= now) {
       due.emplace_back(*thread.deadline, id);
     }
   }
@@ -364,7 +389,7 @@ Effects Dispatcher::Expire(uint64_t now) {
 std::optional<uint64_t> Dispatcher::NextDeadline() const {
   std::optional<uint64_t> next;
   for (const auto& [id, thread] : threads_) {
-    if (thread.waiting && thread.deadline &&
+    if (thread.waiting && !thread.held && thread.deadline &&
         (!next || *thread.deadline < *next)) {
       next = thread.deadline;
     }
@@ -380,7 +405,7 @@ Effects Dispatcher::QueueUserApc(ThreadId id) {
   }
   Thread& thread = found->second;
   thread.user_apc_pending = true;
-  if (thread.waiting && thread.alertable) {
+  if (thread.waiting && thread.alertable && !thread.held) {
     EndWait(id, thread, kStatusUserApc, effects);
   }
   return effects;
@@ -393,18 +418,86 @@ void Dispatcher::UserApcsDelivered(ThreadId id) {
   }
 }
 
+Effects Dispatcher::Suspend(ThreadId id, uint32_t* previous, bool* exceeded) {
+  Effects effects;
+  auto found = threads_.find(id);
+  if (found == threads_.end()) {
+    return effects;
+  }
+  Thread& thread = found->second;
+  if (previous) {
+    *previous = thread.suspend_count;
+  }
+  bool over = thread.suspend_count >= kMaxSuspendCount;
+  if (exceeded) {
+    *exceeded = over;
+  }
+  if (over) {
+    return effects;
+  }
+  if (thread.suspend_count++ == 0 && thread.waiting && !thread.holding) {
+    // As a kernel APC would, it leaves the wait; Resume begins it again.
+    Dequeue(id, thread);
+    thread.held = true;
+  }
+  return effects;
+}
+
+Effects Dispatcher::Resume(ThreadId id, uint64_t now, uint32_t* previous) {
+  Effects effects;
+  auto found = threads_.find(id);
+  if (found == threads_.end()) {
+    return effects;
+  }
+  Thread& thread = found->second;
+  if (previous) {
+    *previous = thread.suspend_count;
+  }
+  if (thread.suspend_count == 0) {
+    return effects;
+  }
+  --thread.suspend_count;
+  if (thread.suspend_count != 0 || !thread.waiting) {
+    return effects;
+  }
+  if (thread.holding) {
+    EndWait(id, thread, kStatusWait0, effects);
+    return effects;
+  }
+  thread.held = false;
+  if (std::optional<uint32_t> status = TryFinish(id, thread, now, effects)) {
+    EndWait(id, thread, *status, effects);
+  } else {
+    Enqueue(id, thread);
+  }
+  return effects;
+}
+
+WaitResult Dispatcher::BeginHold(ThreadId id) {
+  WaitResult result;
+  auto found = threads_.find(id);
+  if (found == threads_.end() || found->second.suspend_count == 0) {
+    return result;
+  }
+  Thread& thread = found->second;
+  thread.waiting = true;
+  thread.holding = true;
+  thread.objects.clear();
+  thread.deadline.reset();
+  thread.alertable = false;
+  result.blocked = true;
+  return result;
+}
+
 Effects Dispatcher::ThreadTerminated(ThreadId id) {
   Effects effects;
   auto thread = threads_.find(id);
   if (thread != threads_.end() && thread->second.waiting) {
     // It won't come back for the wake: drop it without one.
-    for (ObjectId object_id : thread->second.objects) {
-      auto object = objects_.find(object_id);
-      if (object != objects_.end()) {
-        std::erase(object->second.waiters, id);
-      }
-    }
+    Dequeue(id, thread->second);
     thread->second.waiting = false;
+    thread->second.held = false;
+    thread->second.holding = false;
     thread->second.objects.clear();
   }
   std::vector<ObjectId> owned;
@@ -449,8 +542,10 @@ std::optional<ThreadInfo> Dispatcher::QueryThread(ThreadId id) const {
     return std::nullopt;
   }
   const Thread& thread = it->second;
-  return ThreadInfo{thread.waiting,  thread.type,      thread.objects,
-                    thread.deadline, thread.alertable, thread.user_apc_pending};
+  return ThreadInfo{thread.waiting,       thread.type,
+                    thread.objects,       thread.deadline,
+                    thread.alertable,     thread.user_apc_pending,
+                    thread.suspend_count, thread.held || thread.holding};
 }
 
 }  // namespace dispatch

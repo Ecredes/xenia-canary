@@ -15,7 +15,6 @@
 
 #include "xenia/base/mutex.h"
 #if !XE_PLATFORM_WIN32
-#include <condition_variable>
 #include <csignal>
 #include <mutex>
 #endif
@@ -492,17 +491,12 @@ class XThread : public XObject, public cpu::Thread {
   X_FILETIME creation_time();
   uint32_t start_address();
 
+  // Guest suspension, through the dispatcher; out gets the previous count.
+  // Suspending the calling thread returns once it is resumed.
   X_STATUS Resume(uint32_t* out_suspend_count = nullptr);
   X_STATUS Suspend(uint32_t* out_suspend_count = nullptr);
   X_STATUS Delay(uint32_t processor_mode, uint32_t alertable,
                  uint64_t interval);
-
-#if !XE_PLATFORM_WIN32
-  // Performs self-suspension: increments suspend_count and blocks until
-  // another thread calls Resume() and suspend_count reaches 0.
-  // Returns the previous suspend_count value.
-  uint32_t SelfSuspend();
-#endif
 
   xe::threading::Thread* thread() { return thread_.get(); }
 
@@ -558,12 +552,6 @@ class XThread : public XObject, public cpu::Thread {
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
   int32_t boost_amount_ = 0;   // accumulated priority boost above base
   uint64_t quantum_start_ms_ = 0;  // host uptime (ms) when quantum last reset
-
-#if !XE_PLATFORM_WIN32
-  // Condition variable for thread self-suspension.
-  std::mutex suspend_mutex_;
-  std::condition_variable suspend_cv_;
-#endif
 
   // Reentry mechanism for fiber-based stack switching.
   // On Linux, C++ exceptions are used instead of setjmp/longjmp so that
