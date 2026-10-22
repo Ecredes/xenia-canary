@@ -10,6 +10,9 @@
 #ifndef XENIA_APU_AUDIO_MEDIA_PLAYER_H_
 #define XENIA_APU_AUDIO_MEDIA_PLAYER_H_
 
+#include <functional>
+#include <mutex>
+
 #include "xenia/apu/audio_driver.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/kernel/xam/apps/xmp_app.h"
@@ -57,6 +60,14 @@ class AudioMediaPlayer {
     playback_mode_ = playback_mode;
   }
   XmpApp::PlaybackMode GetPlaybackMode() const { return playback_mode_; }
+
+  // Sees each frame of music as it goes to the driver, on the player's thread:
+  // frames of interleaved host-endian floats at the song's channel count and
+  // sample rate, before the playback volume (passed along). Empty for none.
+  using FrameTap = std::function<void(const float* samples, uint32_t frames,
+                                      uint32_t channels, uint32_t sample_rate,
+                                      float volume)>;
+  void SetFrameTap(FrameTap tap);
 
   void SetRepeatMode(XmpApp::RepeatMode repeat_mode) {
     repeat_mode_ = repeat_mode;
@@ -157,6 +168,12 @@ class AudioMediaPlayer {
   std::unique_ptr<AudioDriver> driver_ = nullptr;
   std::unique_ptr<xe::threading::Semaphore> driver_semaphore_ = {};
   xe_mutex driver_mutex_ = {};
+  // The current song's layout, for the frame tap.
+  uint32_t driver_sample_rate_ = 0;
+  uint32_t driver_channels_ = 0;
+
+  std::mutex frame_tap_mutex_;
+  FrameTap frame_tap_;
 
   bool SetupDriver(uint32_t sample_rate, uint32_t channels);
   void DeleteDriver();

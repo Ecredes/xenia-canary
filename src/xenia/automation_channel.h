@@ -87,13 +87,16 @@ class AutomationChannel : public AnswerSource {
     std::vector<std::string> lines;
   };
   class TelemetrySink;
-  // Audio frames from the audio system's tap, gathered for the channel's
-  // thread. Shared with the tap, which the audio system owns.
+  // Audio frames from the audio system's and the media player's taps,
+  // gathered for the channel's thread. Shared with the taps, which the audio
+  // system and the media player own.
   struct AudioFeed {
-    // A client is subscribed: the tap gathers frames.
+    // A client is subscribed: the taps gather frames.
     std::atomic<bool> active{false};
     std::mutex mutex;
     AudioChunker chunker;
+    MusicResampler music;
+    MusicClock music_clock;
     std::vector<AudioChunk> chunks;
   };
   struct OpenDialog {

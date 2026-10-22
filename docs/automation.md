@@ -185,9 +185,9 @@ paused.
 ### Audio
 
 A client subscribed to `audio` gets the sound the title submits, as `audio`
-events: `client` (the guest's audio client; most titles use one), `rate`
-(48000), `channels` (2), `frames`, and `data`, base64 little-endian 16-bit
-stereo, interleaved. The envelope's `ns`, `vblank` and `swap` are when the
+events: `client` (the guest's audio client, 0 to 7; most titles use one),
+`source` (`game`, or `music` below), `rate` (48000), `channels` (2), `frames`,
+and `data`, base64 little-endian 16-bit stereo, interleaved. The envelope's `ns`, `vblank` and `swap` are when the
 first frame was submitted.
 
 - The guest's 5.1 frames are downmixed: L = FL + 0.707 FC + 0.707 BL and
@@ -196,8 +196,13 @@ first frame was submitted.
   more than 50 ms starts a new event, so placing each event at its `ns` keeps
   the gaps; one that stops is sent within 200 ms.
 - The tap sees frames as the title submits them, before the host's audio
-  driver, so headless runs without a sound device have audio too. Music the
-  guest plays through the system media player (XMP) isn't included.
+  driver, so headless runs without a sound device have audio too.
+- Music the title plays through the system media player (XMP) comes as
+  `client` 8 with `source` `music`, at the playback volume: downmixed the
+  same way (mono to both sides) and resampled linearly from the song's rate,
+  with `ns` when it plays: the media player queues about a second ahead, so
+  each frame is stamped where the one before it ends (or now, when the queue
+  ran dry). Mix it with the other clients by `ns`.
 - With no subscriber, the tap does nothing.
 
 ### Frames

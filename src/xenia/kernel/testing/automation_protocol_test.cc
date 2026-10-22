@@ -9,6 +9,8 @@
 
 #include "xenia/automation_protocol.h"
 
+#include <cmath>
+
 #include "third_party/catch/include/catch.hpp"
 
 namespace xe {
@@ -855,6 +857,64 @@ TEST_CASE("Audio events carry little-endian stereo", "[automation]") {
   REQUIRE(event["frames"] == 1);
   // 01 00 FF FF
   REQUIRE(event["data"] == "AQD//w==");
+  REQUIRE(event["source"] == "game");
+  chunk.client = kMusicAudioClient;
+  REQUIRE(Json(AudioEventLine(chunk, telemetry::State::kRunning))["source"] ==
+          "music");
+}
+
+TEST_CASE("Music passes through at the stream's rate", "[automation]") {
+  MusicResampler music;
+  std::vector<float> samples = {0.5f, -0.5f, 0.25f, -0.25f};
+  std::vector<int16_t> stereo;
+  music.Convert(samples.data(), 2, 2, kAudioRate, 1.0f, stereo);
+  REQUIRE(stereo == std::vector<int16_t>{16384, -16384, 8192, -8192});
+  // Mono goes to both sides; the volume scales it.
+  stereo.clear();
+  float mono[] = {1.0f};
+  music.Convert(mono, 1, 1, kAudioRate, 0.5f, stereo);
+  REQUIRE(stereo == std::vector<int16_t>{16384, 16384});
+}
+
+TEST_CASE("Music resamples to the stream's rate without seams",
+          "[automation]") {
+  MusicResampler music;
+  // A ramp at 44.1 kHz, in two calls: the output stays a ramp across them.
+  std::vector<float> ramp(882 * 2);
+  for (size_t i = 0; i < 882; ++i) {
+    ramp[i * 2] = ramp[i * 2 + 1] = float(i) / 1000.0f;
+  }
+  std::vector<int16_t> stereo;
+  music.Convert(ramp.data(), 441, 2, 44100, 1.0f, stereo);
+  music.Convert(ramp.data() + 441 * 2, 441, 2, 44100, 1.0f, stereo);
+  // 20 ms in, 20 ms out.
+  REQUIRE(stereo.size() / 2 >= 959);
+  REQUIRE(stereo.size() / 2 <= 960);
+  const double step = 44100.0 / 48000.0 / 1000.0 * 32767.0;
+  for (size_t i = 1; i < stereo.size() / 2; ++i) {
+    REQUIRE(std::abs(stereo[i * 2] - stereo[(i - 1) * 2] - step) < 1.5);
+  }
+}
+
+TEST_CASE("Music is stamped when it plays", "[automation]") {
+  MusicClock clock;
+  // A song starts: a queue's worth handed over at once plays back to back.
+  REQUIRE(clock.Stamp(1000, 480) == 1000);
+  REQUIRE(clock.Stamp(1001, 480) == 1000 + 10000000);
+  REQUIRE(clock.Stamp(1002, 480) == 1000 + 20000000);
+  // After a pause longer than the queue, it starts again from now.
+  REQUIRE(clock.Stamp(900000000, 480) == 900000000);
+}
+
+TEST_CASE("Music downmixes 5.1 as guest frames do", "[automation]") {
+  MusicResampler music;
+  // FL FR FC LFE BL BR
+  float frame[] = {0.1f, 0.2f, 0.3f, 0.9f, 0.1f, 0.0f};
+  std::vector<int16_t> stereo;
+  music.Convert(frame, 1, 6, kAudioRate, 1.0f, stereo);
+  // L = FL + 0.707 (FC + BL), R = FR + 0.707 (FC + BR); LFE left out.
+  REQUIRE(std::abs(stereo[0] - (0.1 + kDownmixSide * 0.4) * 32767.0) <= 1.0);
+  REQUIRE(std::abs(stereo[1] - (0.2 + kDownmixSide * 0.3) * 32767.0) <= 1.0);
 }
 
 }  // namespace test

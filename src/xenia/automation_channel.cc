@@ -18,6 +18,7 @@
 #include <random>
 #include <utility>
 
+#include "xenia/apu/audio_media_player.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -1148,6 +1149,35 @@ void AutomationChannel::ServiceAudio() {
           feed->chunks.erase(feed->chunks.begin());
         }
       });
+      // XMP music doesn't pass through the audio system: it has its own.
+      if (apu::AudioMediaPlayer* player = emulator_.audio_media_player()) {
+        player->SetFrameTap([feed = audio_, &emulator = emulator_](
+                                const float* samples, uint32_t frames,
+                                uint32_t channels, uint32_t sample_rate,
+                                float volume) {
+          if (!feed->active.load(std::memory_order_relaxed)) {
+            return;
+          }
+          uint64_t vblank = 0, swap = 0;
+          if (gpu::GraphicsSystem* graphics_system =
+                  emulator.graphics_system()) {
+            vblank = graphics_system->vblank_count();
+            swap = graphics_system->swap_count();
+          }
+          std::lock_guard<std::mutex> lock(feed->mutex);
+          std::vector<int16_t> stereo;
+          feed->music.Convert(samples, frames, channels, sample_rate, volume,
+                              stereo);
+          // Stamped when it plays, not when the driver's queue takes it.
+          uint64_t ns =
+              feed->music_clock.Stamp(telemetry::NowNs(), stereo.size() / 2);
+          feed->chunker.Add(kMusicAudioClient, ns, vblank, swap, stereo.data(),
+                            stereo.size() / 2, feed->chunks);
+          if (feed->chunks.size() > kMaxQueuedAudioChunks) {
+            feed->chunks.erase(feed->chunks.begin());
+          }
+        });
+      }
       audio_tap_installed_ = true;
     }
   }

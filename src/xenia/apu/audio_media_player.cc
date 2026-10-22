@@ -571,6 +571,14 @@ void AudioMediaPlayer::ProcessAudioBuffer(std::vector<float>* buffer) {
       }
       xe::telemetry::ObservePeak(peak * volume_.load());
     }
+    {
+      std::lock_guard<std::mutex> lock(frame_tap_mutex_);
+      if (frame_tap_ && driver_channels_) {
+        frame_tap_(buffer->data(),
+                   xe::apu::AudioDriver::kFrameSamplesMax / driver_channels_,
+                   driver_channels_, driver_sample_rate_, volume_.load());
+      }
+    }
     driver_->SubmitFrame(buffer->data());
     buffer->erase(buffer->begin(),
                   buffer->begin() + xe::apu::AudioDriver::kFrameSamplesMax);
@@ -584,6 +592,8 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
   if (!sample_rate || !channels || channels > AudioDriver::kFrameSamplesMax) {
     return false;
   }
+  driver_sample_rate_ = sample_rate;
+  driver_channels_ = channels;
   driver_semaphore_ = xe::threading::Semaphore::Create(
       AudioSystem::kMaximumQueuedFrames, AudioSystem::kMaximumQueuedFrames);
 
@@ -614,6 +624,11 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
       audio_system_->name());
 
   return true;
+}
+
+void AudioMediaPlayer::SetFrameTap(FrameTap tap) {
+  std::lock_guard<std::mutex> lock(frame_tap_mutex_);
+  frame_tap_ = std::move(tap);
 }
 
 void AudioMediaPlayer::DeleteDriver() {

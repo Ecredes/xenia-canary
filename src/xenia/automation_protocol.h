@@ -1584,6 +1584,91 @@ inline void DownmixGuestFrame(const float* samples, int16_t* stereo) {
   }
 }
 
+// The media player's music (XMP) is sent as one more audio client after the
+// guest's (0 to 7), with source "music".
+constexpr uint32_t kMusicAudioClient = 8;
+
+// Music frames as the guest's are sent: 16-bit stereo at kAudioRate. Music
+// comes at its song's rate (often 44.1 kHz) and channel count, as interleaved
+// host-endian floats; it is downmixed (mono to both sides, 5.1 and more as
+// DownmixGuestFrame, otherwise the first two channels), scaled by the
+// playback volume and resampled linearly. The position carries over calls, so
+// consecutive frames join without a click; a new rate starts over.
+class MusicResampler {
+ public:
+  void Convert(const float* samples, uint32_t frames, uint32_t channels,
+               uint32_t rate, float volume, std::vector<int16_t>& stereo) {
+    if (!frames || !channels || !rate) {
+      return;
+    }
+    if (rate != rate_) {
+      rate_ = rate;
+      position_ = 0.0;
+    }
+    auto side = [&](uint32_t frame, bool right) {
+      const float* at = samples + size_t(frame) * channels;
+      float value;
+      if (channels == 1) {
+        value = at[0];
+      } else if (channels >= 6) {
+        value = at[right ? 1 : 0] + kDownmixSide * at[2] +
+                kDownmixSide * at[right ? 5 : 4];
+      } else {
+        value = at[right ? 1 : 0];
+      }
+      return value == value ? value * volume : 0.0f;
+    };
+    auto to_pcm = [](float value) {
+      return int16_t(std::lround(std::clamp(value, -1.0f, 1.0f) * 32767.0f));
+    };
+    const double step = double(rate) / double(kAudioRate);
+    // position_ is in input frames from this call's first; from -1 to 0 it
+    // falls between the last frame of the call before and this one's first.
+    const auto last = int64_t(frames) - 1;
+    while (position_ <= double(last)) {
+      auto index = int64_t(std::floor(position_));
+      float fraction = float(position_ - double(index));
+      for (bool right : {false, true}) {
+        float a = index < 0 ? (right ? last_right_ : last_left_)
+                            : side(uint32_t(index), right);
+        float b = side(uint32_t(std::min(index + 1, last)), right);
+        stereo.push_back(to_pcm(a + (b - a) * fraction));
+      }
+      position_ += step;
+    }
+    // Past this call's last frame, so from -1 on in the next.
+    position_ -= double(frames);
+    last_left_ = side(uint32_t(last), false);
+    last_right_ = side(uint32_t(last), true);
+  }
+
+ private:
+  uint32_t rate_ = 0;
+  double position_ = 0.0;
+  float last_left_ = 0.0f;
+  float last_right_ = 0.0f;
+};
+
+// When music frames play. The media player hands its driver a queue's worth
+// of frames at once when a song starts, then one each time one finishes, so
+// the time a frame is handed over runs up to a queue (about a second) early.
+// A frame plays when the one before it ends, or now if the queue ran dry.
+class MusicClock {
+ public:
+  // The host time the next `frames` frames at kAudioRate start playing.
+  uint64_t Stamp(uint64_t now_ns, uint64_t frames) {
+    if (next_ns_ < now_ns) {
+      next_ns_ = now_ns;
+    }
+    uint64_t at = next_ns_;
+    next_ns_ += frames * 1000000000 / kAudioRate;
+    return at;
+  }
+
+ private:
+  uint64_t next_ns_ = 0;
+};
+
 // Contiguous stereo samples of one audio client.
 struct AudioChunk {
   uint32_t client = 0;
@@ -1678,6 +1763,7 @@ inline std::string AudioEventLine(const AudioChunk& chunk,
   }
   telemetry::Event event("audio");
   event.UInt("client", chunk.client)
+      .Str("source", chunk.client == kMusicAudioClient ? "music" : "game")
       .UInt("rate", kAudioRate)
       .UInt("channels", 2)
       .UInt("frames", chunk.frames())
