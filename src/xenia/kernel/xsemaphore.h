@@ -39,19 +39,13 @@ class XSemaphore : public XObject {
                                         ByteStream* stream);
 
  protected:
-  xe::threading::WaitHandle* GetWaitHandle() override {
-    return semaphore_.get();
-  }
-  void WaitCallback() override;
-  void SyncFromGuest() override;
+  dispatch::Effects SignalForWait(dispatch::Dispatcher& core,
+                                  dispatch::ThreadId caller) override;
 
  private:
-  std::unique_ptr<xe::threading::Semaphore> semaphore_;
+  void Bind(int32_t count);
+
   uint32_t maximum_count_ = 0;
-
-  std::mutex count_lock_;
-
-  int32_t host_count_ = 0;
 };
 
 }  // namespace kernel

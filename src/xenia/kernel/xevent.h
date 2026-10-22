@@ -46,16 +46,13 @@ class XEvent : public XObject {
                                     ByteStream* stream);
 
  protected:
-  xe::threading::WaitHandle* GetWaitHandle() override { return event_.get(); }
-  void WaitCallback() override;
-  void SyncFromGuest() override;
+  dispatch::Effects SignalForWait(dispatch::Dispatcher& core,
+                                  dispatch::ThreadId caller) override;
 
  private:
-  bool manual_reset_ = false;
-  std::unique_ptr<xe::threading::Event> event_;
+  void Bind(bool signaled);
 
-  std::mutex state_lock_;
-  bool host_signaled_ = false;
+  bool manual_reset_ = false;
 };
 
 }  // namespace kernel

@@ -11,6 +11,8 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/dispatch/shell.h"
+#include "xenia/kernel/kernel_state.h"
 
 namespace xe {
 namespace kernel {
@@ -20,8 +22,15 @@ XEvent::XEvent(KernelState* kernel_state)
 
 XEvent::~XEvent() = default;
 
+void XEvent::Bind(bool signaled) {
+  BindDispatchObject(kernel_state()->dispatch()->Read(
+      [this, signaled](dispatch::Dispatcher& core) {
+        return core.NewEvent(manual_reset_, signaled);
+      }));
+}
+
 void XEvent::Initialize(bool manual_reset, bool initial_state) {
-  assert_false(event_);
+  assert_false(dispatch_object());
 
   manual_reset_ = manual_reset;
   CreateNative<X_KEVENT>();
@@ -31,19 +40,12 @@ void XEvent::Initialize(bool manual_reset, bool initial_state) {
                             ? X_OBJECT_TYPES::EventNotificationObject
                             : X_OBJECT_TYPES::EventSynchronizationObject;
   kevent->header.signal_state = initial_state ? 1 : 0;
-  host_signaled_ = initial_state;
-
-  if (manual_reset) {
-    event_ = xe::threading::Event::CreateManualResetEvent(initial_state);
-  } else {
-    event_ = xe::threading::Event::CreateAutoResetEvent(initial_state);
-  }
-  assert_not_null(event_);
+  Bind(initial_state);
 }
 
 void XEvent::InitializeNative(void* native_ptr,
                               const X_DISPATCH_HEADER* header) {
-  assert_false(event_);
+  assert_false(dispatch_object());
 
   switch (header->type) {
     case X_OBJECT_TYPES::EventNotificationObject:
@@ -57,111 +59,65 @@ void XEvent::InitializeNative(void* native_ptr,
       return;
   }
 
-  bool initial_state = header->signal_state ? true : false;
-  host_signaled_ = initial_state;
-  if (manual_reset_) {
-    event_ = xe::threading::Event::CreateManualResetEvent(initial_state);
-  } else {
-    event_ = xe::threading::Event::CreateAutoResetEvent(initial_state);
-  }
-  assert_not_null(event_);
   SetNativePointer(memory()->HostToGuestVirtual(native_ptr), true);
+  Bind(header->signal_state != 0);
 }
 
 int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
-  {
-    std::lock_guard<std::mutex> lock(state_lock_);
-    memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
-        1;
-    host_signaled_ = true;
-    event_->Set();
-  }
-  return 1;
+  TouchHeader();
+  int32_t previous = 0;
+  kernel_state()->dispatch()->Run(
+      [this, &previous](dispatch::Dispatcher& core) {
+        return core.SetEvent(dispatch_object(), &previous);
+      });
+  return previous;
 }
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
-  auto* kevent = memory()->TranslateVirtual<X_KEVENT*>(guest_object());
-  // KePulseEvent returns the pre-pulse signal state.
-  std::lock_guard<std::mutex> lock(state_lock_);
-  const int32_t old_signal_state = kevent->header.signal_state;
-  event_->Pulse();
-  // Pulse leaves the event reset after releasing waiters.
-  kevent->header.signal_state = 0;
-  host_signaled_ = false;
-  return old_signal_state;
+  TouchHeader();
+  int32_t previous = 0;
+  kernel_state()->dispatch()->Run(
+      [this, &previous](dispatch::Dispatcher& core) {
+        return core.PulseEvent(dispatch_object(), &previous);
+      });
+  return previous;
 }
 
 int32_t XEvent::Reset() {
-  std::lock_guard<std::mutex> lock(state_lock_);
-  memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
-      0;
-  host_signaled_ = false;
-  event_->Reset();
-  return 1;
+  TouchHeader();
+  int32_t previous = 0;
+  kernel_state()->dispatch()->Run(
+      [this, &previous](dispatch::Dispatcher& core) {
+        return core.ResetEvent(dispatch_object(), &previous);
+      });
+  return previous;
 }
 
-void XEvent::WaitCallback() {
-  // Auto-reset events atomically clear on successful wait; manual stay set.
-  if (!manual_reset_) {
-    std::lock_guard<std::mutex> lock(state_lock_);
-    memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
-        0;
-    host_signaled_ = false;
-  }
-}
-
-void XEvent::SyncFromGuest() {
-  if (!guest_object()) {
-    return;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(state_lock_);
-    auto* kevent = memory()->TranslateVirtual<X_KEVENT*>(guest_object());
-    bool guest_signaled = kevent->header.signal_state ? true : false;
-    if (guest_signaled == host_signaled_) {
-      return;
-    }
-    host_signaled_ = guest_signaled;
-    if (guest_signaled) {
-      event_->Set();
-    } else {
-      event_->Reset();
-    }
-  }
+dispatch::Effects XEvent::SignalForWait(dispatch::Dispatcher& core,
+                                        dispatch::ThreadId caller) {
+  return core.SetEvent(dispatch_object());
 }
 
 void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
-  auto [type, state] = event_->Query();
-
-  *out_type = type;
-  *out_state = state;
+  std::optional<dispatch::ObjectInfo> info =
+      kernel_state()->dispatch()->Read([this](dispatch::Dispatcher& core) {
+        return core.Query(dispatch_object());
+      });
+  *out_type = manual_reset_ ? 0 : 1;
+  *out_state = info && info->signal_state > 0 ? 1 : 0;
 }
-void XEvent::Clear() { event_->Reset(); }
+
+void XEvent::Clear() { Reset(); }
 
 bool XEvent::Save(ByteStream* stream) {
   XELOGD("XEvent {:08X} ({})", handle(), manual_reset_ ? "manual" : "auto");
   SaveObject(stream);
 
-  bool signaled = true;
-  auto result =
-      xe::threading::Wait(event_.get(), false, std::chrono::milliseconds(0));
-  if (result == xe::threading::WaitResult::kSuccess) {
-    signaled = true;
-  } else if (result == xe::threading::WaitResult::kTimeout) {
-    signaled = false;
-  } else {
-    assert_always();
-  }
-
-  if (signaled) {
-    // Reset the event in-case it's an auto-reset.
-    event_->Set();
-  }
-
-  stream->Write<bool>(signaled);
+  uint32_t type = 0, state = 0;
+  Query(&type, &state);
+  stream->Write<bool>(state != 0);
   stream->Write<bool>(manual_reset_);
 
   return true;
@@ -175,17 +131,7 @@ object_ref<XEvent> XEvent::Restore(KernelState* kernel_state,
   evt->RestoreObject(stream);
   bool signaled = stream->Read<bool>();
   evt->manual_reset_ = stream->Read<bool>();
-
-  if (evt->manual_reset_) {
-    evt->event_ = xe::threading::Event::CreateManualResetEvent(false);
-  } else {
-    evt->event_ = xe::threading::Event::CreateAutoResetEvent(false);
-  }
-  assert_not_null(evt->event_);
-
-  if (signaled) {
-    evt->event_->Set();
-  }
+  evt->Bind(signaled);
 
   return object_ref<XEvent>(evt);
 }

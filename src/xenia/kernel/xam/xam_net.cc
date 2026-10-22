@@ -430,7 +430,8 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
     return ~0u;
   }
 
-  uint64_t timeout_wait = (uint64_t)timeout;
+  // Milliseconds, as a relative guest timeout (negative 100 ns units).
+  uint64_t timeout_wait = uint64_t(-int64_t(uint32_t(timeout)) * 10000);
 
   X_STATUS result = 0;
   do {

@@ -16,6 +16,7 @@
 #include <string>
 
 #include "xenia/base/threading.h"
+#include "xenia/kernel/dispatch/dispatcher.h"
 #include "xenia/kernel/kernel.h"
 #include "xenia/memory.h"
 
@@ -232,6 +233,12 @@ class XObject {
                                        X_OBJECT_TYPES as_type = UndefinedObject,
                                        bool already_locked = false);
 
+  // The object's signal state as the guest sees it, written into its guest
+  // header whenever the dispatcher core changes it.
+  virtual void WriteSignalState(int32_t signal_state);
+  // Its object in the dispatcher core; 0 for objects nobody waits on.
+  dispatch::ObjectId dispatch_object() const { return dispatch_object_; }
+
   // Priority increment stored by the most recent signal operation
   // (KeSetEvent, KeReleaseSemaphore, etc.).  Read by the waiter on wake
   // to apply a priority boost matching real Xenon scheduler behavior.
@@ -242,10 +249,26 @@ class XObject {
   bool SaveObject(ByteStream* stream);
   bool RestoreObject(ByteStream* stream);
 
-  // Called on successful wait.
-  virtual void WaitCallback() {}
-  virtual void SyncFromGuest() {}
-  virtual xe::threading::WaitHandle* GetWaitHandle() { return nullptr; }
+  // Reads a guest write to the object's header into the dispatcher core.
+  void SyncFromGuest();
+  // Makes id the object's dispatcher object.
+  void BindDispatchObject(dispatch::ObjectId id);
+  // For objects waiters see as an event (a file's I/O completion, a
+  // notification listener): binds a new core event, and sets or resets it.
+  void BindDispatchEvent(bool manual_reset);
+  void SetDispatchEvent();
+  void ResetDispatchEvent();
+  // What SignalAndWait does to this object as the signal: a set, a release.
+  virtual dispatch::Effects SignalForWait(dispatch::Dispatcher& core,
+                                          dispatch::ThreadId caller) {
+    return {};
+  }
+  // Reads the guest header, so any memory-coherence pull it needs happens
+  // before the dispatcher lock is taken.
+  void TouchHeader() const;
+
+  // For waits Xenia still does on host primitives (I/O completion ports).
+  static uint32_t TimeoutTicksToMs(int64_t timeout_ticks);
 
   // Creates the kernel object for guest code to use. Typically not needed.
   uint8_t* CreateNative(uint32_t size);
@@ -261,8 +284,6 @@ class XObject {
     header->wait_list.flink_ptr = kXObjSignature;
     header->wait_list.blink_ptr = handle;
   }
-
-  static uint32_t TimeoutTicksToMs(int64_t timeout_ticks);
 
   KernelState* kernel_state_;
 
@@ -284,6 +305,8 @@ class XObject {
   bool allocated_guest_object_ = false;
 
   std::atomic<uint32_t> guest_object_type_ptr_{0};
+
+  dispatch::ObjectId dispatch_object_ = dispatch::kNoObject;
 };
 
 template <typename T>

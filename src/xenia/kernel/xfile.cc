@@ -22,18 +22,14 @@ XFile::XFile(KernelState* kernel_state, vfs::File* file, bool synchronous,
       file_(file),
       is_synchronous_(synchronous),
       allow_buffering_(allow_buffering) {
-  async_event_ = threading::Event::CreateAutoResetEvent(false);
-  assert_not_null(async_event_);
+  BindDispatchEvent(false);
 }
 
-XFile::XFile() : XObject(kObjectType), completion_port_lock_() {
-  async_event_ = threading::Event::CreateAutoResetEvent(false);
-  assert_not_null(async_event_);
-}
+XFile::XFile() : XObject(kObjectType), completion_port_lock_() {}
 
 XFile::~XFile() {
   // TODO(benvanik): signal that the file is closing?
-  async_event_->Set();
+  SetDispatchEvent();
   file_->Destroy();
 }
 
@@ -208,7 +204,7 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
 
     NotifyIOCompletionPorts(notify);
 
-    async_event_->Set();
+    SetDispatchEvent();
   }
 
   return result;
@@ -277,7 +273,7 @@ X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length,
 
   NotifyIOCompletionPorts(notify);
 
-  async_event_->Set();
+  SetDispatchEvent();
 
   return result;
 }
@@ -330,7 +326,7 @@ X_STATUS XFile::Write(uint32_t buffer_guest_address, uint32_t buffer_length,
     *out_bytes_written = uint32_t(bytes_written);
   }
 
-  async_event_->Set();
+  SetDispatchEvent();
   return result;
 }
 
@@ -385,6 +381,7 @@ object_ref<XFile> XFile::Restore(KernelState* kernel_state,
                                  ByteStream* stream) {
   auto file = new XFile();
   file->kernel_state_ = kernel_state;
+  file->BindDispatchEvent(false);
   if (!file->RestoreObject(stream)) {
     delete file;
     return nullptr;

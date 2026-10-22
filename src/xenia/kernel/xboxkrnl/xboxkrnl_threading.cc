@@ -12,6 +12,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/kernel/dispatch/shell.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
@@ -1386,6 +1387,12 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
 
   auto current_thread = ctx->TranslateVirtual(kpcr->prcb_data.current_thread);
 
+  // Timer routines that came due are queued from here, on their own thread.
+  XThread* xthread = XThread::TryGetCurrentThread();
+  if (xthread) {
+    xthread->QueueTimerApcs();
+  }
+
   uint32_t unlocked_irql =
       xeKeKfAcquireSpinLock(ctx, &current_thread->apc_lock);
 
@@ -1443,6 +1450,14 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
 
   ctx->r[1] = old_stack_pointer;
 
+  // Under the APC lock, so an APC queued after this is still reported.
+  if (xthread) {
+    dispatch::ThreadId waiter = xthread->waiter().id;
+    ctx->kernel_state->dispatch()->Read([waiter](dispatch::Dispatcher& core) {
+      core.UserApcsDelivered(waiter);
+      return 0;
+    });
+  }
   xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
   return alert_status;
 }
@@ -1537,6 +1552,13 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
     return 0;
   }
   auto target_thread = context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr);
+  // A user APC ends the target's alertable wait. Looked up before the APC
+  // lock, which the core is then told under, so it is never told late.
+  object_ref<XThread> target_xthread;
+  if (apc->apc_mode == 1) {
+    target_xthread = XObject::GetNativeObject<XThread>(
+        context->kernel_state, target_thread, X_OBJECT_TYPES::ThreadObject);
+  }
   auto old_irql = xeKeKfAcquireSpinLock(context, &target_thread->apc_lock);
   uint32_t result;
   if (!target_thread->may_queue_apcs || apc->enqueued) {
@@ -1572,6 +1594,13 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
        for waking the target thread if its alertable
     */
     result = 1;
+    if (target_xthread) {
+      dispatch::ThreadId waiter = target_xthread->waiter().id;
+      context->kernel_state->dispatch()->Run(
+          [waiter](dispatch::Dispatcher& core) {
+            return core.QueueUserApc(waiter);
+          });
+    }
   }
   xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql);
   return result;

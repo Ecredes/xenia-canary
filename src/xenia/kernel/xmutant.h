@@ -31,20 +31,21 @@ class XMutant : public XObject {
   void InitializeNative(void* native_ptr, const X_DISPATCH_HEADER* header);
 
   X_STATUS ReleaseMutant(uint32_t priority_increment, bool abandon, bool wait);
+  // The thread that holds it, or null. Compare, don't dereference: it may be
+  // gone by the time it is read.
+  const XThread* owning_thread() const;
 
   bool Save(ByteStream* stream) override;
   static object_ref<XMutant> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
 
  protected:
-  xe::threading::WaitHandle* GetWaitHandle() override { return mutant_.get(); }
-  void WaitCallback() override;
+  dispatch::Effects SignalForWait(dispatch::Dispatcher& core,
+                                  dispatch::ThreadId caller) override;
 
  private:
   XMutant();
-
-  std::unique_ptr<xe::threading::Mutant> mutant_;
-  std::atomic<XThread*> owning_thread_{nullptr};
+  void Bind(dispatch::ThreadId owner);
 };
 
 }  // namespace kernel

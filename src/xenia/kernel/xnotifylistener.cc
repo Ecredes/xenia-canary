@@ -24,10 +24,9 @@ XNotifyListener::~XNotifyListener() {}
 
 void XNotifyListener::Initialize(uint64_t mask, uint32_t is_system,
                                  uint32_t max_version) {
-  assert_false(wait_handle_);
+  assert_false(dispatch_object());
 
-  wait_handle_ = xe::threading::Event::CreateManualResetEvent(false);
-  assert_not_null(wait_handle_);
+  BindDispatchEvent(true);
   mask_ = mask;
   is_system_ = is_system;
   max_version_ = max_version;
@@ -47,7 +46,7 @@ void XNotifyListener::EnqueueNotification(XNotificationID id, uint32_t data) {
   }
   auto global_lock = global_critical_region_.Acquire();
   notifications_.push_back(std::pair<XNotificationID, uint32_t>(id, data));
-  wait_handle_->Set();
+  SetDispatchEvent();
 }
 
 bool XNotifyListener::DequeueNotification(XNotificationID* out_id,
@@ -61,7 +60,7 @@ bool XNotifyListener::DequeueNotification(XNotificationID* out_id,
     *out_data = it->second;
     notifications_.erase(it);
     if (!notifications_.size()) {
-      wait_handle_->Reset();
+      ResetDispatchEvent();
     }
   }
   return dequeued;
@@ -82,7 +81,7 @@ bool XNotifyListener::DequeueNotification(XNotificationID id,
     *out_data = it->second;
     notifications_.erase(it);
     if (!notifications_.size()) {
-      wait_handle_->Reset();
+      ResetDispatchEvent();
     }
     break;
   }
@@ -121,6 +120,9 @@ object_ref<XNotifyListener> XNotifyListener::Restore(KernelState* kernel_state,
     pair.first = stream->Read<uint32_t>();
     pair.second = stream->Read<uint32_t>();
     notify->notifications_.push_back(pair);
+  }
+  if (!notify->notifications_.empty()) {
+    notify->SetDispatchEvent();
   }
 
   return object_ref<XNotifyListener>(notify);

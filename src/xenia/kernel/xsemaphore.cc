@@ -11,6 +11,8 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/dispatch/shell.h"
+#include "xenia/kernel/kernel_state.h"
 
 namespace xe {
 namespace kernel {
@@ -20,8 +22,15 @@ XSemaphore::XSemaphore(KernelState* kernel_state)
 
 XSemaphore::~XSemaphore() = default;
 
+void XSemaphore::Bind(int32_t count) {
+  BindDispatchObject(kernel_state()->dispatch()->Read(
+      [this, count](dispatch::Dispatcher& core) {
+        return core.NewSemaphore(count, int32_t(maximum_count_));
+      }));
+}
+
 bool XSemaphore::Initialize(int32_t initial_count, int32_t maximum_count) {
-  assert_false(semaphore_);
+  assert_false(dispatch_object());
 
   CreateNative(sizeof(X_KSEMAPHORE));
   auto* semaphore = memory()->TranslateVirtual<X_KSEMAPHORE*>(guest_object());
@@ -30,43 +39,38 @@ bool XSemaphore::Initialize(int32_t initial_count, int32_t maximum_count) {
   semaphore->limit = maximum_count;
 
   maximum_count_ = maximum_count;
-  host_count_ = initial_count;
-  semaphore_ = xe::threading::Semaphore::Create(initial_count, maximum_count);
-  return !!semaphore_;
+  Bind(initial_count);
+  return true;
 }
 
 bool XSemaphore::InitializeNative(void* native_ptr,
                                   const X_DISPATCH_HEADER* header) {
-  assert_false(semaphore_);
+  assert_false(dispatch_object());
   SetNativePointer(memory()->HostToGuestVirtual(native_ptr));
   auto semaphore = reinterpret_cast<X_KSEMAPHORE*>(native_ptr);
   maximum_count_ = semaphore->limit;
-  host_count_ = static_cast<int32_t>(semaphore->header.signal_state);
-  semaphore_ = xe::threading::Semaphore::Create(semaphore->header.signal_state,
-                                                semaphore->limit);
-  return !!semaphore_;
+  Bind(int32_t(uint32_t(semaphore->header.signal_state)));
+  return true;
 }
 
 bool XSemaphore::ReleaseSemaphore(int32_t release_count,
                                   int32_t* out_previous_count) {
+  TouchHeader();
   int32_t previous_count = 0;
-
-  bool success = false;
-  {
-    std::lock_guard<std::mutex> lock(count_lock_);
-    success = semaphore_->Release(release_count, &previous_count);
-    if (success) {
-      host_count_ += release_count;
-      memory()
-          ->TranslateVirtual<X_KSEMAPHORE*>(guest_object())
-          ->header.signal_state = host_count_;
-    }
-  }
-
+  bool exceeded = false;
+  kernel_state()->dispatch()->Run([&, this](dispatch::Dispatcher& core) {
+    return core.ReleaseSemaphore(dispatch_object(), release_count,
+                                 &previous_count, &exceeded);
+  });
   if (out_previous_count) {
     *out_previous_count = previous_count;
   }
-  return success;
+  return !exceeded;
+}
+
+dispatch::Effects XSemaphore::SignalForWait(dispatch::Dispatcher& core,
+                                            dispatch::ThreadId caller) {
+  return core.ReleaseSemaphore(dispatch_object(), 1);
 }
 
 bool XSemaphore::Save(ByteStream* stream) {
@@ -74,71 +78,18 @@ bool XSemaphore::Save(ByteStream* stream) {
     return false;
   }
 
-  // Get the free number of slots from the semaphore.
-  uint32_t free_count = 0;
-  while (
-      threading::Wait(semaphore_.get(), false, std::chrono::milliseconds(0)) ==
-      threading::WaitResult::kSuccess) {
-    free_count++;
-  }
-
+  std::optional<dispatch::ObjectInfo> info =
+      kernel_state()->dispatch()->Read([this](dispatch::Dispatcher& core) {
+        return core.Query(dispatch_object());
+      });
+  uint32_t free_count = info ? uint32_t(std::max(info->signal_state, 0)) : 0;
   XELOGD("XSemaphore {:08X} (count {}/{})", handle(), free_count,
          maximum_count_);
-
-  // Restore the semaphore back to its previous count.
-  semaphore_->Release(free_count, nullptr);
 
   stream->Write(maximum_count_);
   stream->Write(free_count);
 
   return true;
-}
-
-void XSemaphore::WaitCallback() {
-  std::lock_guard<std::mutex> lock(count_lock_);
-  host_count_ -= 1;
-  memory()
-      ->TranslateVirtual<X_KSEMAPHORE*>(guest_object())
-      ->header.signal_state = host_count_;
-}
-
-void XSemaphore::SyncFromGuest() {
-  if (!guest_object()) {
-    return;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(count_lock_);
-    auto& signal_state = memory()
-                             ->TranslateVirtual<X_KSEMAPHORE*>(guest_object())
-                             ->header.signal_state;
-    int32_t guest_count = static_cast<int32_t>(signal_state);
-    if (guest_count == host_count_) {
-      return;
-    }
-    // The header only holds what this kernel last put there, so anything else
-    // came from the guest, such as an in-place re-initialize.
-    if (guest_count > host_count_) {
-      int32_t delta = guest_count - host_count_;
-      if (!semaphore_->Release(delta, nullptr)) {
-        return;  // over the limit, leave the host count alone
-      }
-      host_count_ += delta;
-    } else {
-      // Take back permits the guest dropped, never blocking for one a waiter
-      // already claimed.
-      int32_t delta = host_count_ - guest_count;
-      int32_t drained = 0;
-      while (drained < delta &&
-             xe::threading::Wait(semaphore_.get(), false,
-                                 std::chrono::milliseconds(0)) ==
-                 xe::threading::WaitResult::kSuccess) {
-        ++drained;
-      }
-      host_count_ -= drained;
-    }
-    signal_state = host_count_;
-  }
 }
 
 object_ref<XSemaphore> XSemaphore::Restore(KernelState* kernel_state,
@@ -154,11 +105,7 @@ object_ref<XSemaphore> XSemaphore::Restore(KernelState* kernel_state,
   auto free_count = stream->Read<uint32_t>();
   XELOGD("XSemaphore {:08X} (count {}/{})", sem->handle(), free_count,
          sem->maximum_count_);
-
-  sem->semaphore_ =
-      threading::Semaphore::Create(free_count, sem->maximum_count_);
-  assert_not_null(sem->semaphore_);
-  sem->host_count_ = static_cast<int32_t>(free_count);
+  sem->Bind(int32_t(free_count));
 
   return object_ref<XSemaphore>(sem);
 }

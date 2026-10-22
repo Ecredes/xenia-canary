@@ -182,10 +182,6 @@ class XFile : public XObject {
  protected:
   void NotifyIOCompletionPorts(XIOCompletion::IONotification& notification);
 
-  xe::threading::WaitHandle* GetWaitHandle() override {
-    return async_event_.get();
-  }
-
  private:
   XFile();
 
@@ -195,7 +191,6 @@ class XFile : public XObject {
                         bool* out_pending);
 
   vfs::File* file_ = nullptr;
-  std::unique_ptr<threading::Event> async_event_ = nullptr;
 
   mutable std::mutex file_lock_;
   std::mutex completion_port_lock_;

@@ -61,13 +61,7 @@ class XNotifyListener : public XObject {
   static object_ref<XNotifyListener> Restore(KernelState* kernel_state,
                                              ByteStream* stream);
 
- protected:
-  xe::threading::WaitHandle* GetWaitHandle() override {
-    return wait_handle_.get();
-  }
-
  private:
-  std::unique_ptr<xe::threading::Event> wait_handle_;
   xe::global_critical_region global_critical_region_;
   std::vector<std::pair<XNotificationID, uint32_t>> notifications_;
   uint64_t mask_ = 0;

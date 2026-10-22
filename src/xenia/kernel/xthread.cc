@@ -81,6 +81,7 @@ XThread::XThread(KernelState* kernel_state, uint32_t stack_size,
 XThread::~XThread() {
   // Unregister first to prevent lookups while deleting.
   kernel_state_->UnregisterThread(this);
+  kernel_state_->dispatch()->RemoveWaiter(waiter_);
 
   // Notify processor of our impending destruction.
   emulator()->processor()->OnThreadDestroyed(thread_id_);
@@ -114,6 +115,10 @@ XThread* XThread::GetCurrentThread() {
     assert_always("Attempting to use guest stuff from a non-guest thread.");
   }
   return thread;
+}
+
+XThread* XThread::TryGetCurrentThread() {
+  return reinterpret_cast<XThread*>(current_xthread_tls_);
 }
 
 uint32_t XThread::GetCurrentThreadHandle() {
@@ -316,6 +321,13 @@ X_STATUS XThread::Create() {
     XELOGW("Unable to allocate thread object");
     return X_STATUS_NO_MEMORY;
   }
+  // A waiter, and the object its handle waits on.
+  dispatch::Shell* shell = kernel_state()->dispatch();
+  waiter_.thread = this;
+  shell->AddWaiter(waiter_);
+  BindDispatchObject(shell->Read([this](dispatch::Dispatcher& core) {
+    return core.NewThreadObject(waiter_.id);
+  }));
 
   // Allocate a stack.
   if (!AllocateStack(creation_params_.stack_size)) {
@@ -487,6 +499,7 @@ X_STATUS XThread::Exit(int exit_code) {
   // Set exit code.
   kthread->header.signal_state = 1;
   kthread->exit_status = exit_code;
+  Terminated();
 
   auto kprocess = cpu_context->TranslateVirtual(kthread->process);
 
@@ -525,6 +538,7 @@ X_STATUS XThread::Terminate(int exit_code) {
   X_KTHREAD* thread = guest_object<X_KTHREAD>();
   thread->header.signal_state = 1;
   thread->exit_status = exit_code;
+  Terminated();
 
   // Notify processor of our exit.
   emulator()->processor()->OnThreadExit(thread_id_);
@@ -677,6 +691,38 @@ void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
 }
 
 void XThread::SetCurrentThread() { current_xthread_tls_ = this; }
+
+void XThread::Terminated() {
+  kernel_state()->dispatch()->Run([this](dispatch::Dispatcher& core) {
+    return core.ThreadTerminated(waiter_.id);
+  });
+}
+
+void XThread::QueueTimerApc(uint32_t routine, uint32_t routine_arg,
+                            uint64_t time) {
+  {
+    std::lock_guard<std::mutex> lock(timer_apcs_lock_);
+    timer_apcs_.push_back({routine, routine_arg, time});
+  }
+  // Ends an alertable wait; else the next one returns at once.
+  kernel_state()->dispatch()->Run([this](dispatch::Dispatcher& core) {
+    return core.QueueUserApc(waiter_.id);
+  });
+}
+
+void XThread::QueueTimerApcs() {
+  std::vector<TimerApc> due;
+  {
+    std::lock_guard<std::mutex> lock(timer_apcs_lock_);
+    due.swap(timer_apcs_);
+  }
+  for (const TimerApc& apc : due) {
+    XELOGI("XTimer queuing timer callback {:08X}({:08X}, {:016X})", apc.routine,
+           apc.routine_arg, apc.time);
+    EnqueueApc(apc.routine, apc.routine_arg, uint32_t(apc.time),
+               uint32_t(apc.time >> 32));
+  }
+}
 
 void XThread::DeliverAPCs() {
   // https://www.drdobbs.com/inside-nts-asynchronous-procedure-call/184416590?pgno=1
@@ -1145,6 +1191,12 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
 
   // Register now that we know our thread ID.
   kernel_state->RegisterThread(thread);
+  thread->waiter_.thread = thread;
+  kernel_state->dispatch()->AddWaiter(thread->waiter_);
+  thread->BindDispatchObject(
+      kernel_state->dispatch()->Read([thread](dispatch::Dispatcher& core) {
+        return core.NewThreadObject(thread->waiter_.id);
+      }));
 
   thread->thread_state_ =
       new cpu::ThreadState(kernel_state->processor(), thread->thread_id_,

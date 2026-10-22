@@ -186,7 +186,11 @@ void Dispatcher::WakeWaiters(ObjectId object_id, Effects& effects) {
 
 Effects Dispatcher::SetEvent(ObjectId event, int32_t* previous) {
   Effects effects;
-  Object& object = objects_.at(event);
+  auto found = objects_.find(event);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& object = found->second;
   if (previous) {
     *previous = object.signal_state;
   }
@@ -198,20 +202,28 @@ Effects Dispatcher::SetEvent(ObjectId event, int32_t* previous) {
 
 Effects Dispatcher::PulseEvent(ObjectId event, int32_t* previous) {
   Effects effects;
-  Object& object = objects_.at(event);
+  auto found = objects_.find(event);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& object = found->second;
   if (previous) {
     *previous = object.signal_state;
   }
   object.signal_state = 1;
   WakeWaiters(event, effects);
-  objects_.at(event).signal_state = 0;
+  object.signal_state = 0;
   NoteSignal(event, effects);
   return effects;
 }
 
 Effects Dispatcher::ResetEvent(ObjectId event, int32_t* previous) {
   Effects effects;
-  Object& object = objects_.at(event);
+  auto found = objects_.find(event);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& object = found->second;
   if (previous) {
     *previous = object.signal_state;
   }
@@ -223,7 +235,11 @@ Effects Dispatcher::ResetEvent(ObjectId event, int32_t* previous) {
 Effects Dispatcher::ReleaseSemaphore(ObjectId semaphore, int32_t count,
                                      int32_t* previous, bool* exceeded) {
   Effects effects;
-  Object& object = objects_.at(semaphore);
+  auto found = objects_.find(semaphore);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& object = found->second;
   if (previous) {
     *previous = object.signal_state;
   }
@@ -245,7 +261,11 @@ Effects Dispatcher::ReleaseMutant(ObjectId mutant, ThreadId caller,
                                   bool abandon, int32_t* previous,
                                   bool* not_owned) {
   Effects effects;
-  Object& object = objects_.at(mutant);
+  auto found = objects_.find(mutant);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& object = found->second;
   if (previous) {
     *previous = object.signal_state;
   }
@@ -272,7 +292,11 @@ Effects Dispatcher::ReleaseMutant(ObjectId mutant, ThreadId caller,
 
 Effects Dispatcher::SetSignalState(ObjectId id, int32_t signal_state) {
   Effects effects;
-  Object& object = objects_.at(id);
+  auto found = objects_.find(id);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& object = found->second;
   if (object.signal_state == signal_state) {
     return effects;
   }
@@ -288,7 +312,11 @@ Effects Dispatcher::SetSignalState(ObjectId id, int32_t signal_state) {
 WaitResult Dispatcher::BeginWait(ThreadId id, const WaitRequest& request,
                                  uint64_t now) {
   WaitResult result;
-  Thread& thread = threads_.at(id);
+  auto found = threads_.find(id);
+  if (found == threads_.end()) {
+    return result;
+  }
+  Thread& thread = found->second;
   if (request.alertable && thread.user_apc_pending) {
     result.status = kStatusUserApc;
     return result;
@@ -346,7 +374,11 @@ std::optional<uint64_t> Dispatcher::NextDeadline() const {
 
 Effects Dispatcher::QueueUserApc(ThreadId id) {
   Effects effects;
-  Thread& thread = threads_.at(id);
+  auto found = threads_.find(id);
+  if (found == threads_.end()) {
+    return effects;
+  }
+  Thread& thread = found->second;
   thread.user_apc_pending = true;
   if (thread.waiting && thread.alertable) {
     EndWait(id, thread, kStatusUserApc, effects);
@@ -355,7 +387,10 @@ Effects Dispatcher::QueueUserApc(ThreadId id) {
 }
 
 void Dispatcher::UserApcsDelivered(ThreadId id) {
-  threads_.at(id).user_apc_pending = false;
+  auto found = threads_.find(id);
+  if (found != threads_.end()) {
+    found->second.user_apc_pending = false;
+  }
 }
 
 Effects Dispatcher::ThreadTerminated(ThreadId id) {

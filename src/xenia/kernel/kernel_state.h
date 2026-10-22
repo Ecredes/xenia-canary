@@ -19,6 +19,7 @@
 #include "xenia/base/bit_map.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/export_resolver.h"
+#include "xenia/kernel/dispatch/shell.h"
 #include "xenia/kernel/kernel.h"
 #include "xenia/kernel/nui.h"
 #include "xenia/kernel/smc.h"
@@ -205,6 +206,8 @@ class KernelState {
 
   // Access must be guarded by the global critical region.
   util::ObjectTable* object_table() { return &object_table_; }
+  // Guest waits and signals (the dispatcher core and its shell).
+  dispatch::Shell* dispatch() { return dispatch_.get(); }
 
   const KernelVersion* GetKernelVersion() const { return &kernel_version_; }
 
@@ -364,6 +367,10 @@ class KernelState {
   KernelVersion kernel_version_;
 
   xe::global_critical_region global_critical_region_;
+
+  // Declared before the object table, so it outlives every object.
+  std::unique_ptr<dispatch::Shell> dispatch_ =
+      std::make_unique<dispatch::Shell>();
 
   // Must be guarded by the global critical region.
   util::ObjectTable object_table_;

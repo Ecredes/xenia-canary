@@ -13,6 +13,7 @@
 #include <mutex>
 
 #include "xenia/base/threading.h"
+#include "xenia/base/threading_timer_queue.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/xbox.h"
 
@@ -34,14 +35,14 @@ class XTimer : public XObject {
                     uint32_t routine_arg, bool resume);
   X_STATUS Cancel();
 
- protected:
-  xe::threading::WaitHandle* GetWaitHandle() override { return timer_.get(); }
-
  private:
-  std::unique_ptr<xe::threading::Timer> timer_;
-  std::mutex timer_lock_;
+  // Runs on the timer queue thread when the timer is due.
+  void Fire();
 
-  XThread* callback_thread_ = nullptr;
+  std::mutex timer_lock_;
+  std::weak_ptr<xe::threading::TimerQueueWaitItem> wait_item_;
+
+  object_ref<XThread> callback_thread_;
   uint32_t callback_routine_ = 0;
   uint32_t callback_routine_arg_ = 0;
 };

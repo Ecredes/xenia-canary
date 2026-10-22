@@ -25,6 +25,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/cpu/thread.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/kernel/dispatch/shell.h"
 #include "xenia/kernel/util/native_list.h"
 #include "xenia/kernel/util/xfiletime.h"
 #include "xenia/kernel/xmutant.h"
@@ -408,6 +409,8 @@ class XThread : public XObject, public cpu::Thread {
   static bool IsInThread(XThread* other);
   static bool IsInThread();
   static XThread* GetCurrentThread();
+  // The calling thread's XThread, or null on a host thread.
+  static XThread* TryGetCurrentThread();
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 
@@ -415,6 +418,14 @@ class XThread : public XObject, public cpu::Thread {
   static void SetLastError(uint32_t error_code);
 
   const CreationParams* creation_params() const { return &creation_params_; }
+
+  // The thread's place in the dispatcher: what it parks on while it waits.
+  dispatch::Waiter& waiter() { return waiter_; }
+  // A timer's routine due on this thread. Its APC is queued from the thread
+  // itself (QueueTimerApcs, as it delivers APCs), since building one needs
+  // the thread's guest context.
+  void QueueTimerApc(uint32_t routine, uint32_t routine_arg, uint64_t time);
+  void QueueTimerApcs();
   uint32_t tls_ptr() const { return tls_static_address_; }
   uint32_t pcr_ptr() const { return pcr_address_; }
   uint32_t stack_base() const { return stack_base_; }
@@ -513,9 +524,20 @@ class XThread : public XObject, public cpu::Thread {
   void DeliverAPCs();
   void RundownAPCs();
 
-  xe::threading::WaitHandle* GetWaitHandle() override { return thread_.get(); }
+  // Tells the dispatcher the thread ended: its thread object is signaled and
+  // the mutants it owns are abandoned.
+  void Terminated();
 
   CreationParams creation_params_ = {0};
+
+  dispatch::Waiter waiter_;
+  struct TimerApc {
+    uint32_t routine;
+    uint32_t routine_arg;
+    uint64_t time;
+  };
+  std::mutex timer_apcs_lock_;
+  std::vector<TimerApc> timer_apcs_;
 
   std::vector<object_ref<XMutant>> pending_mutant_acquires_;
 

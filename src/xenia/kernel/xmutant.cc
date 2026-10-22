@@ -11,6 +11,7 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/dispatch/shell.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xthread.h"
 
@@ -24,16 +25,20 @@ XMutant::XMutant() : XObject(kObjectType) {}
 
 XMutant::~XMutant() = default;
 
-void XMutant::Initialize(bool initial_owner) {
-  assert_false(mutant_);
+void XMutant::Bind(dispatch::ThreadId owner) {
+  BindDispatchObject(kernel_state()->dispatch()->Read(
+      [owner](dispatch::Dispatcher& core) { return core.NewMutant(owner); }));
+}
 
-  mutant_ = xe::threading::Mutant::Create(initial_owner);
-  assert_not_null(mutant_);
+void XMutant::Initialize(bool initial_owner) {
+  assert_false(dispatch_object());
+  Bind(initial_owner ? kernel_state()->dispatch()->CurrentWaiter().id
+                     : dispatch::kNoThread);
 }
 
 void XMutant::InitializeNative(void* native_ptr,
                                const X_DISPATCH_HEADER* header) {
-  assert_false(mutant_);
+  assert_false(dispatch_object());
 
   // Haven't seen this yet, but it's possible.
   assert_always();
@@ -41,20 +46,32 @@ void XMutant::InitializeNative(void* native_ptr,
 
 X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon,
                                 bool wait) {
-  // Call should succeed if we own the mutant, so go ahead and do this.
-  if (owning_thread_ == XThread::GetCurrentThread()) {
-    owning_thread_ = nullptr;
-  }
-
   set_priority_increment(priority_increment);
+  dispatch::Shell* shell = kernel_state()->dispatch();
+  dispatch::ThreadId caller = shell->CurrentWaiter().id;
+  bool not_owned = false;
+  shell->Run([&, this](dispatch::Dispatcher& core) {
+    return core.ReleaseMutant(dispatch_object(), caller, abandon, nullptr,
+                              &not_owned);
+  });
+  return not_owned ? X_STATUS_MUTANT_NOT_OWNED : X_STATUS_SUCCESS;
+}
 
-  // TODO(benvanik): abandoning.
-  assert_false(abandon);
-  if (mutant_->Release()) {
-    return X_STATUS_SUCCESS;
-  } else {
-    return X_STATUS_MUTANT_NOT_OWNED;
+dispatch::Effects XMutant::SignalForWait(dispatch::Dispatcher& core,
+                                         dispatch::ThreadId caller) {
+  return core.ReleaseMutant(dispatch_object(), caller);
+}
+
+const XThread* XMutant::owning_thread() const {
+  dispatch::Shell* shell = kernel_state()->dispatch();
+  std::optional<dispatch::ObjectInfo> info =
+      shell->Read([this](dispatch::Dispatcher& core) {
+        return core.Query(dispatch_object());
+      });
+  if (!info || info->owner == dispatch::kNoThread) {
+    return nullptr;
   }
+  return shell->ThreadOf(info->owner);
 }
 
 bool XMutant::Save(ByteStream* stream) {
@@ -62,7 +79,8 @@ bool XMutant::Save(ByteStream* stream) {
     return false;
   }
 
-  XThread* owner = owning_thread_.load();
+  // Saving runs with the guest stopped, so the owner is still there.
+  const XThread* owner = owning_thread();
   uint32_t owning_thread_handle = owner ? owner->handle() : 0;
   stream->Write<uint32_t>(owning_thread_handle);
   XELOGD("XMutant {:08X} (owner: {:08X})", handle(), owning_thread_handle);
@@ -84,17 +102,15 @@ object_ref<XMutant> XMutant::Restore(KernelState* kernel_state,
 
   auto owning_thread_handle = stream->Read<uint32_t>();
   if (owning_thread_handle) {
-    mutant->owning_thread_ = kernel_state->object_table()
-                                 ->LookupObject<XThread>(owning_thread_handle)
-                                 .get();
-    mutant->owning_thread_.load()->AcquireMutantOnStartup(
-        retain_object(mutant));
+    auto owner = kernel_state->object_table()->LookupObject<XThread>(
+        owning_thread_handle);
+    if (owner) {
+      owner->AcquireMutantOnStartup(retain_object(mutant));
+    }
   }
 
   return object_ref<XMutant>(mutant);
 }
-
-void XMutant::WaitCallback() { owning_thread_ = XThread::GetCurrentThread(); }
 
 }  // namespace kernel
 }  // namespace xe

@@ -10,6 +10,7 @@
 #include "xenia/kernel/xobject.h"
 
 #include "xenia/base/byte_stream.h"
+#include "xenia/kernel/dispatch/shell.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -50,6 +51,10 @@ XObject::XObject(KernelState* kernel_state, Type type, bool host_object)
 XObject::~XObject() {
   assert_true(handles_.empty());
   assert_zero(pointer_ref_count_);
+
+  if (dispatch_object_ && kernel_state_) {
+    kernel_state_->dispatch()->Destroy(dispatch_object_);
+  }
 
   if (allocated_guest_object_) {
     uint32_t ptr = guest_object_ptr_ - sizeof(X_OBJECT_HEADER);
@@ -202,161 +207,163 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   }
 }
 
+namespace {
+
+// What a finished wait means for the caller: a boost for having been
+// satisfied (or woken for an APC), a yield after a timeout.
+X_STATUS FinishWait(uint32_t status, uint32_t boost_increment) {
+  if (status == dispatch::kStatusTimeout) {
+    xe::threading::MaybeYield();
+  } else if (status < dispatch::kStatusAbandonedWait0 ||
+             status == dispatch::kStatusUserApc) {
+    if (XThread* thread = XThread::TryGetCurrentThread()) {
+      thread->BoostOnWake(static_cast<int32_t>(boost_increment));
+    }
+  }
+  return X_STATUS(status);
+}
+
+}  // namespace
+
+void XObject::WriteSignalState(int32_t signal_state) {
+  if (guest_object_ptr_ && HasDispatcherHeader(type_)) {
+    memory()
+        ->TranslateVirtual<X_DISPATCH_HEADER*>(guest_object_ptr_)
+        ->signal_state = uint32_t(signal_state);
+  }
+}
+
+void XObject::TouchHeader() const {
+  if (guest_object_ptr_ && HasDispatcherHeader(type_)) {
+    volatile uint32_t signal_state =
+        memory()
+            ->TranslateVirtual<X_DISPATCH_HEADER*>(guest_object_ptr_)
+            ->signal_state;
+    (void)signal_state;
+  }
+}
+
+void XObject::BindDispatchObject(dispatch::ObjectId id) {
+  dispatch_object_ = id;
+  kernel_state_->dispatch()->Bind(id, this);
+}
+
+void XObject::BindDispatchEvent(bool manual_reset) {
+  BindDispatchObject(kernel_state_->dispatch()->Read(
+      [manual_reset](dispatch::Dispatcher& core) {
+        return core.NewEvent(manual_reset, false);
+      }));
+}
+
+void XObject::SetDispatchEvent() {
+  if (!dispatch_object_) {
+    return;
+  }
+  kernel_state_->dispatch()->Run([this](dispatch::Dispatcher& core) {
+    return core.SetEvent(dispatch_object_);
+  });
+}
+
+void XObject::ResetDispatchEvent() {
+  if (!dispatch_object_) {
+    return;
+  }
+  kernel_state_->dispatch()->Run([this](dispatch::Dispatcher& core) {
+    return core.ResetEvent(dispatch_object_);
+  });
+}
+
+void XObject::SyncFromGuest() {
+  if (!dispatch_object_ || !guest_object_ptr_ || !HasDispatcherHeader(type_)) {
+    return;
+  }
+  TouchHeader();
+  // Under the lock, the header holds what the core last wrote there, unless
+  // the guest wrote it since.
+  kernel_state_->dispatch()->Run([this](dispatch::Dispatcher& core) {
+    int32_t guest_state = int32_t(
+        uint32_t(memory()
+                     ->TranslateVirtual<X_DISPATCH_HEADER*>(guest_object_ptr_)
+                     ->signal_state));
+    std::optional<dispatch::ObjectInfo> info = core.Query(dispatch_object_);
+    if (!info || info->signal_state == guest_state) {
+      return dispatch::Effects();
+    }
+    return core.SetSignalState(dispatch_object_, guest_state);
+  });
+}
+
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                        uint32_t alertable, uint64_t* opt_timeout) {
-  auto wait_handle = GetWaitHandle();
-  if (!wait_handle) {
+  if (!dispatch_object_) {
     // Object doesn't support waiting.
     return X_STATUS_SUCCESS;
   }
-
-  auto timeout_ms =
-      opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
-                        TimeoutTicksToMs(*opt_timeout)))
-                  : std::chrono::milliseconds::max();
-
-  auto result =
-      xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
-
-  switch (result) {
-    case xe::threading::WaitResult::kSuccess:
-    case xe::threading::WaitResult::kUserCallback: {
-      auto current_thread = XThread::GetCurrentThread();
-      if (current_thread) {
-        current_thread->BoostOnWake(priority_increment());
-      }
-      if (result == xe::threading::WaitResult::kSuccess) {
-        WaitCallback();
-        return X_STATUS_SUCCESS;
-      }
-      return X_STATUS_USER_APC;
-    }
-    case xe::threading::WaitResult::kTimeout:
-      xe::threading::MaybeYield();
-      return X_STATUS_TIMEOUT;
-    default:
-    case xe::threading::WaitResult::kAbandoned:
-    case xe::threading::WaitResult::kFailed:
-      return X_STATUS_ABANDONED_WAIT_0;
-  }
+  SyncFromGuest();
+  dispatch::WaitRequest request;
+  request.objects = {dispatch_object_};
+  request.deadline = dispatch::Shell::DeadlineFromTimeout(opt_timeout);
+  request.alertable = alertable != 0;
+  return FinishWait(kernel_state_->dispatch()->Wait(request),
+                    priority_increment());
 }
 
 X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                                 uint32_t wait_reason, uint32_t processor_mode,
                                 uint32_t alertable, uint64_t* opt_timeout) {
-  auto timeout_ms =
-      opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
-                        TimeoutTicksToMs(*opt_timeout)))
-                  : std::chrono::milliseconds::max();
-
-  auto result = xe::threading::SignalAndWait(
-      signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
-      alertable ? true : false, timeout_ms);
-
-  switch (result) {
-    case xe::threading::WaitResult::kSuccess:
-    case xe::threading::WaitResult::kUserCallback: {
-      auto current_thread = XThread::GetCurrentThread();
-      if (current_thread) {
-        current_thread->BoostOnWake(wait_object->priority_increment());
-      }
-      if (result == xe::threading::WaitResult::kSuccess) {
-        wait_object->WaitCallback();
-        return X_STATUS_SUCCESS;
-      }
-      return X_STATUS_USER_APC;
-    }
-    case xe::threading::WaitResult::kTimeout:
-      xe::threading::MaybeYield();
-      return X_STATUS_TIMEOUT;
-    default:
-    case xe::threading::WaitResult::kAbandoned:
-    case xe::threading::WaitResult::kFailed:
-      return X_STATUS_ABANDONED_WAIT_0;
+  signal_object->SyncFromGuest();
+  wait_object->SyncFromGuest();
+  dispatch::WaitRequest request;
+  if (wait_object->dispatch_object_) {
+    request.objects = {wait_object->dispatch_object_};
   }
+  request.deadline = dispatch::Shell::DeadlineFromTimeout(opt_timeout);
+  request.alertable = alertable != 0;
+  uint32_t status = wait_object->kernel_state_->dispatch()->SignalAndWait(
+      [signal_object](dispatch::Dispatcher& core, dispatch::ThreadId caller) {
+        return signal_object->SignalForWait(core, caller);
+      },
+      request);
+  return FinishWait(status, wait_object->priority_increment());
 }
 
 X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                uint32_t wait_type, uint32_t wait_reason,
                                uint32_t processor_mode, uint32_t alertable,
                                uint64_t* opt_timeout) {
-  xe::threading::WaitHandle* wait_handles[64];
-
-  for (size_t i = 0; i < count; ++i) {
-    wait_handles[i] = objects[i]->GetWaitHandle();
-    assert_not_null(wait_handles[i]);
+  if (!count) {
+    return X_STATUS_SUCCESS;
   }
-
-  auto timeout_ms =
-      opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
-                        TimeoutTicksToMs(*opt_timeout)))
-                  : std::chrono::milliseconds::max();
-
-  X_STATUS status;
+  dispatch::WaitRequest request;
+  request.type =
+      wait_type ? dispatch::WaitType::kAny : dispatch::WaitType::kAll;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (!objects[i]->dispatch_object_) {
+      // Nothing to wait for: as a single wait on it, it is satisfied.
+      if (request.type == dispatch::WaitType::kAny) {
+        return X_STATUS(i);
+      }
+      continue;
+    }
+    objects[i]->SyncFromGuest();
+    request.objects.push_back(objects[i]->dispatch_object_);
+  }
+  request.deadline = dispatch::Shell::DeadlineFromTimeout(opt_timeout);
+  request.alertable = alertable != 0;
+  uint32_t status = objects[0]->kernel_state_->dispatch()->Wait(request);
   uint32_t boost_increment = 0;
-  if (wait_type) {
-    auto result = xe::threading::WaitAny(wait_handles, count,
-                                         alertable ? true : false, timeout_ms);
-    switch (result.first) {
-      case xe::threading::WaitResult::kSuccess:
-        objects[result.second]->WaitCallback();
-        boost_increment = objects[result.second]->priority_increment();
-        status = X_STATUS(result.second);
-        break;
-      case xe::threading::WaitResult::kUserCallback:
-        status = X_STATUS_USER_APC;
-        break;
-      case xe::threading::WaitResult::kTimeout:
-        xe::threading::MaybeYield();
-        status = X_STATUS_TIMEOUT;
-        break;
-      case xe::threading::WaitResult::kAbandoned:
-        status = X_STATUS(X_STATUS_ABANDONED_WAIT_0 + result.second);
-        break;
-      default:
-      case xe::threading::WaitResult::kFailed:
-        status = X_STATUS_UNSUCCESSFUL;
-        break;
+  if (request.type == dispatch::WaitType::kAny) {
+    uint32_t index = status & 0x3F;
+    if (status < dispatch::kStatusAbandonedWait0 + count && index < count) {
+      boost_increment = objects[index]->priority_increment();
     }
   } else {
-    auto result = xe::threading::WaitAll(wait_handles, count,
-                                         alertable ? true : false, timeout_ms);
-    switch (result) {
-      case xe::threading::WaitResult::kSuccess:
-        for (uint32_t i = 0; i < count; i++) {
-          objects[i]->WaitCallback();
-          // Use the largest increment among the signaled objects.
-          if (objects[i]->priority_increment() > boost_increment) {
-            boost_increment = objects[i]->priority_increment();
-          }
-        }
-        status = X_STATUS_SUCCESS;
-        break;
-      case xe::threading::WaitResult::kUserCallback:
-        status = X_STATUS_USER_APC;
-        break;
-      case xe::threading::WaitResult::kTimeout:
-        xe::threading::MaybeYield();
-        status = X_STATUS_TIMEOUT;
-        break;
-      default:
-      case xe::threading::WaitResult::kAbandoned:
-      case xe::threading::WaitResult::kFailed:
-        status = X_STATUS_ABANDONED_WAIT_0;
-        break;
+    for (uint32_t i = 0; i < count; ++i) {
+      boost_increment =
+          std::max(boost_increment, objects[i]->priority_increment());
     }
   }
-
-  // Apply priority boost if the thread actually blocked (not on
-  // timeout/failure).
-  if (status != X_STATUS_TIMEOUT && status != X_STATUS_UNSUCCESSFUL &&
-      status != X_STATUS_ABANDONED_WAIT_0) {
-    auto current_thread = XThread::GetCurrentThread();
-    if (current_thread) {
-      current_thread->BoostOnWake(boost_increment);
-    }
-  }
-  return status;
+  return FinishWait(status, boost_increment);
 }
 
 uint8_t* XObject::CreateNative(uint32_t size) {
