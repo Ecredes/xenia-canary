@@ -1261,6 +1261,10 @@ void Emulator::Pause() {
       paused_threads_.push_back(thread);
     }
   }
+  // Guest time and vblanks stop with the guest, so the pause doesn't show as
+  // elapsed time. Not before: pausing may wait on work a vblank lets finish.
+  Clock::set_guest_time_paused(true);
+  graphics_system_->set_vblanks_frozen(true);
 
   XELOGD("! EMULATOR PAUSED !");
 }
@@ -1272,6 +1276,8 @@ void Emulator::Resume() {
   paused_ = false;
   XELOGD("! EMULATOR RESUMED !");
 
+  graphics_system_->set_vblanks_frozen(false);
+  Clock::set_guest_time_paused(false);
   graphics_system_->Resume();
   audio_system_->Resume();
 

@@ -73,6 +73,12 @@ class Clock {
   // By default this is the current system time.
   static void set_guest_system_time_base(uint64_t time_base);
 
+  // Stops or restarts guest time: while stopped, host time passing adds no
+  // guest ticks, so a paused guest doesn't see the pause on resume. No effect
+  // with clock_no_scaling, where guest time is host time.
+  static void set_guest_time_paused(bool paused);
+  static bool guest_time_paused();
+
   // Queries the current guest tick count, accounting for frequency adjustment
   // and scaling.
   static uint64_t QueryGuestTickCount();

@@ -9,6 +9,10 @@
 
 #include "xenia/base/chrono.h"
 
+#include <thread>
+
+#include "xenia/base/clock.h"
+
 #define CATCH_CONFIG_ENABLE_CHRONO_STRINGMAKER
 #include "third_party/catch/include/catch.hpp"
 
@@ -144,6 +148,28 @@ TEST_CASE("WinSystemClock <-> steady_clock", "[clock_cast]") {
     auto error = std::abs((sty2 - sty).count());
     REQUIRE(error <= duration);
   }
+}
+
+TEST_CASE("Guest time stops while paused", "[clock]") {
+  using namespace std::chrono_literals;
+  cvars::clock_no_scaling = false;
+  Clock::set_guest_time_scalar(1.0);
+  // Ticks in 10 ms of guest time.
+  const uint64_t ten_ms = Clock::guest_tick_frequency() / 100;
+
+  const uint64_t before = Clock::QueryGuestTickCount();
+  Clock::set_guest_time_paused(true);
+  const uint64_t paused_at = Clock::QueryGuestTickCount();
+  std::this_thread::sleep_for(50ms);
+  REQUIRE(Clock::QueryGuestTickCount() == paused_at);
+  REQUIRE(Clock::guest_time_paused());
+
+  Clock::set_guest_time_paused(false);
+  std::this_thread::sleep_for(20ms);
+  const uint64_t after = Clock::QueryGuestTickCount();
+  // Only the time before and after the pause counts.
+  REQUIRE(after - before >= ten_ms);
+  REQUIRE(after - before < 4 * ten_ms);
 }
 
 }  // namespace xe::base::test

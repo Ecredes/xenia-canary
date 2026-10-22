@@ -93,6 +93,11 @@ class GraphicsSystem {
     return swap_count_.load(std::memory_order_relaxed);
   }
   void MarkSwap();
+  // No vblanks while frozen: the emulator sets it once everything that runs
+  // guest code is paused (a vblank runs the guest's interrupt callback).
+  void set_vblanks_frozen(bool frozen) {
+    vblanks_frozen_.store(frozen, std::memory_order_relaxed);
+  }
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
@@ -141,6 +146,7 @@ class GraphicsSystem {
   std::atomic<bool> vblank_deadline_reset_{false};
 
   std::atomic<uint64_t> vblank_count_{0};
+  std::atomic<bool> vblanks_frozen_{false};
   std::atomic<uint64_t> swap_count_{0};
 
   uint32_t scaled_aspect_x_ = 0;

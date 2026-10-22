@@ -9,6 +9,7 @@
 
 #include "xenia/base/clock.h"
 
+#include <atomic>
 #include <mutex>
 
 #include "xenia/base/assert.h"
@@ -56,6 +57,8 @@ std::pair<uint64_t, uint64_t> guest_tick_ratio_ = std::make_pair(1, 1);
 uint64_t last_guest_tick_count_ = 0;
 // Last sampled host tick count.
 uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
+// Set while guest time is stopped (see set_guest_time_paused).
+std::atomic<bool> guest_time_stopped = false;
 
 using tick_mutex_type = std::mutex;
 
@@ -107,6 +110,10 @@ uint64_t UpdateGuestClock() {
                                    ? host_tick_count - last_host_tick_count_
                                    : 0;
     last_host_tick_count_ = host_tick_count;
+    if (guest_time_stopped.load(std::memory_order_relaxed)) {
+      // The host time passed while stopped is dropped, not caught up later.
+      return last_guest_tick_count_;
+    }
     uint64_t guest_tick_delta =
         host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
     last_guest_tick_count_ += guest_tick_delta;
@@ -175,6 +182,15 @@ uint64_t Clock::guest_system_time_base() { return guest_system_time_base_; }
 void Clock::set_guest_system_time_base(uint64_t time_base) {
   guest_system_time_base_ = time_base;
 }
+
+void Clock::set_guest_time_paused(bool paused) {
+  // Take the time up to now on the old setting, then switch.
+  UpdateGuestClock();
+  guest_time_stopped = paused;
+  UpdateGuestClock();
+}
+
+bool Clock::guest_time_paused() { return guest_time_stopped; }
 
 uint64_t Clock::QueryGuestTickCount() {
   auto guest_tick_count = UpdateGuestClock();

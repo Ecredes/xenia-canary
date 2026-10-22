@@ -192,6 +192,14 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 continue;
               }
 
+              // Frozen: a vblank would run the guest's interrupt callback and
+              // show it time passing.
+              if (vblanks_frozen_) {
+                vblank_deadline_reset_ = true;
+                xe::threading::Sleep(std::chrono::milliseconds(1));
+                continue;
+              }
+
               register_file()->values[XE_GPU_REG_D1MODE_V_COUNTER] +=
                   GetResolution().second;
 
