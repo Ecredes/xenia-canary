@@ -53,6 +53,13 @@ ObjectId Dispatcher::NewThreadObject(ThreadId thread) {
   return AddObject(std::move(object));
 }
 
+ObjectId Dispatcher::NewTimer(bool notification) {
+  Object timer;
+  timer.kind = notification ? ObjectKind::kNotificationTimer
+                            : ObjectKind::kSynchronizationTimer;
+  return AddObject(std::move(timer));
+}
+
 void Dispatcher::DestroyObject(ObjectId object) { objects_.erase(object); }
 
 ThreadId Dispatcher::NewThread() {
@@ -73,6 +80,15 @@ void Dispatcher::DestroyThread(ThreadId thread) {
     }
   }
   threads_.erase(it);
+  DropTimerRoutines(thread);
+}
+
+void Dispatcher::DropTimerRoutines(ThreadId thread) {
+  for (auto& [id, object] : objects_) {
+    if (object.routine && object.routine->thread == thread) {
+      object.routine.reset();
+    }
+  }
 }
 
 void Dispatcher::NoteSignal(ObjectId id, Effects& effects) {
@@ -99,6 +115,7 @@ bool Dispatcher::Consume(ObjectId id, ThreadId thread, Effects& effects) {
   Object& object = objects_.at(id);
   switch (object.kind) {
     case ObjectKind::kSynchronizationEvent:
+    case ObjectKind::kSynchronizationTimer:
       object.signal_state = 0;
       NoteSignal(id, effects);
       return false;
@@ -115,6 +132,7 @@ bool Dispatcher::Consume(ObjectId id, ThreadId thread, Effects& effects) {
       return abandoned;
     }
     case ObjectKind::kNotificationEvent:
+    case ObjectKind::kNotificationTimer:
     case ObjectKind::kThread:
       return false;
   }
@@ -338,6 +356,92 @@ Effects Dispatcher::SetSignalState(ObjectId id, int32_t signal_state) {
   return effects;
 }
 
+Effects Dispatcher::SetTimer(ObjectId id, uint64_t due, uint64_t period,
+                             std::optional<TimerRoutine> routine,
+                             bool* was_armed) {
+  Effects effects;
+  auto found = objects_.find(id);
+  if (found == objects_.end()) {
+    return effects;
+  }
+  Object& timer = found->second;
+  if (was_armed) {
+    *was_armed = timer.armed;
+  }
+  timer.armed = true;
+  timer.due = due;
+  timer.period = period;
+  timer.routine = routine;
+  timer.sequence = next_sequence_++;
+  timer.signal_state = 0;
+  NoteSignal(id, effects);
+  return effects;
+}
+
+bool Dispatcher::CancelTimer(ObjectId id) {
+  auto found = objects_.find(id);
+  if (found == objects_.end()) {
+    return false;
+  }
+  bool was_armed = found->second.armed;
+  found->second.armed = false;
+  return was_armed;
+}
+
+Effects Dispatcher::Tick(uint64_t now) {
+  Effects effects;
+  struct Due {
+    uint64_t due;
+    uint64_t sequence;
+    ObjectId id;
+  };
+  std::vector<Due> expiring;
+  for (const auto& [id, object] : objects_) {
+    if (object.armed && object.due <= now) {
+      expiring.push_back({object.due, object.sequence, id});
+    }
+  }
+  std::sort(expiring.begin(), expiring.end(), [](const Due& a, const Due& b) {
+    return a.due != b.due ? a.due < b.due : a.sequence < b.sequence;
+  });
+  for (const Due& next : expiring) {
+    Object& timer = objects_.at(next.id);
+    if (timer.period == 0) {
+      timer.armed = false;
+    } else {
+      // TODO(Ecredes): guest reinsertion rule unobserved; keeps phase at tick
+      // granularity.
+      timer.due += timer.period;
+      if (timer.due <= now) {
+        timer.due = now + timer.period;
+      }
+    }
+    timer.signal_state = 1;
+    NoteSignal(next.id, effects);
+    WakeWaiters(next.id, effects);
+    if (timer.routine && threads_.count(timer.routine->thread)) {
+      effects.timer_apcs.push_back({timer.routine->thread,
+                                    timer.routine->routine,
+                                    timer.routine->argument, now});
+      Effects apc = QueueUserApc(timer.routine->thread);
+      effects.wakes.insert(effects.wakes.end(), apc.wakes.begin(),
+                           apc.wakes.end());
+    }
+  }
+  return effects;
+}
+
+std::optional<TimerInfo> Dispatcher::QueryTimer(ObjectId id) const {
+  auto it = objects_.find(id);
+  if (it == objects_.end() ||
+      (it->second.kind != ObjectKind::kNotificationTimer &&
+       it->second.kind != ObjectKind::kSynchronizationTimer)) {
+    return std::nullopt;
+  }
+  const Object& timer = it->second;
+  return TimerInfo{timer.armed, timer.due, timer.period, timer.routine};
+}
+
 WaitResult Dispatcher::BeginWait(ThreadId id, const WaitRequest& request,
                                  uint64_t now) {
   WaitResult result;
@@ -491,6 +595,7 @@ WaitResult Dispatcher::BeginHold(ThreadId id) {
 
 Effects Dispatcher::ThreadTerminated(ThreadId id) {
   Effects effects;
+  DropTimerRoutines(id);
   auto thread = threads_.find(id);
   if (thread != threads_.end() && thread->second.waiting) {
     // It won't come back for the wake: drop it without one.

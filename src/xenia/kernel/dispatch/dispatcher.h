@@ -60,6 +60,10 @@ enum class ObjectKind : uint8_t {
   kMutant,
   // Signaled once its thread has terminated.
   kThread,
+  // Signals like a notification event when it expires.
+  kNotificationTimer,
+  // Signals like a synchronization event when it expires.
+  kSynchronizationTimer,
 };
 
 enum class WaitType : uint8_t { kAny, kAll };
@@ -78,10 +82,31 @@ struct SignalWrite {
   bool operator==(const SignalWrite&) const = default;
 };
 
+// What NtSetTimerEx asks for: a routine queued to thread as a user-mode APC
+// each time the timer expires.
+struct TimerRoutine {
+  ThreadId thread;
+  uint32_t routine;
+  uint32_t argument;
+  bool operator==(const TimerRoutine&) const = default;
+};
+
+// A routine to queue: the TimerRoutine plus the guest system time the timer
+// expired at (the routine's time arguments).
+struct TimerApc {
+  ThreadId thread;
+  uint32_t routine;
+  uint32_t argument;
+  uint64_t time;
+  bool operator==(const TimerApc&) const = default;
+};
+
 struct Effects {
   // In the order the threads were satisfied.
   std::vector<Wake> wakes;
   std::vector<SignalWrite> writes;
+  // Timer routines to queue, in expiry order.
+  std::vector<TimerApc> timer_apcs;
 };
 
 struct WaitRequest {
@@ -122,6 +147,13 @@ struct ThreadInfo {
   bool held;
 };
 
+struct TimerInfo {
+  bool armed;
+  uint64_t due;     // guest system time, 100 ns
+  uint64_t period;  // 100 ns; 0: once
+  std::optional<TimerRoutine> routine;
+};
+
 class Dispatcher {
  public:
   // Objects. signal_state is the initial state: an event's 0/1, a semaphore's
@@ -131,6 +163,7 @@ class Dispatcher {
   ObjectId NewMutant(ThreadId owner);
   // The object a thread's handle waits on; signaled at ThreadTerminated.
   ObjectId NewThreadObject(ThreadId thread);
+  ObjectId NewTimer(bool notification);
   // An object nobody waits on any more (its waiters are woken by now).
   void DestroyObject(ObjectId object);
 
@@ -155,6 +188,19 @@ class Dispatcher {
 
   // A guest write to an object's header (signal state), read back in.
   Effects SetSignalState(ObjectId object, int32_t signal_state);
+
+  // Timers. Arms timer to expire at due, then every period (0: once).
+  // Re-arming replaces the old due time; either way the signal state is
+  // cleared. *was_armed gets whether it was armed before.
+  Effects SetTimer(ObjectId timer, uint64_t due, uint64_t period,
+                   std::optional<TimerRoutine> routine,
+                   bool* was_armed = nullptr);
+  // Disarms; the signal state is unchanged. Returns whether it was armed.
+  bool CancelTimer(ObjectId timer);
+  // The guest clock interrupt: expires every armed timer due at or before
+  // now, in due order, ties in the order they were armed.
+  Effects Tick(uint64_t now);
+  std::optional<TimerInfo> QueryTimer(ObjectId timer) const;
 
   // Waits. A thread waits on at most one request at a time. now is the
   // guest system time, for a deadline that has passed already. A suspended
@@ -202,6 +248,13 @@ class Dispatcher {
     // For a thread object, its thread.
     ThreadId thread = kNoThread;
     std::deque<ThreadId> waiters;
+    // For a timer.
+    bool armed = false;
+    uint64_t due = 0;
+    uint64_t period = 0;
+    std::optional<TimerRoutine> routine;
+    // The order timers were armed in, to break ties in due time.
+    uint64_t sequence = 0;
   };
   struct Thread {
     bool waiting = false;
@@ -237,11 +290,14 @@ class Dispatcher {
   void WakeWaiters(ObjectId object, Effects& effects);
   void EndWait(ThreadId id, Thread& thread, uint32_t status, Effects& effects);
   void NoteSignal(ObjectId id, Effects& effects);
+  // Forgets the routines of the timers that target thread.
+  void DropTimerRoutines(ThreadId thread);
 
   std::unordered_map<ObjectId, Object> objects_;
   std::unordered_map<ThreadId, Thread> threads_;
   ObjectId next_object_ = 1;
   ThreadId next_thread_ = 1;
+  uint64_t next_sequence_ = 1;
 };
 
 }  // namespace dispatch
