@@ -53,6 +53,7 @@ class IConfigVar : virtual public ICommandVar {
   virtual std::string config_value() const = 0;
   virtual void LoadConfigValue(const toml::node* result) = 0;
   virtual void LoadGameConfigValue(const toml::node* result) = 0;
+  virtual void ClearGameConfigValue() = 0;
   virtual void ResetConfigValueToDefault() = 0;
 };
 
@@ -92,6 +93,7 @@ class ConfigVar : public CommandVar<T>, virtual public IConfigVar {
   void AddToLaunchOptions(cxxopts::Options* options) override;
   void LoadConfigValue(const toml::node* result) override;
   void LoadGameConfigValue(const toml::node* result) override;
+  void ClearGameConfigValue() override;
   void SetConfigValue(T val);
   void SetGameConfigValue(T val);
   // Changes the actual value used to the one specified, and also makes it the
@@ -306,6 +308,14 @@ void ConfigVar<T>::OverrideConfigValue(T val) {
   // config load, however, may still change it.
   game_config_value_.reset();
   this->commandline_value_.reset();
+  UpdateValue();
+}
+template <class T>
+void ConfigVar<T>::ClearGameConfigValue() {
+  if (!game_config_value_) {
+    return;
+  }
+  game_config_value_.reset();
   UpdateValue();
 }
 template <class T>

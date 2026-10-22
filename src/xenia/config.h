@@ -25,6 +25,7 @@ toml::parse_result ParseFile(const std::filesystem::path& filename);
 namespace config {
 void SetupConfig(const std::filesystem::path& config_folder);
 void LoadGameConfig(const std::string_view title_id);
+void ClearGameConfig();
 void SaveConfig();
 }  // namespace config
 

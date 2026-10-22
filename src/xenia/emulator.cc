@@ -363,6 +363,7 @@ X_STATUS Emulator::TerminateTitle() {
   }
 
   kernel_state_->TerminateTitle();
+  config::ClearGameConfig();
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
