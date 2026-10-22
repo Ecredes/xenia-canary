@@ -35,4 +35,4 @@ origin/coherence/9-default
 origin/automation/10-threads
 
 # Guest threading redesign, by its top step (design/threading docs).
-origin/threading/2-core-waitables
+origin/threading/3-delay
