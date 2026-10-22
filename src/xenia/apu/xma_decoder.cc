@@ -409,6 +409,8 @@ void XmaDecoder::Pause() {
   }
   paused_ = true;
 
+  // An idle worker sleeps on the work event and would never see paused_.
+  work_event_->Set();
   pause_fence_.Wait();
 }
 
