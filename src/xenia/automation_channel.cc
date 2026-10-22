@@ -232,33 +232,6 @@ const char* WaitKindName(kernel::XThreadWait::Kind kind) {
   }
 }
 
-// The title's modules: the executable and the DLLs it loaded. Guest code is
-// in them alone; Xenia's system modules are native.
-std::vector<ModuleSnapshot> SnapshotModules(kernel::KernelState& kernel_state) {
-  std::vector<ModuleSnapshot> modules;
-  for (const auto& module :
-       kernel_state.object_table()->GetObjectsByType<kernel::XModule>(
-           kernel::XObject::Type::Module)) {
-    if (module->module_type() != kernel::XModule::ModuleType::kUserModule) {
-      continue;
-    }
-    cpu::XexModule* xex =
-        static_cast<kernel::UserModule*>(module.get())->xex_module();
-    if (!xex || !xex->base_address()) {
-      continue;
-    }
-    ModuleSnapshot snapshot{module->name(), xex->base_address(),
-                            xex->image_size()};
-    if (std::none_of(modules.begin(), modules.end(),
-                     [&snapshot](const ModuleSnapshot& other) {
-                       return other.base == snapshot.base;
-                     })) {
-      modules.push_back(std::move(snapshot));
-    }
-  }
-  return modules;
-}
-
 // What every guest thread is doing now.
 std::vector<ThreadSnapshot> SnapshotThreads(
     kernel::KernelState& kernel_state,
@@ -271,7 +244,6 @@ std::vector<ThreadSnapshot> SnapshotThreads(
     ids[thread.get()] = thread->thread_id();
   }
   std::set<const kernel::XThread*> seen;
-  Memory* memory = kernel_state.memory();
   uint64_t now_ns = SteadyNowNs();
   std::vector<ThreadSnapshot> snapshots;
   for (const auto& thread : threads) {
@@ -317,13 +289,9 @@ std::vector<ThreadSnapshot> SnapshotThreads(
         }
         snapshot.objects.push_back(std::move(waited));
       }
-      snapshot.stack = WalkGuestStack(
-          [memory](uint32_t address) {
-            return xe::load_and_swap<uint32_t>(
-                memory->TranslateVirtual(address));
-          },
-          [&modules](uint32_t address) { return InModules(modules, address); },
-          wait.lr, wait.sp, stack_limit, stack_base, kMaxStackFrames);
+      snapshot.stack =
+          kernel::util::GuestStack(kernel_state, modules, wait.lr, wait.sp,
+                                   stack_limit, stack_base, kMaxStackFrames);
     });
     snapshots.push_back(std::move(snapshot));
   }
@@ -1112,7 +1080,8 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
         client.out += ErrorLine(parsed.request->id, "no title running");
         break;
       }
-      std::vector<ModuleSnapshot> modules = SnapshotModules(*kernel_state);
+      std::vector<ModuleSnapshot> modules =
+          kernel::util::TitleModules(*kernel_state);
       client.out += ThreadsReply(
           parsed.request->id, SnapshotThreads(*kernel_state, modules), modules,
           SnapshotGpuWait(*graphics_system), graphics_system->vblank_count(),

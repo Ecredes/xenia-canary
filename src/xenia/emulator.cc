@@ -47,6 +47,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/kernel/util/guest_stack.h"
 #include "xenia/kernel/xam/achievement_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xdbf/spa_info.h"
@@ -1436,6 +1437,20 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   auto guest_function = code_cache->LookupFunction(ex->pc());
   assert_not_null(guest_function);
 
+  // The guest's return addresses up its stack, as module+offset, for the
+  // report and the dump. lr and r1 are the context's: what the guest's last
+  // call and frame left there, which is what the walk needs.
+  auto crash_context = current_thread->thread_state()->context();
+  std::vector<kernel::util::GuestModule> modules =
+      kernel::util::TitleModules(*kernel_state_);
+  std::vector<std::string> crash_stack;
+  for (uint32_t address : kernel::util::GuestStack(
+           *kernel_state_, modules, uint32_t(crash_context->lr),
+           uint32_t(crash_context->r[1]), current_thread->stack_limit(),
+           current_thread->stack_base())) {
+    crash_stack.push_back(kernel::util::DescribeGuestAddress(modules, address));
+  }
+
   // Report the crash before the dump and Pause(), which can block, so the line
   // survives. Only the first crash is reported (ReportCrash). The faulting code
   // is guest code, so this never runs inside telemetry (host code) and cannot
@@ -1471,10 +1486,15 @@ bool Emulator::ExceptionCallback(Exception* ex) {
       event.Str("module", module->name());
     }
     event.Str("message", message);
+    std::string stack_json = "[";
+    for (const std::string& frame : crash_stack) {
+      stack_json += (stack_json.size() > 1 ? ",\"" : "\"") + frame + "\"";
+    }
+    event.Raw("stack", stack_json + "]");
     telemetry::ReportCrash(std::move(event));
   }
 
-  auto context = current_thread->thread_state()->context();
+  auto context = crash_context;
 
   std::string crash_msg;
   crash_msg.append("==== CRASH DUMP ====\n");
@@ -1486,6 +1506,13 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   crash_msg.append(
       fmt::format("PC: 0x{:08X}\n",
                   guest_function->MapMachineCodeToGuestAddress(ex->pc())));
+  if (!crash_stack.empty()) {
+    crash_msg.append("Guest stack:");
+    for (const std::string& frame : crash_stack) {
+      crash_msg.append(" " + frame);
+    }
+    crash_msg.append("\n");
+  }
   if (ex->code() == Exception::Code::kAccessViolation) {
     const char* op_str = "unknown";
     if (ex->access_violation_operation() ==

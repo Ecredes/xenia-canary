@@ -32,6 +32,7 @@
 #include "xenia/answer_source.h"
 #include "xenia/base/telemetry.h"
 #include "xenia/hid/remote/remote_pad.h"
+#include "xenia/kernel/util/guest_stack.h"
 
 // The automation channel's protocol, kept free of sockets and threads: JSON
 // lines in, decisions and JSON lines out. AutomationChannel carries them out.
@@ -1982,38 +1983,6 @@ inline std::string ExitEvent(int status) {
 // looking into hangs: each one's wait (the objects, how long, and the guest
 // return address and stack at the call) and what the GPU waits on.
 
-// Return addresses on a guest stack, innermost first: the first is lr, the
-// return address of the call the thread is in; then the saved return address
-// of each frame up the back chain. Xbox 360 code saves a function's return
-// address at -8 from the stack pointer it was called with, which is the back
-// chain word of its own frame. The walk stays within [limit, base), the
-// thread's stack, and ends at a chain that doesn't climb or a return address
-// that is_code refuses, outside the title's modules (past the outermost frame,
-// an unused stack holds fill bytes).
-template <typename Read32, typename IsCode>
-std::vector<uint32_t> WalkGuestStack(Read32 read32, IsCode is_code, uint32_t lr,
-                                     uint32_t sp, uint32_t limit, uint32_t base,
-                                     size_t max_frames) {
-  std::vector<uint32_t> stack;
-  if (!is_code(lr)) {
-    return stack;
-  }
-  stack.push_back(lr);
-  while (stack.size() < max_frames && sp >= limit && sp < base && sp % 4 == 0) {
-    uint32_t back = read32(sp);
-    if (back <= sp || back > base || back - 8 < limit) {
-      break;
-    }
-    uint32_t saved_lr = read32(back - 8);
-    if (!is_code(saved_lr)) {
-      break;
-    }
-    stack.push_back(saved_lr);
-    sp = back;
-  }
-  return stack;
-}
-
 struct WaitedObject {
   uint32_t handle = 0;
   std::string type;
@@ -2038,23 +2007,10 @@ struct ThreadSnapshot {
   std::vector<uint32_t> stack;
 };
 
-// A loaded title module (the executable or one of its DLLs): where its image
-// is, for reading return addresses as module and offset.
-struct ModuleSnapshot {
-  std::string name;
-  uint32_t base = 0;
-  uint32_t size = 0;
-};
-
-inline bool InModules(const std::vector<ModuleSnapshot>& modules,
-                      uint32_t address) {
-  return address % 4 == 0 &&
-         std::any_of(modules.begin(), modules.end(),
-                     [address](const ModuleSnapshot& module) {
-                       return address >= module.base &&
-                              address - module.base < module.size;
-                     });
-}
+// The stack walk and title modules are shared with the crash report.
+using ModuleSnapshot = kernel::util::GuestModule;
+using kernel::util::InModules;
+using kernel::util::WalkGuestStack;
 
 struct GpuWaitSnapshot {
   bool is_memory = false;
