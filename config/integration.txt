@@ -35,4 +35,4 @@ origin/coherence/9-default
 origin/automation/10-threads
 
 # Guest threading redesign, by its top step (design/threading docs).
-origin/threading/5a-guest-suspend
+origin/threading/5b-clock-timers
