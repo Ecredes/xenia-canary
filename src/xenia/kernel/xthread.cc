@@ -993,6 +993,38 @@ uint32_t XThread::SelfSuspend() {
 }
 #endif  // !XE_PLATFORM_WIN32
 
+XThread::WaitScope::WaitScope(XThreadWait::Kind kind,
+                              std::span<XObject* const> objects,
+                              std::optional<uint64_t> timeout_ms) {
+  if (!IsCurrentGuestThread()) {
+    return;
+  }
+  thread_ = GetCurrentThread();
+  const cpu::ppc::PPCContext* context = thread_->thread_state()->context();
+  std::lock_guard<std::mutex> lock(thread_->wait_mutex_);
+  XThreadWait& wait = thread_->wait_;
+  outer_ = wait;
+  wait.kind = kind;
+  wait.object_count = uint32_t(objects.size());
+  for (size_t i = 0; i < wait.objects.size(); ++i) {
+    wait.objects[i] = i < objects.size() ? objects[i] : nullptr;
+  }
+  wait.timeout_ms = timeout_ms;
+  wait.since_ns =
+      uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+  wait.lr = uint32_t(context->lr);
+  wait.sp = uint32_t(context->r[1]);
+}
+
+XThread::WaitScope::~WaitScope() {
+  if (thread_) {
+    std::lock_guard<std::mutex> lock(thread_->wait_mutex_);
+    thread_->wait_ = outer_;
+  }
+}
+
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
                         uint64_t interval) {
   int64_t timeout_ticks = interval;
@@ -1010,6 +1042,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
   }
 
   timeout_ms = Clock::ScaleGuestDurationMillis(timeout_ms);
+  WaitScope wait_scope(XThreadWait::Kind::kDelay, {}, timeout_ms);
   if (alertable) {
     auto result =
         xe::threading::AlertableSleep(std::chrono::milliseconds(timeout_ms));

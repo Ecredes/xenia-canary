@@ -402,6 +402,8 @@ enum class Action {
   // Run the paused emulator for vblanks, pause it again, then reply with
   // PauseReply.
   kAdvance,
+  // Snapshot the guest threads, and reply with ThreadsReply.
+  kThreads,
 };
 
 struct Decision {
@@ -536,7 +538,7 @@ inline Decision Decide(Session& session, const Request& request,
                      R"("pad_connect","pad_set","pad_queue","pad_clear",)"
                      R"("frame","frames_watch","bench_start","bench_stop",)"
                      R"("video_start","video_stop","pause","resume",)"
-                     R"("advance"])")
+                     R"("advance","threads"])")
                 .Raw("streams", R"(["telemetry","dialogs","input","audio"])")
                 .String("role", RoleName(session.role))
                 .Raw("state", SnapshotJson(context.snapshot))
@@ -674,6 +676,9 @@ inline Decision Decide(Session& session, const Request& request,
       return {ErrorLine(request.id, "needs the controller role")};
     }
     return {JsonLine().Re(request.id).Bool("ok", true).Finish(), Action::kStop};
+  }
+  if (request.op == "threads") {
+    return {"", Action::kThreads};
   }
   if (request.op == "pause" || request.op == "resume" ||
       request.op == "advance") {
@@ -1971,6 +1976,204 @@ inline std::string BenchReply(std::string_view id, const BenchSamples& samples,
 // Sent to every client before the process ends at a client's request.
 inline std::string ExitEvent(int status) {
   return JsonLine().String("type", "exit").Int("status", status).Finish();
+}
+
+// Threads. The threads op reports what every guest thread is doing, for
+// looking into hangs: each one's wait (the objects, how long, and the guest
+// return address and stack at the call) and what the GPU waits on.
+
+// Return addresses on a guest stack, innermost first: the first is lr, the
+// return address of the call the thread is in; then the saved return address
+// of each frame up the back chain. Xbox 360 code saves a function's return
+// address at -8 from the stack pointer it was called with, which is the back
+// chain word of its own frame. The walk stays within [limit, base), the
+// thread's stack, and ends at a chain that doesn't climb or a return address
+// that is_code refuses, outside the title's modules (past the outermost frame,
+// an unused stack holds fill bytes).
+template <typename Read32, typename IsCode>
+std::vector<uint32_t> WalkGuestStack(Read32 read32, IsCode is_code, uint32_t lr,
+                                     uint32_t sp, uint32_t limit, uint32_t base,
+                                     size_t max_frames) {
+  std::vector<uint32_t> stack;
+  if (!is_code(lr)) {
+    return stack;
+  }
+  stack.push_back(lr);
+  while (stack.size() < max_frames && sp >= limit && sp < base && sp % 4 == 0) {
+    uint32_t back = read32(sp);
+    if (back <= sp || back > base || back - 8 < limit) {
+      break;
+    }
+    uint32_t saved_lr = read32(back - 8);
+    if (!is_code(saved_lr)) {
+      break;
+    }
+    stack.push_back(saved_lr);
+    sp = back;
+  }
+  return stack;
+}
+
+struct WaitedObject {
+  uint32_t handle = 0;
+  std::string type;
+  std::string name;
+  // A mutant's owner, when a guest thread holds it.
+  std::optional<uint32_t> owner_thread;
+};
+
+struct ThreadSnapshot {
+  uint32_t id = 0;
+  uint32_t handle = 0;
+  std::string name;
+  int32_t priority = 0;
+  uint32_t suspend_count = 0;
+  // Empty when it isn't waiting; else one, any, all, signal_and_wait or delay.
+  std::string wait;
+  // The first objects waited on, of object_count.
+  std::vector<WaitedObject> objects;
+  uint32_t object_count = 0;
+  std::optional<uint64_t> timeout_ms;
+  uint64_t waited_ms = 0;
+  std::vector<uint32_t> stack;
+};
+
+// A loaded title module (the executable or one of its DLLs): where its image
+// is, for reading return addresses as module and offset.
+struct ModuleSnapshot {
+  std::string name;
+  uint32_t base = 0;
+  uint32_t size = 0;
+};
+
+inline bool InModules(const std::vector<ModuleSnapshot>& modules,
+                      uint32_t address) {
+  return address % 4 == 0 &&
+         std::any_of(modules.begin(), modules.end(),
+                     [address](const ModuleSnapshot& module) {
+                       return address >= module.base &&
+                              address - module.base < module.size;
+                     });
+}
+
+struct GpuWaitSnapshot {
+  bool is_memory = false;
+  uint32_t address = 0;
+  uint32_t ref = 0;
+  uint32_t mask = 0;
+  uint32_t function = 0;
+  uint64_t waited_ms = 0;
+};
+
+inline std::string Hex32(uint32_t value) {
+  static constexpr char kDigits[] = "0123456789ABCDEF";
+  std::string text = "0x00000000";
+  for (int i = 0; i < 8; ++i) {
+    text[9 - i] = kDigits[(value >> (i * 4)) & 0xF];
+  }
+  return text;
+}
+
+inline std::string ThreadsReply(std::string_view id,
+                                const std::vector<ThreadSnapshot>& threads,
+                                const std::vector<ModuleSnapshot>& modules,
+                                const std::optional<GpuWaitSnapshot>& gpu,
+                                uint64_t vblank, uint64_t swap) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  auto string = [&writer](const char* key, std::string_view value) {
+    writer.Key(key);
+    writer.String(value.data(), rapidjson::SizeType(value.size()));
+  };
+  writer.StartObject();
+  if (!id.empty()) {
+    writer.Key("re");
+    writer.RawValue(id.data(), id.size(), rapidjson::kNumberType);
+  }
+  writer.Key("ok");
+  writer.Bool(true);
+  writer.Key("vblank");
+  writer.Uint64(vblank);
+  writer.Key("swap");
+  writer.Uint64(swap);
+  writer.Key("threads");
+  writer.StartArray();
+  for (const ThreadSnapshot& thread : threads) {
+    writer.StartObject();
+    writer.Key("id");
+    writer.Uint(thread.id);
+    string("handle", Hex32(thread.handle));
+    string("name", thread.name);
+    writer.Key("priority");
+    writer.Int(thread.priority);
+    writer.Key("suspended");
+    writer.Uint(thread.suspend_count);
+    if (!thread.wait.empty()) {
+      string("wait", thread.wait);
+      writer.Key("waited_ms");
+      writer.Uint64(thread.waited_ms);
+      writer.Key("timeout_ms");
+      if (thread.timeout_ms) {
+        writer.Uint64(*thread.timeout_ms);
+      } else {
+        writer.Null();
+      }
+      writer.Key("object_count");
+      writer.Uint(thread.object_count);
+      writer.Key("objects");
+      writer.StartArray();
+      for (const WaitedObject& object : thread.objects) {
+        writer.StartObject();
+        string("handle", Hex32(object.handle));
+        string("type", object.type);
+        if (!object.name.empty()) {
+          string("name", object.name);
+        }
+        if (object.owner_thread) {
+          writer.Key("owner");
+          writer.Uint(*object.owner_thread);
+        }
+        writer.EndObject();
+      }
+      writer.EndArray();
+      writer.Key("stack");
+      writer.StartArray();
+      for (uint32_t address : thread.stack) {
+        std::string text = Hex32(address);
+        writer.String(text.data(), rapidjson::SizeType(text.size()));
+      }
+      writer.EndArray();
+    }
+    writer.EndObject();
+  }
+  writer.EndArray();
+  writer.Key("modules");
+  writer.StartArray();
+  for (const ModuleSnapshot& module : modules) {
+    writer.StartObject();
+    string("name", module.name);
+    string("base", Hex32(module.base));
+    string("size", Hex32(module.size));
+    writer.EndObject();
+  }
+  writer.EndArray();
+  writer.Key("gpu_wait");
+  if (gpu) {
+    writer.StartObject();
+    string("on", gpu->is_memory ? "memory" : "register");
+    string("address", Hex32(gpu->address));
+    string("ref", Hex32(gpu->ref));
+    string("mask", Hex32(gpu->mask));
+    writer.Key("function");
+    writer.Uint(gpu->function);
+    writer.Key("waited_ms");
+    writer.Uint64(gpu->waited_ms);
+    writer.EndObject();
+  } else {
+    writer.Null();
+  }
+  writer.EndObject();
+  return std::string(buffer.GetString(), buffer.GetSize()) + "\n";
 }
 
 }  // namespace automation

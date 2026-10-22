@@ -10,7 +10,12 @@
 #ifndef XENIA_KERNEL_XTHREAD_H_
 #define XENIA_KERNEL_XTHREAD_H_
 
+#include <array>
 #include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 
 #include "xenia/base/mutex.h"
@@ -371,6 +376,33 @@ struct X_KTHREAD {
 };
 static_assert_size(X_KTHREAD, 0xAB0);
 
+// What a guest thread is blocked in, for tools that look into hangs (the
+// automation channel's threads op).
+struct XThreadWait {
+  enum class Kind {
+    kNone,
+    kWaitOne,
+    kWaitAny,
+    kWaitAll,
+    kSignalAndWait,
+    kDelay
+  };
+  static constexpr uint32_t kMaxObjects = 8;
+
+  Kind kind = Kind::kNone;
+  // The objects waited on, the first kMaxObjects of object_count. Valid only
+  // while the wait lasts: read them in XThread::InspectWait.
+  std::array<XObject*, kMaxObjects> objects{};
+  uint32_t object_count = 0;
+  // None: no timeout.
+  std::optional<uint64_t> timeout_ms;
+  // Host steady clock, in ns, when the wait began.
+  uint64_t since_ns = 0;
+  // The guest's return address and stack pointer at the call.
+  uint32_t lr = 0;
+  uint32_t sp = 0;
+};
+
 #if !XE_PLATFORM_WIN32
 // Exception thrown by XThread::Reenter() to unwind through JIT frames.
 // C++ exception unwinding uses DWARF .eh_frame info registered for JIT code,
@@ -492,6 +524,29 @@ class XThread : public XObject, public cpu::Thread {
   X_STATUS Delay(uint32_t processor_mode, uint32_t alertable,
                  uint64_t interval);
 
+  // Records what the current guest thread waits on for as long as it lives;
+  // does nothing on other threads.
+  class WaitScope {
+   public:
+    WaitScope(XThreadWait::Kind kind, std::span<XObject* const> objects,
+              std::optional<uint64_t> timeout_ms);
+    ~WaitScope();
+    WaitScope(const WaitScope&) = delete;
+    WaitScope& operator=(const WaitScope&) = delete;
+
+   private:
+    XThread* thread_ = nullptr;
+    // A wait in an APC run by an alertable wait nests in it.
+    XThreadWait outer_;
+  };
+  // Calls inspect with this thread's current wait (kind kNone when it isn't
+  // waiting), while the wait can't end, so its objects stay valid.
+  template <typename F>
+  void InspectWait(F&& inspect) {
+    std::lock_guard<std::mutex> lock(wait_mutex_);
+    inspect(static_cast<const XThreadWait&>(wait_));
+  }
+
 #if !XE_PLATFORM_WIN32
   // Performs self-suspension: increments suspend_count and blocks until
   // another thread calls Resume() and suspend_count reaches 0.
@@ -539,6 +594,9 @@ class XThread : public XObject, public cpu::Thread {
   bool running_ = false;
   // True while this thread is counted in the telemetry guest_threads gauge.
   std::atomic<bool> telemetry_counted_{false};
+  // What it waits on now (see WaitScope), guarded by wait_mutex_.
+  std::mutex wait_mutex_;
+  XThreadWait wait_;
 
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this

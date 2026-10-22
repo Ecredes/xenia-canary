@@ -79,6 +79,7 @@ At most 8 connections are open at once.
 | `pause` | controller | `ok` with `paused`, `vblank` and `swap`; the emulator pauses, as below |
 | `resume` | controller | `ok` with `paused`, `vblank` and `swap`; the emulator runs again |
 | `advance` {`vblanks`} | controller | when the emulator is paused: runs it for `vblanks` vblanks (1 to 3600), pauses it again, then `ok` with `paused`, `vblank` and `swap`; `not paused` otherwise |
+| `threads` | any | `ok` with `threads`, `modules`, `gpu_wait`, `vblank` and `swap`: what every guest thread is doing, as below |
 | `stop` | controller | `ok`; then every client gets an `exit` event and the process ends |
 
 An unknown op is answered with an error; the connection stays open.
@@ -181,6 +182,31 @@ under way, `pause`, `resume` and another `advance` are refused.
 
 With `clock_no_scaling`, guest time is host time and keeps running while
 paused.
+
+### Threads
+
+`threads` is for looking into hangs. Each guest thread has `id`, `handle`,
+`name`, `priority` and `suspended` (its suspend count), and while it waits in
+the kernel:
+
+- `wait`: `one`, `any`, `all`, `signal_and_wait`, or `delay` (a sleep);
+  `waited_ms` so far and `timeout_ms` (null: none).
+- `objects`: the first 8 of `object_count` objects waited on, each with
+  `handle`, `type` (`event`, `semaphore`, `mutant`, `thread`, `timer`, ...),
+  `name` when it has one, and for a mutant held by a guest thread, `owner`
+  (its `id`). Xenia keeps these objects as host primitives, so their signal
+  state is not reported.
+- `stack`: return addresses, innermost first: the kernel call's, then each
+  frame's up the guest back chain, while they fall in a title module.
+
+A thread without `wait` is running guest code, or suspended. `modules` lists
+the title's modules (`name`, `base`, `size`: the executable and its DLLs),
+for reading addresses as module and offset. `gpu_wait` is the
+`PM4_WAIT_REG_MEM` the command processor is stuck in, or null: `on`
+(`memory` or `register`), `address` (a register index, or a physical address
+with the endianness in its low 2 bits), `ref`, `mask`, `function` (the
+comparison, low 3 bits of the packet's wait info) and `waited_ms`. With
+`pause` first, the snapshot is of a stopped guest.
 
 ### Audio
 

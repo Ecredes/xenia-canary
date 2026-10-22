@@ -11,10 +11,12 @@
 #define XENIA_GPU_COMMAND_PROCESSOR_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -188,6 +190,24 @@ class CommandProcessor {
                        uint32_t n_values);
 
   bool is_paused() const { return paused_; }
+
+  // A PM4_WAIT_REG_MEM the command processor is stuck in, for tools that look
+  // into hangs: what it polls and since when (host steady clock, ns).
+  struct RegMemWait {
+    bool is_memory = false;
+    // A register index, or a guest physical address with the endianness in
+    // its low 2 bits.
+    uint32_t address = 0;
+    uint32_t ref = 0;
+    uint32_t mask = 0;
+    // The wait_info's comparison function (low 3 bits).
+    uint32_t function = 0;
+    uint64_t since_ns = 0;
+  };
+  std::optional<RegMemWait> reg_mem_wait() {
+    std::lock_guard<std::mutex> lock(reg_mem_wait_mutex_);
+    return reg_mem_wait_;
+  }
   void Pause();
   void Resume();
 
@@ -605,6 +625,9 @@ class CommandProcessor {
   kernel::object_ref<kernel::XHostThread> worker_thread_;
 
   std::queue<std::function<void()>> pending_fns_;
+
+  std::mutex reg_mem_wait_mutex_;
+  std::optional<RegMemWait> reg_mem_wait_;
 
   // MicroEngine binary from PM4_ME_INIT
   std::vector<uint32_t> me_bin_;

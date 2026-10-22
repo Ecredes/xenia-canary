@@ -774,6 +774,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                 : register_file_->values[poll_reg_addr];
 
   bool matched = false;
+  bool recorded = false;
 
   do {
     uint32_t value = value_ref;
@@ -791,6 +792,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
+      if (!recorded) {
+        recorded = true;
+        std::lock_guard<std::mutex> lock(reg_mem_wait_mutex_);
+        reg_mem_wait_ = RegMemWait{
+            is_memory,
+            poll_reg_addr,
+            ref,
+            mask,
+            wait_info & 0x7,
+            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count())};
+      }
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();
@@ -804,6 +818,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
 
         if (!worker_running_) {
           // Short-circuited exit.
+          std::lock_guard<std::mutex> lock(reg_mem_wait_mutex_);
+          reg_mem_wait_.reset();
           return false;
         }
       } else {
@@ -811,6 +827,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     }
   } while (!matched);
 
+  if (recorded) {
+    std::lock_guard<std::mutex> lock(reg_mem_wait_mutex_);
+    reg_mem_wait_.reset();
+  }
   return true;
 }
 XE_NOINLINE

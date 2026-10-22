@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <optional>
 #include <string>
 
 #include "xenia/base/threading.h"
@@ -263,6 +264,9 @@ class XObject {
   }
 
   static uint32_t TimeoutTicksToMs(int64_t timeout_ticks);
+  // A wait's timeout in guest milliseconds, for XThread::WaitScope; none
+  // when it waits forever.
+  static std::optional<uint64_t> WaitTimeoutMs(const uint64_t* opt_timeout);
 
   KernelState* kernel_state_;
 

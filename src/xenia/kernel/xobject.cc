@@ -205,6 +205,13 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   }
 }
 
+std::optional<uint64_t> XObject::WaitTimeoutMs(const uint64_t* opt_timeout) {
+  if (!opt_timeout) {
+    return std::nullopt;
+  }
+  return TimeoutTicksToMs(int64_t(*opt_timeout));
+}
+
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                        uint32_t alertable, uint64_t* opt_timeout) {
   auto wait_handle = GetWaitHandle();
@@ -223,6 +230,9 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
   if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
     blocked_scope.emplace(xe::telemetry::Gauge::kBlockedThreads);
   }
+  XObject* waited[] = {this};
+  XThread::WaitScope wait_scope(XThreadWait::Kind::kWaitOne, waited,
+                                WaitTimeoutMs(opt_timeout));
 
   auto result =
       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
@@ -263,6 +273,10 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
   if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
     blocked_scope.emplace(xe::telemetry::Gauge::kBlockedThreads);
   }
+
+  XObject* waited[] = {wait_object};
+  XThread::WaitScope wait_scope(XThreadWait::Kind::kSignalAndWait, waited,
+                                WaitTimeoutMs(opt_timeout));
 
   auto result = xe::threading::SignalAndWait(
       signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
@@ -312,6 +326,10 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
   if (xe::telemetry::enabled() && XThread::IsCurrentGuestThread()) {
     blocked_scope.emplace(xe::telemetry::Gauge::kBlockedThreads);
   }
+
+  XThread::WaitScope wait_scope(
+      wait_type ? XThreadWait::Kind::kWaitAny : XThreadWait::Kind::kWaitAll,
+      std::span<XObject* const>(objects, count), WaitTimeoutMs(opt_timeout));
 
   X_STATUS status;
   uint32_t boost_increment = 0;

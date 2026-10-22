@@ -183,6 +183,95 @@ TEST_CASE("The controller pauses, resumes and advances", "[automation]") {
   REQUIRE(reply["swap"] == 61);
 }
 
+TEST_CASE("Anyone can look at the threads", "[automation]") {
+  Session session{Role::kObserver};
+  Decision threads =
+      Decide(session, Parsed(R"({"op":"threads","id":3})"), TestContext());
+  REQUIRE(threads.action == Action::kThreads);
+  REQUIRE(threads.reply.empty());
+}
+
+TEST_CASE("Guest stacks walk the back chain", "[automation]") {
+  // A stack from 0x7000 to 0x7100: three frames, each saving its caller's
+  // return address at -8 from its back chain word.
+  std::map<uint32_t, uint32_t> memory = {
+      {0x7000, 0x7040}, {0x7038, 0x82001000},  // frame 0 -> 0x7040
+      {0x7040, 0x7080}, {0x7078, 0x82002000},  // frame 1 -> 0x7080
+      {0x7080, 0x0},                           // the outermost: no chain
+  };
+  auto peek = [&memory](uint32_t address) {
+    auto it = memory.find(address);
+    return it == memory.end() ? 0u : it->second;
+  };
+  std::vector<ModuleSnapshot> modules = {{"default.xex", 0x82000000, 0x10000},
+                                         {"extra.xex", 0x88000000, 0x1000}};
+  REQUIRE(InModules(modules, 0x88000FFC));
+  REQUIRE(!InModules(modules, 0x88001000));
+  REQUIRE(!InModules(modules, 0x82000502));
+  auto walk = [&peek, &modules](uint32_t lr, uint32_t sp, size_t max_frames) {
+    return WalkGuestStack(
+        peek, [&modules](uint32_t a) { return InModules(modules, a); }, lr, sp,
+        0x7000, 0x7100, max_frames);
+  };
+  REQUIRE(walk(0x82000500, 0x7000, 16) ==
+          std::vector<uint32_t>{0x82000500, 0x82001000, 0x82002000});
+  // At most max_frames, and nothing outside the stack.
+  REQUIRE(walk(0x82000500, 0x7000, 2) ==
+          std::vector<uint32_t>{0x82000500, 0x82001000});
+  REQUIRE(walk(0x82000500, 0x9000, 16) == std::vector<uint32_t>{0x82000500});
+  // Fill bytes past the outermost frame aren't code.
+  memory[0x7080] = 0x70C0;
+  memory[0x70B8] = 0xBCBCBCBC;
+  REQUIRE(walk(0x82000500, 0x7000, 16) ==
+          std::vector<uint32_t>{0x82000500, 0x82001000, 0x82002000});
+  REQUIRE(walk(0x00001234, 0x7000, 16).empty());
+  // A chain that points down ends the walk.
+  memory[0x7040] = 0x7010;
+  REQUIRE(walk(0x82000500, 0x7000, 16) ==
+          std::vector<uint32_t>{0x82000500, 0x82001000});
+}
+
+TEST_CASE("Threads replies describe waits and the GPU", "[automation]") {
+  ThreadSnapshot waiting;
+  waiting.id = 7;
+  waiting.handle = 0xF8000010;
+  waiting.name = "Render";
+  waiting.priority = 2;
+  waiting.wait = "any";
+  waiting.object_count = 2;
+  waiting.waited_ms = 1500;
+  waiting.objects = {{0xF8000020, "event", "", std::nullopt},
+                     {0xF8000024, "mutant", "Lock", 9}};
+  waiting.stack = {0x82000500, 0x82001000};
+  ThreadSnapshot running;
+  running.id = 9;
+  running.handle = 0xF8000030;
+  rapidjson::Document reply = Json(ThreadsReply(
+      "5", {waiting, running}, {{"default.xex", 0x82000000, 0xD0000}},
+      GpuWaitSnapshot{true, 0x1F9BA0FC, 0xFFFFFFFF, 0xFFFFFFFF, 3, 2000}, 600,
+      300));
+  REQUIRE(reply["modules"][0]["name"] == "default.xex");
+  REQUIRE(reply["modules"][0]["size"] == "0x000D0000");
+  REQUIRE(reply["re"] == 5);
+  REQUIRE(reply["vblank"] == 600);
+  const auto& threads = reply["threads"];
+  REQUIRE(threads.Size() == 2);
+  REQUIRE(threads[0]["id"] == 7);
+  REQUIRE(threads[0]["handle"] == "0xF8000010");
+  REQUIRE(threads[0]["wait"] == "any");
+  REQUIRE(threads[0]["timeout_ms"].IsNull());
+  REQUIRE(threads[0]["waited_ms"] == 1500);
+  REQUIRE(threads[0]["objects"][1]["type"] == "mutant");
+  REQUIRE(threads[0]["objects"][1]["owner"] == 9);
+  REQUIRE(!threads[0]["objects"][0].HasMember("owner"));
+  REQUIRE(threads[0]["stack"][1] == "0x82001000");
+  REQUIRE(!threads[1].HasMember("wait"));
+  REQUIRE(reply["gpu_wait"]["on"] == "memory");
+  REQUIRE(reply["gpu_wait"]["address"] == "0x1F9BA0FC");
+  REQUIRE(
+      Json(ThreadsReply("", {}, {}, std::nullopt, 0, 0))["gpu_wait"].IsNull());
+}
+
 TEST_CASE("Observers can't pause", "[automation]") {
   Session session{Role::kObserver};
   for (const char* line : {R"({"op":"pause"})", R"({"op":"resume"})",

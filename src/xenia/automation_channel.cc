@@ -15,17 +15,28 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <random>
+#include <set>
 #include <utility>
 
 #include "xenia/apu/audio_media_player.h"
 #include "xenia/apu/audio_system.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/telemetry.h"
 #include "xenia/base/threading.h"
+#include "xenia/cpu/xex_module.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
+#include "xenia/kernel/util/object_table.h"
+#include "xenia/kernel/xmutant.h"
+#include "xenia/kernel/xthread.h"
+#include "xenia/memory.h"
 #include "xenia/ui/presenter.h"
 
 #include "third_party/stb/stb_image_write.h"
@@ -156,6 +167,187 @@ bool WriteTokenFile(const std::filesystem::path& path,
   close(fd);
   return ok;
 #endif
+}
+
+// Frames of a guest stack the threads op walks.
+constexpr size_t kMaxStackFrames = 16;
+
+uint64_t SteadyNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+const char* ObjectTypeName(kernel::XObject::Type type) {
+  using Type = kernel::XObject::Type;
+  switch (type) {
+    case Type::Enumerator:
+      return "enumerator";
+    case Type::Event:
+      return "event";
+    case Type::File:
+      return "file";
+    case Type::IOCompletion:
+      return "io_completion";
+    case Type::Module:
+      return "module";
+    case Type::Mutant:
+      return "mutant";
+    case Type::NotifyListener:
+      return "notify_listener";
+    case Type::Semaphore:
+      return "semaphore";
+    case Type::Session:
+      return "session";
+    case Type::Socket:
+      return "socket";
+    case Type::SymbolicLink:
+      return "symbolic_link";
+    case Type::Thread:
+      return "thread";
+    case Type::Timer:
+      return "timer";
+    case Type::Device:
+      return "device";
+    default:
+      return "unknown";
+  }
+}
+
+const char* WaitKindName(kernel::XThreadWait::Kind kind) {
+  using Kind = kernel::XThreadWait::Kind;
+  switch (kind) {
+    case Kind::kWaitOne:
+      return "one";
+    case Kind::kWaitAny:
+      return "any";
+    case Kind::kWaitAll:
+      return "all";
+    case Kind::kSignalAndWait:
+      return "signal_and_wait";
+    case Kind::kDelay:
+      return "delay";
+    default:
+      return "";
+  }
+}
+
+// The title's modules: the executable and the DLLs it loaded. Guest code is
+// in them alone; Xenia's system modules are native.
+std::vector<ModuleSnapshot> SnapshotModules(kernel::KernelState& kernel_state) {
+  std::vector<ModuleSnapshot> modules;
+  for (const auto& module :
+       kernel_state.object_table()->GetObjectsByType<kernel::XModule>(
+           kernel::XObject::Type::Module)) {
+    if (module->module_type() != kernel::XModule::ModuleType::kUserModule) {
+      continue;
+    }
+    cpu::XexModule* xex =
+        static_cast<kernel::UserModule*>(module.get())->xex_module();
+    if (!xex || !xex->base_address()) {
+      continue;
+    }
+    ModuleSnapshot snapshot{module->name(), xex->base_address(),
+                            xex->image_size()};
+    if (std::none_of(modules.begin(), modules.end(),
+                     [&snapshot](const ModuleSnapshot& other) {
+                       return other.base == snapshot.base;
+                     })) {
+      modules.push_back(std::move(snapshot));
+    }
+  }
+  return modules;
+}
+
+// What every guest thread is doing now.
+std::vector<ThreadSnapshot> SnapshotThreads(
+    kernel::KernelState& kernel_state,
+    const std::vector<ModuleSnapshot>& modules) {
+  auto threads = kernel_state.object_table()->GetObjectsByType<kernel::XThread>(
+      kernel::XObject::Type::Thread);
+  // Owners are compared by address alone: an owner may be gone.
+  std::map<const kernel::XThread*, uint32_t> ids;
+  for (const auto& thread : threads) {
+    ids[thread.get()] = thread->thread_id();
+  }
+  std::set<const kernel::XThread*> seen;
+  Memory* memory = kernel_state.memory();
+  uint64_t now_ns = SteadyNowNs();
+  std::vector<ThreadSnapshot> snapshots;
+  for (const auto& thread : threads) {
+    // The table lists a thread once per handle.
+    if (!thread->is_guest_thread() || !seen.insert(thread.get()).second) {
+      continue;
+    }
+    ThreadSnapshot snapshot;
+    snapshot.id = thread->thread_id();
+    snapshot.handle = thread->handle();
+    snapshot.name = thread->thread_name();
+    snapshot.priority = thread->priority();
+    snapshot.suspend_count = thread->suspend_count();
+    uint32_t stack_limit = thread->stack_limit();
+    uint32_t stack_base = thread->stack_base();
+    thread->InspectWait([&](const kernel::XThreadWait& wait) {
+      if (wait.kind == kernel::XThreadWait::Kind::kNone) {
+        return;
+      }
+      snapshot.wait = WaitKindName(wait.kind);
+      snapshot.object_count = wait.object_count;
+      snapshot.timeout_ms = wait.timeout_ms;
+      snapshot.waited_ms =
+          now_ns > wait.since_ns ? (now_ns - wait.since_ns) / 1000000 : 0;
+      for (uint32_t i = 0;
+           i <
+           std::min<uint32_t>(wait.object_count, uint32_t(wait.objects.size()));
+           ++i) {
+        kernel::XObject* object = wait.objects[i];
+        if (!object) {
+          continue;
+        }
+        WaitedObject waited;
+        waited.handle = object->handle();
+        waited.type = ObjectTypeName(object->type());
+        waited.name = object->name();
+        if (object->type() == kernel::XObject::Type::Mutant) {
+          auto owner =
+              ids.find(static_cast<kernel::XMutant*>(object)->owning_thread());
+          if (owner != ids.end()) {
+            waited.owner_thread = owner->second;
+          }
+        }
+        snapshot.objects.push_back(std::move(waited));
+      }
+      snapshot.stack = WalkGuestStack(
+          [memory](uint32_t address) {
+            return xe::load_and_swap<uint32_t>(
+                memory->TranslateVirtual(address));
+          },
+          [&modules](uint32_t address) { return InModules(modules, address); },
+          wait.lr, wait.sp, stack_limit, stack_base, kMaxStackFrames);
+    });
+    snapshots.push_back(std::move(snapshot));
+  }
+  return snapshots;
+}
+
+std::optional<GpuWaitSnapshot> SnapshotGpuWait(gpu::GraphicsSystem& graphics) {
+  gpu::CommandProcessor* command_processor = graphics.command_processor();
+  if (!command_processor) {
+    return std::nullopt;
+  }
+  std::optional<gpu::CommandProcessor::RegMemWait> wait =
+      command_processor->reg_mem_wait();
+  if (!wait) {
+    return std::nullopt;
+  }
+  uint64_t now_ns = SteadyNowNs();
+  return GpuWaitSnapshot{
+      wait->is_memory,
+      wait->address,
+      wait->ref,
+      wait->mask,
+      wait->function,
+      now_ns > wait->since_ns ? (now_ns - wait->since_ns) / 1000000 : 0};
 }
 
 }  // namespace
@@ -911,6 +1103,20 @@ void AutomationChannel::Handle(Client& client, std::string_view line) {
       client.out += PauseReply(parsed.request->id, emulator_.is_paused(),
                                graphics_system->vblank_count(),
                                graphics_system->swap_count());
+      break;
+    }
+    case Action::kThreads: {
+      kernel::KernelState* kernel_state = emulator_.kernel_state();
+      gpu::GraphicsSystem* graphics_system = emulator_.graphics_system();
+      if (!kernel_state || !graphics_system) {
+        client.out += ErrorLine(parsed.request->id, "no title running");
+        break;
+      }
+      std::vector<ModuleSnapshot> modules = SnapshotModules(*kernel_state);
+      client.out += ThreadsReply(
+          parsed.request->id, SnapshotThreads(*kernel_state, modules), modules,
+          SnapshotGpuWait(*graphics_system), graphics_system->vblank_count(),
+          graphics_system->swap_count());
       break;
     }
     case Action::kStop:
