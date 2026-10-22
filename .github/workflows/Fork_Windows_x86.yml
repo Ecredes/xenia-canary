@@ -102,8 +102,9 @@ jobs:
             C:\ccache
             build\bin\Windows\Release\*.iobj
             build\bin\Windows\Release\*.ipdb
-          key: ${{ inputs.restore-key || format('{0}-ccache-v2-{1}', runner.os, inputs.ref) }}
-          restore-keys: ${{ runner.os }}-ccache-v2-
+            build\bin\Windows\Release\ltcg-toolchain.txt
+          key: ${{ inputs.restore-key || format('{0}-ccache-v3-{1}', runner.os, inputs.ref) }}
+          restore-keys: ${{ runner.os }}-ccache-v3-
 
       # The cache is only as good as the toolchain that wrote it, and runner
       # images report the same MSVC version (14.51.36231 on win25-vs2026
@@ -114,8 +115,10 @@ jobs:
       #   the linker (C1001 and LNK1000 in IMAGE::BuildImage) in three builds.
       # So the toolchain is identified by the contents of its compiler, code
       # generator and linker: ccache's compiler_check is that fingerprint, and
-      # LTCG state from another fingerprint is dropped (the objects stay). Both
-      # live in C:\ccache, so the cache's paths, and its entries, don't change.
+      # LTCG state from another fingerprint is dropped (the objects stay). The
+      # stamp naming the LTCG state's toolchain sits beside it: in C:\ccache it
+      # never lasted until the save (2026-10-22), though ccache's eviction and
+      # size cleanup were both seen to leave such files alone.
       - name: Fingerprint the toolchain
         run: |-
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
@@ -128,17 +131,14 @@ jobs:
           $bytes = [Text.Encoding]::ASCII.GetBytes($hashes -join ' ')
           $fingerprint = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
           echo "MSVC $version on ${env:ImageVersion}: toolchain $fingerprint"
-          New-Item -ItemType Directory -Force C:\ccache | Out-Null
-          # Diagnostics: the stamp read back empty on every build so far.
-          Get-ChildItem C:\ccache -File | ForEach-Object { echo "restored: $($_.Name) $($_.Length) bytes" }
-          $stamp = 'C:\ccache\ltcg-toolchain.txt'
+          New-Item -ItemType Directory -Force C:\ccache, build\bin\Windows\Release | Out-Null
+          $stamp = 'build\bin\Windows\Release\ltcg-toolchain.txt'
           $saved = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
           if ($saved -ne $fingerprint) {
             Remove-Item build\bin\Windows\Release\*.iobj, build\bin\Windows\Release\*.ipdb -ErrorAction SilentlyContinue
             echo "Dropped LTCG state from toolchain '$saved'"
           }
           Set-Content -NoNewline $stamp $fingerprint
-          Remove-Item C:\ccache\ltcg-image.txt -ErrorAction SilentlyContinue
           Set-Content C:\ccache\ccache.conf "compiler_check = string:$fingerprint"
 
       - name: Install ccache
@@ -253,7 +253,8 @@ jobs:
           $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $env:BUILD_START + 300
           ccache --evict-older-than "${age}s"
           ccache --show-stats
-          Get-ChildItem C:\ccache -File | ForEach-Object { echo "saving: $($_.Name) $($_.Length) bytes" }
+          # Diagnostics, for the first builds with the stamp beside the LTCG state.
+          Get-ChildItem build\bin\Windows\Release\ltcg-toolchain.txt, build\bin\Windows\Release\*.iobj -ErrorAction SilentlyContinue | ForEach-Object { echo "saving: $($_.Name) $($_.Length) bytes" }
 
       - name: Save compiler output
         if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
@@ -263,7 +264,8 @@ jobs:
             C:\ccache
             build\bin\Windows\Release\*.iobj
             build\bin\Windows\Release\*.ipdb
-          key: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
+            build\bin\Windows\Release\ltcg-toolchain.txt
+          key: ${{ runner.os }}-ccache-v3-${{ inputs.ref }}
 
       - name: Delete replaced compiler output
         if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}
@@ -271,9 +273,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PREFIX: ${{ runner.os }}-ccache-v2-
-          KEY: ${{ runner.os }}-ccache-v2-${{ inputs.ref }}
-          KEEP: ${{ runner.os }}-ccache-v2-${{ inputs.keep-ref }}
+          PREFIX: ${{ runner.os }}-ccache-v3-
+          KEY: ${{ runner.os }}-ccache-v3-${{ inputs.ref }}
+          KEEP: ${{ runner.os }}-ccache-v3-${{ inputs.keep-ref }}
         run: |-
           # Keeps this entry, fork-ci's, and the 3 newest others.
           kept=0

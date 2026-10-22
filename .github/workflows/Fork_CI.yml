@@ -114,7 +114,7 @@ jobs:
             echo "$best"
           }
           linux=$(pick Linux-ccache-)
-          windows=$(pick Windows-ccache-v2-)
+          windows=$(pick Windows-ccache-v3-)
           echo "Linux restores ${linux:-the newest entry}, Windows ${windows:-the newest entry}"
           echo "linux=$linux" >> "$GITHUB_OUTPUT"
           echo "windows=$windows" >> "$GITHUB_OUTPUT"
