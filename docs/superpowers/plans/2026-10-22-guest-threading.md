@@ -62,17 +62,27 @@ can't be atomic across the two. So every waitable moves at once.
 - Kernel APCs delivered at the wait boundary; POSIX parity (no host signals
   for APCs).
 
-## Step 4: stops and suspension (threading/4-stops)
+## Step 4: wake outside the lock (threading/4-wake-outside-lock)
+
+Found by the step 2/3 smoke (535107D4 about 7% fewer swaps, 545407DC 3%)
+and wait statistics (1650 blocking waits a second, 85% untimed, none
+sub-millisecond): wakers set park events under the shell lock, so every
+woken thread blocked on the waker. Wakers now publish status plus a woken
+flag under the lock and set parks after it; shells are told apart by serial;
+the shell gets a guest thread's waiter from KernelState instead of including
+XThread, so host-thread shell tests link. A/B after: within 1% on both.
+
+## Step 5: stops and suspension (threading/5-stops)
 
 - Emulator stop vs guest suspend in the core; `Emulator::Pause` through it;
   audio and vblank workers take the stop. Remove the per-subsystem pause
   handshakes that become redundant.
 - Linux check.
 
-## Steps 5 to 7
+## Steps 6 to 8
 
-I/O completion ports (5), interrupts and DPCs (6), priorities and boosts
-(7), as in the spec §6; each planned in detail when step 4 lands. Timers
+I/O completion ports (6), interrupts and DPCs (7), priorities and boosts
+(8), as in the spec §6; each planned in detail when step 5 lands. Timers
 moved into step 2.
 
 ## Phase 2
