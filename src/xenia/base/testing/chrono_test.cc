@@ -146,4 +146,14 @@ TEST_CASE("WinSystemClock <-> steady_clock", "[clock_cast]") {
   }
 }
 
+TEST_CASE("Guest interrupt time is guest uptime in 100 ns", "[clock]") {
+  Clock::set_guest_time_scalar(2.0);
+
+  // Interrupt time is in 100 ns units; uptime is in milliseconds.
+  REQUIRE(llabs(int64_t(Clock::QueryGuestInterruptTime() / 10000) -
+                int64_t(Clock::QueryGuestUptimeMillis())) <= 1);
+
+  Clock::set_guest_time_scalar(1.0);
+}
+
 }  // namespace xe::base::test

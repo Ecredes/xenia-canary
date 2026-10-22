@@ -192,7 +192,7 @@ uint64_t Clock::QueryGuestSystemTime() {
 }
 
 uint64_t Clock::QueryGuestInterruptTime() {
-  return Clock::QueryHostInterruptTime();
+  return QueryGuestSystemTimeOffset();
 }
 
 uint32_t Clock::QueryGuestUptimeMillis() {
