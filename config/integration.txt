@@ -25,11 +25,11 @@ origin/kernel/launch-data-target
 origin/kernel/stfs-device-stubs
 origin/kernel/xsocket-close-once
 origin/xam/loopback-sessions
+origin/kernel/xaudio-override-speaker-config
 
 # GPU-CPU coherence; contains cpu/reservation-generations
 origin/coherence/9-default
 
-# Fork features
-origin/testing/telemetry
-origin/host/7-headless-shell
-origin/hid/remote-input
+# Fork features: the automation stack, by its top branch. It contains the
+# headless host series, testing/telemetry (rebased) and hid/remote-input.
+origin/automation/10-threads
