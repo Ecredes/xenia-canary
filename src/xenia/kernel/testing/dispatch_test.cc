@@ -258,6 +258,17 @@ TEST_CASE("A user APC ends an alertable wait, or the next one", "[dispatch]") {
   REQUIRE(!Thread(d, b).user_apc_pending);
 }
 
+TEST_CASE("A delay is a wait on nothing", "[dispatch]") {
+  Dispatcher d;
+  ThreadId a = d.NewThread(), b = d.NewThread();
+  REQUIRE(d.BeginWait(a, Wait({}, WaitType::kAny, 100), 0).blocked);
+  REQUIRE(d.BeginWait(b, Wait({}, WaitType::kAny, 100, true), 0).blocked);
+  REQUIRE(d.Expire(99).wakes.empty());
+  // Alertable: a user APC ends it early.
+  REQUIRE(d.QueueUserApc(b).wakes == std::vector<Wake>{{b, kStatusUserApc}});
+  REQUIRE(d.Expire(100).wakes == std::vector<Wake>{{a, kStatusTimeout}});
+}
+
 TEST_CASE("A thread object signals when its thread ends", "[dispatch]") {
   Dispatcher d;
   ThreadId worker = d.NewThread(), joiner = d.NewThread();

@@ -1016,44 +1016,33 @@ uint32_t XThread::SelfSuspend() {
 
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
                         uint64_t interval) {
-  int64_t timeout_ticks = interval;
-  uint32_t timeout_ms;
-  if (timeout_ticks > 0) {
-    // Absolute time, based on January 1, 1601.
-    // TODO(benvanik): convert time to relative time.
-    assert_always();
-    timeout_ms = 0;
-  } else if (timeout_ticks < 0) {
-    // Relative time.
-    timeout_ms = uint32_t(-timeout_ticks / 10000);  // Ticks -> MS
-  } else {
-    timeout_ms = 0;
-  }
-
-  timeout_ms = Clock::ScaleGuestDurationMillis(timeout_ms);
-  if (alertable) {
-    auto result =
-        xe::threading::AlertableSleep(std::chrono::milliseconds(timeout_ms));
-    switch (result) {
-      default:
-      case xe::threading::SleepResult::kSuccess:
-        return X_STATUS_SUCCESS;
-      case xe::threading::SleepResult::kAlerted:
-        return X_STATUS_USER_APC;
+  // A wait on no objects: it shares the guest clock (relative or absolute
+  // intervals, pauses) and the user APC rule with every other wait.
+  uint64_t now = dispatch::Shell::GuestNow();
+  uint64_t deadline =
+      dispatch::Shell::DeadlineFromTimeout(&interval).value_or(now);
+  dispatch::WaitRequest request;
+  request.deadline = deadline;
+  request.alertable = alertable != 0;
+  // Under a host millisecond a park can't be timed; yield instead, as a
+  // zero delay does.
+  constexpr uint64_t kMinParkTicks = 10000;
+  if (deadline < now + kMinParkTicks) {
+    request.deadline = now;
+    if (kernel_state()->dispatch()->Wait(request) ==
+        dispatch::kStatusUserApc) {
+      return X_STATUS_USER_APC;
     }
-  } else {
-    if (timeout_ms == 0) {
-      if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
-        xe::threading::NanoSleep(100);
-      } else {
-        xe::threading::MaybeYield();
-      }
+    if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
+      xe::threading::NanoSleep(100);
     } else {
-      xe::threading::Sleep(std::chrono::milliseconds(timeout_ms));
+      xe::threading::MaybeYield();
     }
+    return X_STATUS_SUCCESS;
   }
-
-  return X_STATUS_SUCCESS;
+  uint32_t status = kernel_state()->dispatch()->Wait(request);
+  return status == dispatch::kStatusUserApc ? X_STATUS_USER_APC
+                                            : X_STATUS_SUCCESS;
 }
 
 struct ThreadSavedState {

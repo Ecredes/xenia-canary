@@ -131,9 +131,8 @@ uint32_t Shell::WaitLocked(Waiter& waiter, const WaitRequest& request,
           std::clamp<int64_t>(int64_t(std::ceil(remaining_ms)), 1, kMaxParkMs));
     }
     lock.unlock();
-    // Alertable, so host APCs (timer completion routines) still run; the
-    // guest's own APCs come through the core.
-    xe::threading::Wait(waiter.park.get(), true, timeout);
+    // Not alertable: guest APCs come through the core, as a wake.
+    xe::threading::Wait(waiter.park.get(), false, timeout);
     lock.lock();
     std::optional<ThreadInfo> info = core_.QueryThread(waiter.id);
     if (!info || !info->waiting) {

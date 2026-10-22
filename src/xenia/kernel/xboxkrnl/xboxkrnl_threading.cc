@@ -1364,9 +1364,6 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     memory->SystemHeapFree(apc_ptr);
     return X_STATUS_UNSUCCESSFUL;
   }
-  // no-op, just meant to awaken a sleeping alertable thread to process real
-  // apcs
-  thread->thread()->QueueUserCallback([]() {});
   return X_STATUS_SUCCESS;
 }
 dword_result_t NtQueueApcThread_entry(dword_t thread_handle,
