@@ -28,6 +28,13 @@ dword_result_t XAudioGetSpeakerConfig_entry(lpdword_t config_ptr) {
 }
 DECLARE_XBOXKRNL_EXPORT1(XAudioGetSpeakerConfig, kAudio, kImplemented);
 
+// TODO(Ecredes): the override isn't applied; titles seen ignore the result.
+dword_result_t XAudioOverrideSpeakerConfig_entry(dword_t config) {
+  XELOGD("XAudioOverrideSpeakerConfig({:08X})", uint32_t(config));
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(XAudioOverrideSpeakerConfig, kAudio, kStub);
+
 dword_result_t XAudioGetVoiceCategoryVolumeChangeMask_entry(
     lpunknown_t driver_ptr, lpdword_t out_ptr) {
   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
