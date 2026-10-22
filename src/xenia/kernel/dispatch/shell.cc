@@ -204,6 +204,13 @@ std::vector<TimerApc> Shell::TakeTimerApcs(Waiter& waiter) {
   return std::exchange(waiter.timer_apcs, {});
 }
 
+void Shell::UserApcsDelivered(Waiter& waiter) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (waiter.timer_apcs.empty()) {
+    core_.UserApcsDelivered(waiter.id);
+  }
+}
+
 uint32_t Shell::Suspend(Waiter& target, bool* exceeded) {
   Waiter& self = CurrentWaiter();
   uint32_t previous = 0;

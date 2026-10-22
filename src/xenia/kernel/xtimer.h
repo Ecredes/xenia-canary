@@ -10,17 +10,11 @@
 #ifndef XENIA_KERNEL_XTIMER_H_
 #define XENIA_KERNEL_XTIMER_H_
 
-#include <mutex>
-
-#include "xenia/base/threading.h"
-#include "xenia/base/threading_timer_queue.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
-
-class XThread;
 
 class XTimer : public XObject {
  public:
@@ -33,18 +27,8 @@ class XTimer : public XObject {
 
   X_STATUS SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine,
                     uint32_t routine_arg, bool resume);
-  X_STATUS Cancel();
-
- private:
-  // Runs on the timer queue thread when the timer is due.
-  void Fire();
-
-  std::mutex timer_lock_;
-  std::weak_ptr<xe::threading::TimerQueueWaitItem> wait_item_;
-
-  object_ref<XThread> callback_thread_;
-  uint32_t callback_routine_ = 0;
-  uint32_t callback_routine_arg_ = 0;
+  // Disarms; *was_signaled gets the signal state, which this leaves as is.
+  X_STATUS Cancel(bool* was_signaled = nullptr);
 };
 
 }  // namespace kernel

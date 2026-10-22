@@ -705,28 +705,12 @@ void XThread::Terminated() {
   });
 }
 
-void XThread::QueueTimerApc(uint32_t routine, uint32_t routine_arg,
-                            uint64_t time) {
-  {
-    std::lock_guard<std::mutex> lock(timer_apcs_lock_);
-    timer_apcs_.push_back({routine, routine_arg, time});
-  }
-  // Ends an alertable wait; else the next one returns at once.
-  kernel_state()->dispatch()->Run([this](dispatch::Dispatcher& core) {
-    return core.QueueUserApc(waiter_.id);
-  });
-}
-
 void XThread::QueueTimerApcs() {
-  std::vector<TimerApc> due;
-  {
-    std::lock_guard<std::mutex> lock(timer_apcs_lock_);
-    due.swap(timer_apcs_);
-  }
-  for (const TimerApc& apc : due) {
+  for (const dispatch::TimerApc& apc :
+       kernel_state()->dispatch()->TakeTimerApcs(waiter_)) {
     XELOGI("XTimer queuing timer callback {:08X}({:08X}, {:016X})", apc.routine,
-           apc.routine_arg, apc.time);
-    EnqueueApc(apc.routine, apc.routine_arg, uint32_t(apc.time),
+           apc.argument, apc.time);
+    EnqueueApc(apc.routine, apc.argument, uint32_t(apc.time),
                uint32_t(apc.time >> 32));
   }
 }

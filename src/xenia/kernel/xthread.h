@@ -420,10 +420,9 @@ class XThread : public XObject, public cpu::Thread {
 
   // The thread's place in the dispatcher: what it parks on while it waits.
   dispatch::Waiter& waiter() { return waiter_; }
-  // A timer's routine due on this thread. Its APC is queued from the thread
-  // itself (QueueTimerApcs, as it delivers APCs), since building one needs
-  // the thread's guest context.
-  void QueueTimerApc(uint32_t routine, uint32_t routine_arg, uint64_t time);
+  // Queues the timer routines that came due on this thread as guest APCs.
+  // Called from the thread itself, as it delivers APCs, since building one
+  // needs the thread's guest context.
   void QueueTimerApcs();
   uint32_t tls_ptr() const { return tls_static_address_; }
   uint32_t pcr_ptr() const { return pcr_address_; }
@@ -525,13 +524,6 @@ class XThread : public XObject, public cpu::Thread {
   CreationParams creation_params_ = {0};
 
   dispatch::Waiter waiter_;
-  struct TimerApc {
-    uint32_t routine;
-    uint32_t routine_arg;
-    uint64_t time;
-  };
-  std::mutex timer_apcs_lock_;
-  std::vector<TimerApc> timer_apcs_;
 
   std::vector<object_ref<XMutant>> pending_mutant_acquires_;
 

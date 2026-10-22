@@ -202,6 +202,31 @@ TEST_CASE("Tick on a host thread's routine timer signals and queues nothing",
   REQUIRE(shell.TakeTimerApcs(shell.CurrentWaiter()).empty());
 }
 
+TEST_CASE("A routine not yet taken keeps its user APC pending",
+          "[dispatch][shell]") {
+  Shell shell;
+  auto [timer, event] = shell.Read([](Dispatcher& core) {
+    return std::make_pair(core.NewTimer(true), core.NewEvent(false, false));
+  });
+  Waiter& mine = shell.CurrentWaiter();
+  WaitRequest poll;
+  poll.objects = {event};
+  poll.alertable = true;
+  poll.deadline = Shell::GuestNow();
+  // Delivery ran before the routine came due, and finishes after.
+  shell.Run([&](Dispatcher& core) {
+    return core.SetTimer(timer, Shell::GuestNow(), 0,
+                         TimerRoutine{mine.id, 0x82000000, 7});
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  shell.Run([](Dispatcher& core) { return core.Tick(Shell::GuestNow()); });
+  shell.UserApcsDelivered(mine);
+  REQUIRE(shell.Wait(poll) == kStatusUserApc);
+  REQUIRE(shell.TakeTimerApcs(mine).size() == 1);
+  shell.UserApcsDelivered(mine);
+  REQUIRE(shell.Wait(poll) == kStatusTimeout);
+}
+
 }  // namespace test
 }  // namespace dispatch
 }  // namespace kernel

@@ -941,15 +941,16 @@ dword_result_t NtCancelTimer_entry(dword_t timer_handle,
                                    lpdword_t current_state_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
 
+  bool was_signaled = false;
   auto timer =
       kernel_state()->object_table()->LookupObject<XTimer>(timer_handle);
   if (timer) {
-    result = timer->Cancel();
+    result = timer->Cancel(&was_signaled);
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
   if (current_state_ptr) {
-    *current_state_ptr = 0;
+    *current_state_ptr = was_signaled ? 1 : 0;
   }
 
   return result;
@@ -1427,11 +1428,7 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
 
   // Under the APC lock, so an APC queued after this is still reported.
   if (xthread) {
-    dispatch::ThreadId waiter = xthread->waiter().id;
-    ctx->kernel_state->dispatch()->Read([waiter](dispatch::Dispatcher& core) {
-      core.UserApcsDelivered(waiter);
-      return 0;
-    });
+    ctx->kernel_state->dispatch()->UserApcsDelivered(xthread->waiter());
   }
   xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
   return alert_status;
