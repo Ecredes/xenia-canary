@@ -129,6 +129,8 @@ jobs:
           $fingerprint = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
           echo "MSVC $version on ${env:ImageVersion}: toolchain $fingerprint"
           New-Item -ItemType Directory -Force C:\ccache | Out-Null
+          # Diagnostics: the stamp read back empty on every build so far.
+          Get-ChildItem C:\ccache -File | ForEach-Object { echo "restored: $($_.Name) $($_.Length) bytes" }
           $stamp = 'C:\ccache\ltcg-toolchain.txt'
           $saved = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
           if ($saved -ne $fingerprint) {
@@ -251,6 +253,7 @@ jobs:
           $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $env:BUILD_START + 300
           ccache --evict-older-than "${age}s"
           ccache --show-stats
+          Get-ChildItem C:\ccache -File | ForEach-Object { echo "saving: $($_.Name) $($_.Length) bytes" }
 
       - name: Save compiler output
         if: ${{ inputs.save-cache || steps.build.outputs.cold == 'true' }}

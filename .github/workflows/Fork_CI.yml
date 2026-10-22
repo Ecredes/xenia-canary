@@ -184,7 +184,7 @@ jobs:
 
   # The headless automation image (.github/container) for automation/*
   # branches: their Linux build in ghcr.io/ecredes/xenia-headless, tagged with
-  # the branch (slashes as dashes) and the commit. The package is private.
+  # the branch (slashes as dashes) and the commit. The package is public.
   image:
     name: Image
     needs: [setup, build-linux]
