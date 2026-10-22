@@ -23,6 +23,7 @@ namespace xe {
 bool signal_handlers_installed_ = false;
 struct sigaction original_sigill_handler_;
 struct sigaction original_sigsegv_handler_;
+struct sigaction original_sigbus_handler_;
 
 // This can be as large as needed, but isn't often needed.
 // As we will be sometimes firing many exceptions we want to avoid having to
@@ -103,7 +104,8 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     case SIGILL:
       ex.InitializeIllegalInstruction(&thread_context);
       break;
-    case SIGSEGV: {
+    case SIGSEGV:
+    case SIGBUS: {
       Exception::AccessViolationOperation access_violation_operation;
 #if XE_ARCH_AMD64
       // x86_pf_error_code::X86_PF_WRITE
@@ -221,6 +223,24 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // Unclaimed: chain to the action that was installed before ours.
+  const struct sigaction& original =
+      signal_number == SIGILL   ? original_sigill_handler_
+      : signal_number == SIGBUS ? original_sigbus_handler_
+                                : original_sigsegv_handler_;
+  if (original.sa_handler != SIG_DFL && original.sa_handler != SIG_IGN) {
+    if (original.sa_flags & SA_SIGINFO) {
+      original.sa_sigaction(signal_number, signal_info, signal_context);
+    } else {
+      original.sa_handler(signal_number);
+    }
+    return;
+  }
+  // Retry the fault under the default action; ignoring it would loop forever.
+  struct sigaction default_action = {};
+  default_action.sa_handler = SIG_DFL;
+  sigaction(signal_number, &default_action, nullptr);
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
@@ -236,6 +256,9 @@ void ExceptionHandler::Install(Handler fn, void* data) {
     }
     if (sigaction(SIGSEGV, &signal_handler, &original_sigsegv_handler_) != 0) {
       assert_always("Failed to install new SIGSEGV handler");
+    }
+    if (sigaction(SIGBUS, &signal_handler, &original_sigbus_handler_) != 0) {
+      assert_always("Failed to install new SIGBUS handler");
     }
     signal_handlers_installed_ = true;
   }
@@ -276,6 +299,9 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
       }
       if (sigaction(SIGSEGV, &original_sigsegv_handler_, NULL) != 0) {
         assert_always("Failed to restore original SIGSEGV handler");
+      }
+      if (sigaction(SIGBUS, &original_sigbus_handler_, NULL) != 0) {
+        assert_always("Failed to restore original SIGBUS handler");
       }
       signal_handlers_installed_ = false;
     }
