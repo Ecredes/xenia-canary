@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import glob
 import hashlib
 import os
 import pathlib
 import subprocess
+import sys
+from collections.abc import Iterator
 
 from fork_check.findings import CheckerBroken
 
 SCRATCH = pathlib.Path.home() / "src" / "xenia-fork-check"
+# Next to the clone, not in it: `git clean` would delete it.
+LOCK_FILE = SCRATCH.parent / "xenia-fork-check.lock"
 REFERENCE_CLONE = pathlib.Path.home() / "src" / "xenia-canary"
 KEY_FILE = ".fork-check-key"
 SOURCE_GLOBS = ("*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hpp", "*.inl")
@@ -47,6 +53,26 @@ def clean(root: pathlib.Path) -> None:
     build/ say they are up to date, so deleted headers would never come back.
     """
     git(root, "clean", "-ffdxq", "-e", "/build/", "-e", "**/shaders/bytecode/")
+
+
+@contextlib.contextmanager
+def exclusive(lock_file: pathlib.Path | None = None) -> Iterator[None]:
+    """Holds the scratch clone for a whole run.
+
+    Every run checks out and cleans the one clone, so two concurrent runs
+    would analyze each other's files. The lock goes with the process, even
+    when it is killed.
+    """
+    lock_file = lock_file or LOCK_FILE
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("waiting for another fork check to finish with "
+                  f"{SCRATCH}", file=sys.stderr, flush=True)
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
 
 
 def prepare(win_repo: str, commit: str, base: str) -> pathlib.Path:

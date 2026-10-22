@@ -201,7 +201,8 @@ def _run_audit(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        return _run_audit(args)
+        with snapshot.exclusive():
+            return _run_audit(args)
     except CheckerBroken as e:
         print(f"checker broken: {e}", file=sys.stderr)
         return EXIT_BROKEN

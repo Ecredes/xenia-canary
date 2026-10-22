@@ -39,6 +39,9 @@ Windows repo's branch heads into it, checks the commit out, configures CMake
 (Ninja, Debug, clang-20, tests on) for `compile_commands.json`, generates the
 SPIR-V shader headers, and runs the tools on the touched C/C++ files.
 Paths excluded by upstream's `.codacy.yaml` are skipped by every tool.
+Checks and audits from other sessions share the one clone, so a run holds
+`~/src/xenia-fork-check.lock` from start to finish; a second run prints that
+it is waiting and starts when the first ends.
 
 clang-tidy analyzes a touched header through a compiled file that includes
 it, directly or through other headers; headers only Windows, D3D12, a64 or

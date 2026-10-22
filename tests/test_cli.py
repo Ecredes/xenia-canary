@@ -1,4 +1,6 @@
 import io
+import pathlib
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from unittest import mock
@@ -7,6 +9,14 @@ from fork_check import cli
 
 
 class CliArgsTest(unittest.TestCase):
+    def setUp(self):
+        # main() takes the scratch lock; keep the tests off the real one.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(cli.snapshot, "LOCK_FILE",
+                                    pathlib.Path(tmp.name) / "lock")
+        patcher.start()
+        self.addCleanup(patcher.stop)
     def test_unknown_tool_is_usage_error(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             cli.parse_args(["--win-repo", "/w", "--commit", "c", "--base", "b",

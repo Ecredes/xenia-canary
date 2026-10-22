@@ -161,3 +161,35 @@ class ShaderTargetsTest(unittest.TestCase):
     def test_bare_names_only(self):
         self.assertEqual(shader_targets(NINJA_TARGETS),
                          ["xenia-gpu-vulkan-spirv-shaders", "xenia-ui-vulkan-spirv-shaders"])
+
+
+class ExclusiveTest(unittest.TestCase):
+    def test_second_run_waits_for_the_first(self):
+        # Two concurrent checks used to share the scratch clone, and one's
+        # checkout removed files the other was analyzing.
+        import io
+        import threading
+        from contextlib import redirect_stderr
+        with tempfile.TemporaryDirectory() as d:
+            lock = pathlib.Path(d) / "lock"
+            events = []
+            entered = threading.Event()
+
+            def second():
+                with snapshot.exclusive(lock):
+                    events.append("second")
+
+            err = io.StringIO()
+            with redirect_stderr(err):
+                with snapshot.exclusive(lock):
+                    thread = threading.Thread(target=second)
+                    thread.start()
+                    for _ in range(100):
+                        if "waiting" in err.getvalue():
+                            entered.set()
+                            break
+                        threading.Event().wait(0.01)
+                    events.append("first")
+                thread.join(5)
+            self.assertTrue(entered.is_set())
+            self.assertEqual(events, ["first", "second"])

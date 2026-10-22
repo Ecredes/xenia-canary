@@ -78,7 +78,8 @@ def _run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        return _run(args)
+        with snapshot.exclusive():
+            return _run(args)
     except CheckerBroken as e:
         print(f"checker broken: {e}", file=sys.stderr)
         return EXIT_BROKEN
