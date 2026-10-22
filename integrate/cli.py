@@ -11,6 +11,7 @@ so the next regeneration replays them.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import traceback
@@ -30,6 +31,14 @@ DEFAULT_LIST = Path(__file__).resolve().parent.parent / "config" / "integration.
 # rerere replays recorded resolutions; autoupdate stages them so a merge
 # whose conflicts were all replayed can be committed without a person.
 RERERE = ("-c", "rerere.enabled=true", "-c", "rerere.autoupdate=true")
+POWERSHELL_FLAGS = {"--resume": "-Resume", "--clean": "-Clean"}
+
+
+def flag(name: str) -> str:
+    """A flag as the user types it: integrate.ps1 takes -Resume, not --resume."""
+    if os.environ.get("INTEGRATE_CALLER") == "powershell":
+        return POWERSHELL_FLAGS[name]
+    return name
 
 
 def read_list(path: Path) -> list[str]:
@@ -84,7 +93,7 @@ def start(repo: Path, path: Path, upstream_sha: str) -> None:
         return
     if merge_in_progress(path):
         raise Broken(f"{path} has a merge in progress; resolve it and rerun "
-                     f"with --resume, or --clean")
+                     f"with {flag('--resume')}, or {flag('--clean')}")
     if dirty(path):
         raise Broken(f"{path} has uncommitted changes")
     if git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() != BRANCH:
@@ -94,7 +103,7 @@ def start(repo: Path, path: Path, upstream_sha: str) -> None:
 
 def resume(path: Path) -> None:
     if not path.exists():
-        raise Broken(f"{path} doesn't exist; run without --resume")
+        raise Broken(f"{path} doesn't exist; run without {flag('--resume')}")
     if merge_in_progress(path):
         conflicts = unmerged_paths(path)
         if conflicts:
@@ -217,8 +226,9 @@ def _run(args: argparse.Namespace) -> int:
         print(f"\nconflict merging {conflict}: "
               f"{', '.join(unmerged_paths(path))}\n"
               f"  Resolve and `git add` them in {path} (don't commit), then "
-              f"rerun with --resume.\n  If a topic branch is wrong, fix it "
-              f"there instead and rerun without --resume.", file=sys.stderr)
+              f"rerun with {flag('--resume')}.\n  If a topic branch is wrong, "
+              f"fix it there instead and rerun without {flag('--resume')}.",
+              file=sys.stderr)
         return EXIT_CONFLICT
     if args.push:
         git(path, "push", "-q", "--force-with-lease", "origin",

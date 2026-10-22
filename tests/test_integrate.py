@@ -135,6 +135,7 @@ class MergeTest(RepoTest):
         code, _, err = self.main()
         self.assertEqual(code, cli.EXIT_CONFLICT)
         self.assertIn("conflict merging fix-b: a.cc", err)
+        self.assertIn("rerun with --resume.", err)
 
         # Resuming before resolving stays broken.
         self.assertEqual(self.main("--resume")[0], cli.EXIT_BROKEN)
@@ -182,6 +183,16 @@ class MergeTest(RepoTest):
                              "--repo", str(self.repo), "--no-fetch"])
         self.assertEqual(code, cli.EXIT_OK)
         build.assert_called_once_with(self.worktree, "release", False)
+
+
+class FlagTest(unittest.TestCase):
+    def test_hints_name_the_callers_flags(self):
+        # `--resume` typed into integrate.ps1 bound to -Upstream.
+        with mock.patch.dict(cli.os.environ, {"INTEGRATE_CALLER": "powershell"}):
+            self.assertEqual(cli.flag("--resume"), "-Resume")
+            self.assertEqual(cli.flag("--clean"), "-Clean")
+        with mock.patch.dict(cli.os.environ, {}, clear=True):
+            self.assertEqual(cli.flag("--resume"), "--resume")
 
 
 if __name__ == "__main__":
