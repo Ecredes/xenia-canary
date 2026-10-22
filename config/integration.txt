@@ -33,3 +33,6 @@ origin/coherence/9-default
 # Fork features: the automation stack, by its top branch. It contains the
 # headless host series, testing/telemetry (rebased) and hid/remote-input.
 origin/automation/10-threads
+
+# Guest threading redesign, by its top step (design/threading docs).
+origin/threading/2-core-waitables
